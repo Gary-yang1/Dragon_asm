@@ -1,0 +1,49 @@
+# ============================================================
+# ASM 仓库忽略规则
+# 原则：远程仓库只放业务代码 + README.md。
+# 规划/约束/设计文档为本地协作产物，不入库（仍保留在本地工作区供阅读）。
+# ============================================================
+
+# === 规划 / 协作 / 设计文档（本地保留，不推送远程） ===
+/AGENTS.md
+/CLAUDE.md
+/docs/
+/.claude/
+
+# === 环境与密钥（绝不提交） ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+config.local.*
+/secrets/
+
+# === Go ===
+/bin/
+/build/
+*.exe
+*.test
+*.out
+coverage.*
+/vendor/
+
+# === 前端（web/） ===
+node_modules/
+/web/node_modules/
+/web/dist/
+.vite/
+*.local
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# === IDE / 编辑器 / 系统 ===
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*~
