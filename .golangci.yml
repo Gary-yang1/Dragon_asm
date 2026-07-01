@@ -1,0 +1,70 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  # Disable all defaults, then enable explicitly so additions are intentional.
+  # In v2 `default: none` replaces the removed `disable-all: true`.
+  default: none
+  enable:
+    # Core correctness
+    - errcheck       # unchecked errors
+    - govet          # go vet equivalent
+    - staticcheck    # SA/S/QF rules from staticcheck.io
+    - ineffassign    # assigned but never used
+
+    # Style & simplification
+    - misspell       # typos in comments/strings
+    - revive         # extensible, low-noise replacement for golint
+
+    # Safety
+    - gosec          # common security issues (G-codes)
+    - nilerr         # returning nil err when non-nil is intended
+    - bodyclose      # HTTP response body not closed
+
+    # Generated code — skip entirely
+    # (sqlc output lives in internal/platform/db/generated/)
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+        - name: var-naming
+          severity: warning
+        - name: unused-parameter
+          severity: warning
+    gosec:
+      excludes:
+        - G204  # subprocess with variable — not applicable (no shell-out)
+
+  # In v2 path-based linter exclusions live under `linters.exclusions`
+  # (the v1 `issues.exclude-rules` was removed).
+  exclusions:
+    rules:
+      # Test files: relax security rules and allow testify assertions that gosec may flag.
+      - path: "_test\\.go"
+        linters:
+          - gosec
+          - errcheck   # t.Error / t.Fatal patterns
+      # Generated sqlc output — skip all linting.
+      - path: "internal/platform/db/generated/"
+        linters:
+          - all
+
+# In golangci-lint v2, gofmt/goimports are formatters, not linters.
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/Gary-yang1/Dragon_asm
+
+issues:
+  # Show all issues, not just the first 3 per linter.
+  max-issues-per-linter: 0
+  max-same-issues: 0

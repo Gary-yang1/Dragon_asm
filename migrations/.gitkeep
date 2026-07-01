@@ -1,0 +1,4 @@
+# migrations directory — managed by golang-migrate
+# SQL files follow the naming convention: {version}_{description}.{up,down}.sql
+# Example: 000001_create_projects.up.sql / 000001_create_projects.down.sql
+# Generate a new pair: make migrate-create NAME=create_projects_table

@@ -35,8 +35,10 @@ cmd/api, cmd/worker   # 两个进程入口
 internal/             # 业务模块：auth project asset discovery exposure risk ticket report notification
 migrations/           # 数据库迁移（golang-migrate）
 api/                  # OpenAPI 契约
-web/                  # 前端（React + Ant Design Pro）
+web/                  # 前端（React + Ant Design Pro）— 待 MF-0 里程碑创建
 ```
+
+> **当前状态**：`migrations/` 和 `api/` 目录已创建（含占位文件），`web/` 在前端里程碑 MF-0 时初始化。
 
 ## 本地开发
 
