@@ -9,6 +9,28 @@ import (
 	"time"
 )
 
+type AuditLog struct {
+	ID           uint64         `db:"id" json:"id"`
+	TenantID     string         `db:"tenant_id" json:"tenant_id"`
+	OrgID        string         `db:"org_id" json:"org_id"`
+	ProjectID    uint64         `db:"project_id" json:"project_id"`
+	ActorID      string         `db:"actor_id" json:"actor_id"`
+	ActorType    string         `db:"actor_type" json:"actor_type"`
+	Action       string         `db:"action" json:"action"`
+	ResourceType string         `db:"resource_type" json:"resource_type"`
+	ResourceID   string         `db:"resource_id" json:"resource_id"`
+	Result       string         `db:"result" json:"result"`
+	Ip           string         `db:"ip" json:"ip"`
+	UserAgent    string         `db:"user_agent" json:"user_agent"`
+	RequestID    string         `db:"request_id" json:"request_id"`
+	BeforeJson   sql.NullString `db:"before_json" json:"before_json"`
+	AfterJson    sql.NullString `db:"after_json" json:"after_json"`
+	MetadataJson sql.NullString `db:"metadata_json" json:"metadata_json"`
+	ErrorCode    string         `db:"error_code" json:"error_code"`
+	ErrorMessage string         `db:"error_message" json:"error_message"`
+	CreatedAt    time.Time      `db:"created_at" json:"created_at"`
+}
+
 type Project struct {
 	ID           uint64         `db:"id" json:"id"`
 	TenantID     string         `db:"tenant_id" json:"tenant_id"`

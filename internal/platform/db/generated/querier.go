@@ -16,6 +16,9 @@ type Querier interface {
 	GetProjectByID(ctx context.Context, id uint64) (Project, error)
 	// Returns the member's role, or sql.ErrNoRows when the user is not a member.
 	GetProjectMemberRole(ctx context.Context, arg GetProjectMemberRoleParams) (string, error)
+	// sqlc queries for the audit_log domain.
+	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
+	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
 }
 
 var _ Querier = (*Queries)(nil)
