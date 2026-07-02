@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Gary-yang1/Dragon_asm/internal/auth"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/httpx"
 )
 
@@ -32,8 +33,22 @@ func main() {
 	root := engine.Group("/")
 	httpx.RegisterHealthRoute(root, version)
 
-	// All authenticated API routes live under /api/v1 (populated in later milestones)
-	// api := engine.Group("/api/v1")
+	// Authenticated API routes live under /api/v1. JWT secrets come from the
+	// environment (JWT_ACCESS_SECRET / JWT_REFRESH_SECRET); when they are missing
+	// or too short the group is left unwired (fail-closed) instead of falling
+	// back to an insecure default. A real login/token-issuance endpoint arrives
+	// in a later milestone; until then the group has no routes.
+	if authCfg, err := auth.LoadConfigFromEnv(); err == nil {
+		if mgr, err := auth.NewManager(authCfg); err == nil {
+			api := engine.Group("/api/v1")
+			api.Use(auth.RequireAuth(mgr))
+			logger.Info("api auth middleware wired", "group", "/api/v1")
+		} else {
+			logger.Warn("jwt manager init failed; /api/v1 left unwired", "error", err)
+		}
+	} else {
+		logger.Warn("jwt secrets not configured; /api/v1 left unwired", "error", err)
+	}
 
 	srv := &http.Server{
 		Addr:         net.JoinHostPort("", port),

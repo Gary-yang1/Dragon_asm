@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/casbin/casbin/v2 v2.88.0
 	github.com/gin-gonic/gin v1.9.1
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/hibiken/asynq v0.24.1
 	github.com/stretchr/testify v1.9.0
