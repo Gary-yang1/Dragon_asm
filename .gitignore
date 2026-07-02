@@ -30,8 +30,9 @@ config.local.*
 *.out
 coverage.*
 /vendor/
-# sqlc generated code (regenerated via `make sqlc`)
-/internal/platform/db/generated/
+# sqlc generated code is committed so the repo builds without running `make sqlc`.
+# Regenerate with: make sqlc
+# /internal/platform/db/generated/
 
 # === 前端（web/） ===
 node_modules/
