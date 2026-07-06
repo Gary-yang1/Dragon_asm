@@ -9,6 +9,21 @@ import (
 	"time"
 )
 
+type AppUser struct {
+	ID           uint64    `db:"id" json:"id"`
+	TenantID     string    `db:"tenant_id" json:"tenant_id"`
+	OrgID        string    `db:"org_id" json:"org_id"`
+	Username     string    `db:"username" json:"username"`
+	DisplayName  string    `db:"display_name" json:"display_name"`
+	PasswordHash string    `db:"password_hash" json:"password_hash"`
+	Status       string    `db:"status" json:"status"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy    string    `db:"created_by" json:"created_by"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
 type AuditLog struct {
 	ID           uint64         `db:"id" json:"id"`
 	TenantID     string         `db:"tenant_id" json:"tenant_id"`

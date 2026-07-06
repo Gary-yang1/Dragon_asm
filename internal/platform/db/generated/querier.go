@@ -6,9 +6,12 @@ package dbgen
 
 import (
 	"context"
+	"database/sql"
 )
 
 type Querier interface {
+	// Provisioning helper (used by seeding/tests; no public registration endpoint in M0-6).
+	CreateUser(ctx context.Context, arg CreateUserParams) (sql.Result, error)
 	GetProjectByCode(ctx context.Context, arg GetProjectByCodeParams) (Project, error)
 	// sqlc queries for the project domain.
 	// Every read filters on the soft-delete sentinel so soft-deleted rows are
@@ -16,6 +19,12 @@ type Querier interface {
 	GetProjectByID(ctx context.Context, id uint64) (Project, error)
 	// Returns the member's role, or sql.ErrNoRows when the user is not a member.
 	GetProjectMemberRole(ctx context.Context, arg GetProjectMemberRoleParams) (string, error)
+	GetUserByID(ctx context.Context, id uint64) (AppUser, error)
+	// sqlc queries for the auth (app_user) domain.
+	// Every read filters on the soft-delete sentinel so soft-deleted rows are
+	// excluded by default; callers never need to remember to add the filter.
+	// Login lookup. username is globally unique, so this returns at most one live row.
+	GetUserByUsername(ctx context.Context, username string) (AppUser, error)
 	// sqlc queries for the audit_log domain.
 	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error

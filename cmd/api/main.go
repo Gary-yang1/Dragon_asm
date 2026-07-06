@@ -14,6 +14,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Gary-yang1/Dragon_asm/internal/auth"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
+	asmcasbin "github.com/Gary-yang1/Dragon_asm/internal/platform/auth/casbin"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/db"
+	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/httpx"
 )
 
@@ -35,19 +39,14 @@ func main() {
 
 	// Authenticated API routes live under /api/v1. JWT secrets come from the
 	// environment (JWT_ACCESS_SECRET / JWT_REFRESH_SECRET); when they are missing
-	// or too short the group is left unwired (fail-closed) instead of falling
-	// back to an insecure default. A real login/token-issuance endpoint arrives
-	// in a later milestone; until then the group has no routes.
-	if authCfg, err := auth.LoadConfigFromEnv(); err == nil {
-		if mgr, err := auth.NewManager(authCfg); err == nil {
-			api := engine.Group("/api/v1")
-			api.Use(auth.RequireAuth(mgr))
-			logger.Info("api auth middleware wired", "group", "/api/v1")
-		} else {
-			logger.Warn("jwt manager init failed; /api/v1 left unwired", "error", err)
-		}
-	} else {
-		logger.Warn("jwt secrets not configured; /api/v1 left unwired", "error", err)
+	// or too short — or the database is unreachable — the auth routes are left
+	// unwired (fail-closed) instead of falling back to an insecure default.
+	//
+	// The auth handler mounts its own per-route middleware: /auth/login and
+	// /auth/refresh are public (they mint tokens), while /auth/me and
+	// /auth/permissions require a valid access token.
+	if err := wireAuthRoutes(engine, logger); err != nil {
+		logger.Warn("auth routes left unwired (fail-closed)", "error", err)
 	}
 
 	srv := &http.Server{
@@ -85,4 +84,51 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// wireAuthRoutes builds the auth stack (JWT manager, DB-backed user repository,
+// audit sink, Casbin enforcer) and registers the auth routes under /api/v1. Any
+// missing prerequisite — unset/short JWT secrets, an unreachable database, or an
+// enforcer that fails to construct — returns an error so the caller can leave
+// the routes unwired (fail-closed) rather than serving insecurely.
+func wireAuthRoutes(engine *gin.Engine, logger *slog.Logger) error {
+	authCfg, err := auth.LoadConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	mgr, err := auth.NewManager(authCfg)
+	if err != nil {
+		return err
+	}
+
+	sqlDB, err := db.Open(db.LoadConfigFromEnv())
+	if err != nil {
+		return err
+	}
+	queries := dbgen.New(sqlDB)
+
+	// The Casbin policy store is wired in a later milestone; construct an
+	// adapterless enforcer so /auth/permissions returns the (currently empty)
+	// policy set without failing. Login/refresh/me do not depend on it.
+	enforcer, err := asmcasbin.NewEnforcer(nil)
+	if err != nil {
+		_ = sqlDB.Close()
+		return err
+	}
+
+	auditSvc := audit.NewService(audit.NewRepository(queries))
+	userRepo := auth.NewUserRepository(queries)
+	authSvc := auth.NewService(userRepo, mgr, enforcer, auditSvc)
+
+	// Split /api/v1 into public (login, refresh) and protected (everything
+	// else) groups. Business routes added to apiProtected automatically get
+	// RequireAuth — no route can accidentally skip authentication.
+	api := engine.Group("/api/v1")
+	apiPublic := api.Group("")
+	apiProtected := api.Group("")
+	apiProtected.Use(auth.RequireAuth(mgr))
+
+	auth.NewHandler(authSvc).RegisterRoutes(apiPublic, apiProtected)
+	logger.Info("auth routes wired", "group", "/api/v1")
+	return nil
 }
