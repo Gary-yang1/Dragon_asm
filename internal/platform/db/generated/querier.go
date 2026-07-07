@@ -12,6 +12,12 @@ import (
 type Querier interface {
 	// Provisioning helper (used by seeding/tests; no public registration endpoint in M0-6).
 	CreateUser(ctx context.Context, arg CreateUserParams) (sql.Result, error)
+	// sqlc queries for the asset domain.
+	// Every read is scoped by project_id AND filters on the soft-delete sentinel, so
+	// soft-deleted rows and cross-project rows are excluded by default; callers never
+	// need to remember to add either filter.
+	GetAssetByID(ctx context.Context, arg GetAssetByIDParams) (Asset, error)
+	GetAssetByKey(ctx context.Context, arg GetAssetByKeyParams) (Asset, error)
 	GetProjectByCode(ctx context.Context, arg GetProjectByCodeParams) (Project, error)
 	// sqlc queries for the project domain.
 	// Every read filters on the soft-delete sentinel so soft-deleted rows are
@@ -28,6 +34,13 @@ type Querier interface {
 	// sqlc queries for the audit_log domain.
 	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
+	ListAssetsByProject(ctx context.Context, arg ListAssetsByProjectParams) ([]Asset, error)
+	// Idempotent import: a new normalized asset_key inserts; a repeat within the same
+	// project updates only the discovery-refreshable fields (last_seen, source,
+	// confidence, display_name, value, updated_by). first_seen, owner, business_unit
+	// and status are preserved so a re-import never resets ownership or un-ignores an
+	// asset an operator deliberately set to 'ignored'/'inactive'.
+	UpsertAsset(ctx context.Context, arg UpsertAssetParams) (sql.Result, error)
 }
 
 var _ Querier = (*Queries)(nil)

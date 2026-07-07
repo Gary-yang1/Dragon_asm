@@ -24,6 +24,29 @@ type AppUser struct {
 	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
+type Asset struct {
+	ID           uint64    `db:"id" json:"id"`
+	TenantID     string    `db:"tenant_id" json:"tenant_id"`
+	OrgID        string    `db:"org_id" json:"org_id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	AssetType    string    `db:"asset_type" json:"asset_type"`
+	AssetKey     string    `db:"asset_key" json:"asset_key"`
+	DisplayName  string    `db:"display_name" json:"display_name"`
+	Value        string    `db:"value" json:"value"`
+	Source       string    `db:"source" json:"source"`
+	Owner        string    `db:"owner" json:"owner"`
+	BusinessUnit string    `db:"business_unit" json:"business_unit"`
+	Confidence   uint8     `db:"confidence" json:"confidence"`
+	Status       string    `db:"status" json:"status"`
+	FirstSeen    time.Time `db:"first_seen" json:"first_seen"`
+	LastSeen     time.Time `db:"last_seen" json:"last_seen"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy    string    `db:"created_by" json:"created_by"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
 type AuditLog struct {
 	ID           uint64         `db:"id" json:"id"`
 	TenantID     string         `db:"tenant_id" json:"tenant_id"`
