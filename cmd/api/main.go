@@ -13,12 +13,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Gary-yang1/Dragon_asm/internal/asset"
 	"github.com/Gary-yang1/Dragon_asm/internal/auth"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
 	asmcasbin "github.com/Gary-yang1/Dragon_asm/internal/platform/auth/casbin"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/db"
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/httpx"
+	"github.com/Gary-yang1/Dragon_asm/internal/project"
 )
 
 func main() {
@@ -39,14 +41,10 @@ func main() {
 
 	// Authenticated API routes live under /api/v1. JWT secrets come from the
 	// environment (JWT_ACCESS_SECRET / JWT_REFRESH_SECRET); when they are missing
-	// or too short — or the database is unreachable — the auth routes are left
-	// unwired (fail-closed) instead of falling back to an insecure default.
-	//
-	// The auth handler mounts its own per-route middleware: /auth/login and
-	// /auth/refresh are public (they mint tokens), while /auth/me and
-	// /auth/permissions require a valid access token.
-	if err := wireAuthRoutes(engine, logger); err != nil {
-		logger.Warn("auth routes left unwired (fail-closed)", "error", err)
+	// or too short — or the database is unreachable — the business routes are
+	// left unwired (fail-closed) instead of falling back to an insecure default.
+	if err := wireAPIRoutes(engine, logger); err != nil {
+		logger.Warn("api routes left unwired (fail-closed)", "error", err)
 	}
 
 	srv := &http.Server{
@@ -86,12 +84,13 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// wireAuthRoutes builds the auth stack (JWT manager, DB-backed user repository,
-// audit sink, Casbin enforcer) and registers the auth routes under /api/v1. Any
-// missing prerequisite — unset/short JWT secrets, an unreachable database, or an
-// enforcer that fails to construct — returns an error so the caller can leave
-// the routes unwired (fail-closed) rather than serving insecurely.
-func wireAuthRoutes(engine *gin.Engine, logger *slog.Logger) error {
+// wireAPIRoutes builds the shared platform stack (DB, JWT manager, audit sink,
+// Casbin enforcer) and the domain services (auth, project, asset), then
+// registers the API routes under /api/v1. Any missing prerequisite — unset/short
+// JWT secrets, an unreachable database, or an enforcer that fails to construct —
+// returns an error so the caller can leave the routes unwired (fail-closed)
+// rather than serving insecurely.
+func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 	authCfg, err := auth.LoadConfigFromEnv()
 	if err != nil {
 		return err
@@ -108,17 +107,29 @@ func wireAuthRoutes(engine *gin.Engine, logger *slog.Logger) error {
 	queries := dbgen.New(sqlDB)
 
 	// The Casbin policy store is wired in a later milestone; construct an
-	// adapterless enforcer so /auth/permissions returns the (currently empty)
-	// policy set without failing. Login/refresh/me do not depend on it.
+	// adapterless enforcer and seed the MVP role→permission matrix in memory so
+	// action-permission checks (asset:read / asset:write / …) are usable in
+	// production. Without the seed, every business route would 403 even for
+	// project members. Project access still works via project_member rows.
 	enforcer, err := asmcasbin.NewEnforcer(nil)
 	if err != nil {
 		_ = sqlDB.Close()
 		return err
 	}
+	if err := asmcasbin.SeedMVPolicies(enforcer); err != nil {
+		_ = sqlDB.Close()
+		return err
+	}
 
 	auditSvc := audit.NewService(audit.NewRepository(queries))
+
+	// Domain services share the same queries and enforcer. The asset service is
+	// given the *sql.DB so its mutating operations run the asset write and the
+	// audit event in one transaction (commit together, or roll back together).
 	userRepo := auth.NewUserRepository(queries)
 	authSvc := auth.NewService(userRepo, mgr, enforcer, auditSvc)
+	projectSvc := project.NewService(project.NewRepository(queries), enforcer)
+	assetSvc := asset.NewService(asset.NewRepository(queries), asset.WithDB(sqlDB))
 
 	// Split /api/v1 into public (login, refresh) and protected (everything
 	// else) groups. Business routes added to apiProtected automatically get
@@ -129,6 +140,7 @@ func wireAuthRoutes(engine *gin.Engine, logger *slog.Logger) error {
 	apiProtected.Use(auth.RequireAuth(mgr))
 
 	auth.NewHandler(authSvc).RegisterRoutes(apiPublic, apiProtected)
-	logger.Info("auth routes wired", "group", "/api/v1")
+	asset.NewHandler(assetSvc, projectSvc, enforcer, logger).RegisterRoutes(apiProtected)
+	logger.Info("api routes wired", "group", "/api/v1")
 	return nil
 }

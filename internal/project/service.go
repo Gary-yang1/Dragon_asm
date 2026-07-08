@@ -6,15 +6,15 @@ import (
 	"fmt"
 
 	"github.com/casbin/casbin/v2"
+
+	asmcasbin "github.com/Gary-yang1/Dragon_asm/internal/platform/auth/casbin"
 )
 
 // PermAccess is the permission point the project access boundary enforces.
 // Project-scoped users satisfy it via project membership; global roles satisfy
-// it ONLY via an explicit Casbin policy (never by default).
-//
-// TODO: move alongside the centralized casbin permission constants once that
-// package is in scope for this module.
-const PermAccess = "project:access"
+// it via an explicit Casbin policy seeded in the MVP matrix (PermProjectAccess).
+// It is an alias for the canonical casbin constant so the two never drift.
+const PermAccess = asmcasbin.PermProjectAccess
 
 // Sentinel service errors.
 var (
@@ -68,24 +68,42 @@ func (s *Service) RequireActive(p *Project) error {
 //
 // Denial yields ErrForbidden.
 func (s *Service) Authorize(ctx context.Context, userID string, projectID uint64) error {
-	if _, err := s.repo.GetByID(ctx, projectID); err != nil {
-		return err
+	_, _, err := s.Access(ctx, userID, projectID)
+	return err
+}
+
+// Access resolves the project access boundary for (userID, projectID) and, in
+// one call, returns the live project and the user's membership role ("" when
+// access was granted via an explicit Casbin permission rather than membership).
+// It mirrors Authorize's three steps:
+//
+//  1. The project must exist (ErrNotFound).
+//  2. An explicit Casbin permission grants access; the role is unknown on this
+//     path (returns "").
+//  3. Otherwise the user must be a member; the role is the project_member role.
+//
+// Denial yields ErrForbidden. Callers use the returned role to enforce
+// action-level RBAC against the seeded role→permission matrix.
+func (s *Service) Access(ctx context.Context, userID string, projectID uint64) (*Project, string, error) {
+	p, err := s.repo.GetByID(ctx, projectID)
+	if err != nil {
+		return nil, "", err
 	}
 
 	// Step 2: explicit permission judgment (covers global roles via domain "*").
 	if ok, err := s.enforcer.Enforce(userID, projectDomain(projectID), PermAccess, "allow"); err == nil && ok {
-		return nil
+		return p, "", nil
 	}
 
-	// Step 3: project-scoped membership.
-	member, err := s.repo.IsMember(ctx, projectID, userID)
+	// Step 3: project-scoped membership — resolve the role for the caller.
+	role, err := s.repo.MemberRole(ctx, projectID, userID)
 	if err != nil {
-		return err
+		if errors.Is(err, ErrNotFound) {
+			return nil, "", ErrForbidden
+		}
+		return nil, "", err
 	}
-	if member {
-		return nil
-	}
-	return ErrForbidden
+	return p, role, nil
 }
 
 // projectDomain renders the numeric project id as the Casbin domain string.

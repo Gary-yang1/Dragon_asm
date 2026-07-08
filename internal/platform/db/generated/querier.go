@@ -10,6 +10,7 @@ import (
 )
 
 type Querier interface {
+	CountAssetsByProject(ctx context.Context, projectID uint64) (int64, error)
 	// Provisioning helper (used by seeding/tests; no public registration endpoint in M0-6).
 	CreateUser(ctx context.Context, arg CreateUserParams) (sql.Result, error)
 	// sqlc queries for the asset domain.
@@ -35,6 +36,13 @@ type Querier interface {
 	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
 	ListAssetsByProject(ctx context.Context, arg ListAssetsByProjectParams) ([]Asset, error)
+	// Operator edit of the non-key metadata fields. asset_type/asset_key/value are
+	// the normalized identity and are never touched here; status is restricted to
+	// the live statuses (deleted is reserved for the soft-delete operation). The
+	// WHERE clause carries both id and project_id so a cross-project update is
+	// impossible at the DB layer, and the soft-delete filter prevents editing a
+	// tombstoned row.
+	UpdateAssetFields(ctx context.Context, arg UpdateAssetFieldsParams) error
 	// Idempotent import: a new normalized asset_key inserts; a repeat within the same
 	// project updates only the discovery-refreshable fields (last_seen, source,
 	// confidence, display_name, value, updated_by). first_seen, owner, business_unit

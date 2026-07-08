@@ -42,6 +42,11 @@ const (
 	PermNotifWrite    = "notification:write"
 	PermAdminManage   = "admin:manage"
 	PermAuditRead     = "audit:read"
+	// PermProjectAccess is the project-boundary permission: a role holding it
+	// reaches a project even without a project_member row (the explicit/global
+	// path in project.Service.Access). Only the cross-project admin roles are
+	// seeded with it; project-scoped roles enter via membership instead.
+	PermProjectAccess = "project:access"
 )
 
 // GlobalDomain is the sentinel project_id used by roles that span all projects.

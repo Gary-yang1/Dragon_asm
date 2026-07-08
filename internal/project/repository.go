@@ -21,6 +21,9 @@ type Repository interface {
 	GetByCode(ctx context.Context, tenantID, code string) (*Project, error)
 	// IsMember reports whether userID is an active member of projectID.
 	IsMember(ctx context.Context, projectID uint64, userID string) (bool, error)
+	// MemberRole returns the role of userID in projectID, or ErrNotFound when the
+	// user is not a member of the live project.
+	MemberRole(ctx context.Context, projectID uint64, userID string) (string, error)
 }
 
 // sqlcRepository implements Repository over dbgen queries. The underlying sqlc
@@ -67,6 +70,17 @@ func (r *sqlcRepository) IsMember(ctx context.Context, projectID uint64, userID 
 		return false, mapErr(err)
 	}
 	return true, nil
+}
+
+func (r *sqlcRepository) MemberRole(ctx context.Context, projectID uint64, userID string) (string, error) {
+	role, err := r.q.GetProjectMemberRole(ctx, dbgen.GetProjectMemberRoleParams{
+		ProjectID: projectID,
+		UserID:    userID,
+	})
+	if err != nil {
+		return "", mapErr(err)
+	}
+	return role, nil
 }
 
 // mapErr converts database/sql's no-rows sentinel into the domain ErrNotFound.

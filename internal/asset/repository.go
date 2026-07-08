@@ -25,6 +25,28 @@ type Repository interface {
 	GetByKey(ctx context.Context, projectID uint64, assetKey string) (*Asset, error)
 	GetByID(ctx context.Context, projectID, id uint64) (*Asset, error)
 	List(ctx context.Context, projectID uint64, limit, offset int32) ([]*Asset, error)
+	// Count returns the number of live assets in a project (for list pagination
+	// totals). It uses the same project + soft-delete scoping as List.
+	Count(ctx context.Context, projectID uint64) (int64, error)
+	// Update mutates the non-key metadata fields of one project-scoped live asset.
+	// The WHERE clause carries project_id so a cross-project update is impossible
+	// at the DB layer. It returns ErrNotFound when no live row matched.
+	Update(ctx context.Context, in UpdateParams) error
+}
+
+// UpdateParams carries the operator-editable fields for Update. The identity
+// fields (asset_type/asset_key/value) are deliberately absent: they are the
+// normalized key and are never edited. Status is restricted to the live
+// statuses by the service before this is populated.
+type UpdateParams struct {
+	ProjectID    uint64
+	ID           uint64
+	DisplayName  string
+	Source       string
+	Owner        string
+	BusinessUnit string
+	Status       string
+	ActorID      string
 }
 
 // UpsertParams carries the already-normalized fields for an idempotent write.
@@ -113,6 +135,31 @@ func (r *sqlcRepository) List(ctx context.Context, projectID uint64, limit, offs
 		out = append(out, toDomain(a))
 	}
 	return out, nil
+}
+
+func (r *sqlcRepository) Count(ctx context.Context, projectID uint64) (int64, error) {
+	n, err := r.q.CountAssetsByProject(ctx, projectID)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// Update applies the editable fields. sqlc's :exec does not surface
+// rows-affected, so the service re-reads via GetByID to confirm the update
+// landed; a non-existent or soft-deleted asset is therefore surfaced as
+// ErrNotFound from that re-read rather than as a silent no-op.
+func (r *sqlcRepository) Update(ctx context.Context, in UpdateParams) error {
+	return r.q.UpdateAssetFields(ctx, dbgen.UpdateAssetFieldsParams{
+		DisplayName:  in.DisplayName,
+		Source:       in.Source,
+		Owner:        in.Owner,
+		BusinessUnit: in.BusinessUnit,
+		Status:       in.Status,
+		UpdatedBy:    in.ActorID,
+		ID:           in.ID,
+		ProjectID:    in.ProjectID,
+	})
 }
 
 // mapErr converts database/sql's no-rows sentinel into the domain ErrNotFound.

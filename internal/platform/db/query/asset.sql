@@ -11,6 +11,10 @@ WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
 SELECT * FROM asset
 WHERE project_id = ? AND asset_key = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
+-- name: CountAssetsByProject :one
+SELECT COUNT(*) FROM asset
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
 -- name: ListAssetsByProject :many
 SELECT * FROM asset
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
@@ -39,3 +43,19 @@ ON DUPLICATE KEY UPDATE
     display_name = VALUES(display_name),
     value        = VALUES(value),
     updated_by   = VALUES(updated_by);
+
+-- name: UpdateAssetFields :exec
+-- Operator edit of the non-key metadata fields. asset_type/asset_key/value are
+-- the normalized identity and are never touched here; status is restricted to
+-- the live statuses (deleted is reserved for the soft-delete operation). The
+-- WHERE clause carries both id and project_id so a cross-project update is
+-- impossible at the DB layer, and the soft-delete filter prevents editing a
+-- tombstoned row.
+UPDATE asset
+SET display_name  = ?,
+    source        = ?,
+    owner         = ?,
+    business_unit = ?,
+    status        = ?,
+    updated_by    = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';

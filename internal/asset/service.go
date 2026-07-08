@@ -2,8 +2,21 @@ package asset
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"strconv"
 	"time"
+
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
+	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
+)
+
+// Audit action names and resource type for asset change events. Stable
+// vocabulary for the audit log.
+const (
+	ActionAssetImport = "asset.import"
+	ActionAssetUpdate = "asset.update"
+	ResourceTypeAsset = "asset"
 )
 
 // Service validation errors.
@@ -14,6 +27,10 @@ var (
 	ErrInvalidProjectID = errors.New("asset: invalid project id")
 	// ErrMetadataTooLong is returned when a metadata field exceeds its column width.
 	ErrMetadataTooLong = errors.New("asset: metadata field too long")
+	// ErrBatchTooLarge is returned when an import/preview batch exceeds the cap.
+	ErrBatchTooLarge = errors.New("asset: batch too large")
+	// ErrNoFields is returned when an update request changes no editable field.
+	ErrNoFields = errors.New("asset: no fields to update")
 )
 
 // Metadata length bounds mirror the asset table column widths, so oversized
@@ -32,15 +49,58 @@ const (
 // can pin time; production uses time.Now in UTC.
 var nowFn = func() time.Time { return time.Now().UTC() }
 
-// Service applies asset business rules: input normalization, enum validation and
-// idempotent import. It owns no HTTP concerns.
-type Service struct {
-	repo Repository
+// auditRecorder is the minimal audit sink the mutating operations depend on.
+// *audit.Service satisfies it; a nil sink disables audit writes (unit tests that
+// assert only on asset state).
+type auditRecorder interface {
+	Record(ctx context.Context, e audit.Event) error
 }
 
-// NewService builds a Service over the given repository.
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+// AuditMeta carries the request-scoped context the service folds into audit
+// events. It deliberately excludes secrets and the actor (the actor is already
+// part of the service input).
+type AuditMeta struct {
+	IP        string
+	UserAgent string
+	RequestID string
+}
+
+// Service applies asset business rules: input normalization, enum validation,
+// idempotent import and partial edit. It owns the transaction boundary for the
+// mutating operations so an asset change and its audit event commit together
+// (or roll back together — a committed change never exists without its audit
+// record).
+type Service struct {
+	repo      Repository
+	db        *sql.DB       // nil in unit tests; non-nil in production to run a real tx
+	auditSink auditRecorder // used on the non-tx path (tests); the tx path builds its own
+}
+
+// ServiceOption configures a Service. Use WithDB in production (enables the
+// asset+audit transaction) and WithAuditSink in tests that assert on audit.
+type ServiceOption func(*Service)
+
+// WithDB enables the transactional path: asset writes and the audit event run
+// on one *sql.Tx, committed together or rolled back together.
+func WithDB(db *sql.DB) ServiceOption {
+	return func(s *Service) { s.db = db }
+}
+
+// WithAuditSink injects an audit recorder for the non-transactional (test) path.
+// On the transactional path the sink is built from the tx and this is ignored.
+func WithAuditSink(sink auditRecorder) ServiceOption {
+	return func(s *Service) { s.auditSink = sink }
+}
+
+// NewService builds a Service over the given repository. With no options it runs
+// without a transaction and without audit (legacy single-row behaviour used by
+// the unit tests that assert only on asset state).
+func NewService(repo Repository, opts ...ServiceOption) *Service {
+	s := &Service{repo: repo}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // ImportInput is the raw, un-normalized input for a single asset import/discovery
@@ -66,11 +126,23 @@ type ImportInput struct {
 //
 // ProjectID must be a caller-authorized project; this service does not itself
 // perform the project access check (that is the project.Service boundary applied
-// by the future handler), but it can never write outside the given ProjectID.
+// by the handler), but it can never write outside the given ProjectID.
+//
+// Import is the single-row primitive; it does NOT write an audit event. The HTTP
+// layer uses ImportBatch, which runs a batch upsert plus its audit event in one
+// transaction.
 func (s *Service) Import(ctx context.Context, in ImportInput) (*Asset, error) {
 	if in.ProjectID == 0 {
 		return nil, ErrInvalidProjectID
 	}
+	return importWith(ctx, s.repo, in)
+}
+
+// importWith is the normalize→validate→upsert→re-read pipeline run against a
+// specific repository. It is shared by Import (single row, on the service repo)
+// and ImportBatch (per row, on the tx-scoped repo) so the batch path uses the
+// exact same business rules.
+func importWith(ctx context.Context, repo Repository, in ImportInput) (*Asset, error) {
 	norm, err := Normalize(in.AssetType, in.Value)
 	if err != nil {
 		return nil, err
@@ -104,7 +176,7 @@ func (s *Service) Import(ctx context.Context, in ImportInput) (*Asset, error) {
 		displayName = norm.Value
 	}
 
-	if err := s.repo.Upsert(ctx, UpsertParams{
+	if err := repo.Upsert(ctx, UpsertParams{
 		TenantID:     in.TenantID,
 		OrgID:        in.OrgID,
 		ProjectID:    in.ProjectID,
@@ -122,12 +194,18 @@ func (s *Service) Import(ctx context.Context, in ImportInput) (*Asset, error) {
 		return nil, err
 	}
 
-	return s.repo.GetByKey(ctx, in.ProjectID, norm.Key)
+	return repo.GetByKey(ctx, in.ProjectID, norm.Key)
 }
 
 // GetByID returns a live asset scoped to projectID, or ErrNotFound.
 func (s *Service) GetByID(ctx context.Context, projectID, id uint64) (*Asset, error) {
 	return s.repo.GetByID(ctx, projectID, id)
+}
+
+// Count returns the number of live assets in projectID (for list pagination
+// totals). It shares List's project + soft-delete scoping.
+func (s *Service) Count(ctx context.Context, projectID uint64) (int64, error) {
+	return s.repo.Count(ctx, projectID)
 }
 
 // List returns live assets in projectID, paginated. limit is clamped to
@@ -143,6 +221,19 @@ func (s *Service) List(ctx context.Context, projectID uint64, limit, offset int3
 const (
 	defaultPageSize int32 = 50
 	maxPageSize     int32 = 200
+	// MaxImportBatch bounds a single import/preview batch so a runaway caller
+	// cannot drive an unbounded loop or an oversized request body.
+	MaxImportBatch = 500
+)
+
+// Row status values reported by DryRun and ImportBatch.
+const (
+	RowNew       = "new"
+	RowUpdate    = "update"
+	RowDuplicate = "duplicate"
+	RowInvalid   = "invalid"
+	RowImported  = "imported"
+	RowFailed    = "failed"
 )
 
 // checkMetadataLen rejects any caller-supplied metadata field wider than its
@@ -166,6 +257,413 @@ func checkMetadataLen(in ImportInput) error {
 		}
 	}
 	return nil
+}
+
+// DryRunRowResult is the per-row outcome of a dry-run preview. Status is one of
+// RowNew/RowUpdate/RowDuplicate/RowInvalid. AssetKey/Value are populated only
+// when the row was normalizable; Error is populated only when Status==RowInvalid.
+type DryRunRowResult struct {
+	Index      int    `json:"index"`
+	Status     string `json:"status"`
+	AssetType  string `json:"asset_type,omitempty"`
+	Value      string `json:"value,omitempty"`
+	AssetKey   string `json:"asset_key,omitempty"`
+	ExistingID uint64 `json:"existing_id,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// DryRunReport is the preview result of an import batch: every input row is
+// classified without writing anything to the database.
+type DryRunReport struct {
+	Total     int64             `json:"total"`
+	New       int64             `json:"new"`
+	Update    int64             `json:"update"`
+	Duplicate int64             `json:"duplicate"`
+	Failed    int64             `json:"failed"`
+	Rows      []DryRunRowResult `json:"rows"`
+}
+
+// DryRun previews an import batch: it normalizes and validates every row,
+// classifies each as new / update / duplicate / invalid, and reports per-row
+// errors — without writing to the database. ProjectID, TenantID, OrgID and
+// ActorID on each row are overridden by projectID so the caller cannot smuggle
+// assets into another project.
+func (s *Service) DryRun(ctx context.Context, projectID uint64, rows []ImportInput) (DryRunReport, error) {
+	if projectID == 0 {
+		return DryRunReport{}, ErrInvalidProjectID
+	}
+	if len(rows) > MaxImportBatch {
+		return DryRunReport{}, ErrBatchTooLarge
+	}
+
+	report := DryRunReport{Total: int64(len(rows)), Rows: make([]DryRunRowResult, 0, len(rows))}
+	// seen keys dedupes within the batch; existing caches DB lookups so each
+	// unique key is queried at most once.
+	seen := make(map[string]bool, len(rows))
+	existing := make(map[string]*Asset, len(rows))
+
+	for i, row := range rows {
+		row.ProjectID = projectID
+		res := DryRunRowResult{Index: i}
+
+		norm, err := Normalize(row.AssetType, row.Value)
+		if err != nil {
+			res.Status = RowInvalid
+			res.Error = err.Error()
+			report.Failed++
+			report.Rows = append(report.Rows, res)
+			continue
+		}
+		res.AssetType = norm.Type
+		res.Value = norm.Value
+		res.AssetKey = norm.Key
+
+		// Row-level validation (status enum, metadata widths) runs BEFORE the
+		// duplicate classification so a row that the real import would reject is
+		// surfaced as invalid — even if it is also a duplicate of an earlier row.
+		// Without this, a duplicate carrying a bad status would be reported as a
+		// harmless "duplicate" and the caller would never see the error.
+		if vErr := validateRowFields(row); vErr != nil {
+			res.Status = RowInvalid
+			res.Error = vErr.Error()
+			report.Failed++
+			report.Rows = append(report.Rows, res)
+			continue
+		}
+
+		// A row whose key already appeared earlier in this batch is redundant:
+		// the earlier row already accounts for the insert/update.
+		if seen[norm.Key] {
+			res.Status = RowDuplicate
+			report.Duplicate++
+			report.Rows = append(report.Rows, res)
+			continue
+		}
+		seen[norm.Key] = true
+
+		// Cache DB lookups per unique key: at most one GetByKey per distinct key.
+		// GetByKey excludes soft-deleted rows, so a tombstoned key reports as
+		// "new" (re-creatable), matching the unique-key-with-deleted_at semantics.
+		a, ok := existing[norm.Key]
+		if !ok {
+			got, err := s.repo.GetByKey(ctx, projectID, norm.Key)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return DryRunReport{}, err
+			}
+			if got != nil {
+				existing[norm.Key] = got
+				a = got
+			}
+		}
+		if a != nil {
+			res.Status = RowUpdate
+			res.ExistingID = a.ID
+			report.Update++
+		} else {
+			res.Status = RowNew
+			report.New++
+		}
+		report.Rows = append(report.Rows, res)
+	}
+
+	return report, nil
+}
+
+// ImportBatchInput is a batch of import rows plus the project/actor context
+// applied to every row. Per-row ProjectID/TenantID/OrgID/ActorID are overridden
+// by the batch values so a single row cannot target another project.
+type ImportBatchInput struct {
+	ProjectID uint64
+	TenantID  string
+	OrgID     string
+	ActorID   string
+	Rows      []ImportInput
+}
+
+// ImportRowResult is the per-row outcome of a real import.
+type ImportRowResult struct {
+	Index    int    `json:"index"`
+	Status   string `json:"status"`
+	AssetID  uint64 `json:"asset_id,omitempty"`
+	AssetKey string `json:"asset_key,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// ImportBatchReport summarizes a batch import.
+type ImportBatchReport struct {
+	Total   int64             `json:"total"`
+	Success int64             `json:"success"`
+	Failed  int64             `json:"failed"`
+	Rows    []ImportRowResult `json:"rows"`
+}
+
+// ImportBatch idempotently imports every row into projectID, collecting a
+// per-row result so partial failures are visible, AND writes one audit event —
+// all within a single transaction. A row-level validation/import failure does not
+// abort the batch (the remaining rows still import); but a failure to write the
+// audit event rolls back the whole batch, so a committed import never exists
+// without its audit record. Repeated imports of the same normalized asset
+// collapse to one row (Upsert); an 'ignored'/'inactive' asset is never flipped
+// back to 'active' by a re-import (status is preserved).
+func (s *Service) ImportBatch(ctx context.Context, in ImportBatchInput, meta AuditMeta) (ImportBatchReport, error) {
+	if in.ProjectID == 0 {
+		return ImportBatchReport{}, ErrInvalidProjectID
+	}
+	if len(in.Rows) > MaxImportBatch {
+		return ImportBatchReport{}, ErrBatchTooLarge
+	}
+
+	report := ImportBatchReport{Total: int64(len(in.Rows)), Rows: make([]ImportRowResult, 0, len(in.Rows))}
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, sink auditRecorder) error {
+		for i, row := range in.Rows {
+			row.ProjectID = in.ProjectID
+			row.TenantID = in.TenantID
+			row.OrgID = in.OrgID
+			row.ActorID = in.ActorID
+
+			a, err := importWith(ctx, repo, row)
+			if err != nil {
+				report.Failed++
+				report.Rows = append(report.Rows, ImportRowResult{
+					Index:  i,
+					Status: RowFailed,
+					Error:  err.Error(),
+				})
+				continue
+			}
+			report.Success++
+			report.Rows = append(report.Rows, ImportRowResult{
+				Index:    i,
+				Status:   RowImported,
+				AssetID:  a.ID,
+				AssetKey: a.AssetKey,
+			})
+		}
+
+		// The audit event is part of the same transaction: a committed import
+		// must carry its audit record. A nil sink (no-tx unit tests that do not
+		// assert on audit) skips the write rather than failing.
+		if sink == nil {
+			return nil
+		}
+		result := audit.ResultSuccess
+		if report.Failed > 0 {
+			result = audit.ResultFailure
+		}
+		return sink.Record(ctx, audit.Event{
+			TenantID:     in.TenantID,
+			OrgID:        in.OrgID,
+			ProjectID:    in.ProjectID,
+			ActorID:      in.ActorID,
+			ActorType:    audit.ActorUser,
+			Action:       ActionAssetImport,
+			ResourceType: ResourceTypeAsset,
+			Result:       result,
+			IP:           meta.IP,
+			UserAgent:    meta.UserAgent,
+			RequestID:    meta.RequestID,
+			Metadata: map[string]any{
+				"total":   report.Total,
+				"success": report.Success,
+				"failed":  report.Failed,
+			},
+		})
+	})
+	return report, err
+}
+
+// UpdateFields is a partial update of the operator-editable, non-key metadata
+// fields. A nil pointer means "leave unchanged". Status may be set to
+// active/inactive/ignored; 'deleted' is reserved for the soft-delete operation
+// and is rejected here.
+type UpdateFields struct {
+	DisplayName  *string
+	Source       *string
+	Owner        *string
+	BusinessUnit *string
+	Status       *string
+}
+
+// Update applies a partial edit to one project-scoped live asset and returns
+// the refreshed asset. The edit and its audit event run in one transaction: a
+// committed edit always carries its audit record (before+after snapshots). A
+// validation error (bad status, overlong metadata, not found, no fields) is
+// surfaced as the typed error with the transaction rolled back (nothing
+// written); an audit-write failure also rolls the edit back.
+func (s *Service) Update(ctx context.Context, projectID, id uint64, fields UpdateFields, actorID string, meta AuditMeta) (*Asset, error) {
+	if projectID == 0 {
+		return nil, ErrInvalidProjectID
+	}
+	if fields.DisplayName == nil && fields.Source == nil && fields.Owner == nil &&
+		fields.BusinessUnit == nil && fields.Status == nil {
+		return nil, ErrNoFields
+	}
+	if len(actorID) > maxActorIDLen {
+		return nil, ErrMetadataTooLong
+	}
+
+	var after *Asset
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, sink auditRecorder) error {
+		before, updated, err := updateWith(ctx, repo, projectID, id, fields, actorID)
+		if err != nil {
+			return err
+		}
+		after = updated
+
+		if sink == nil {
+			return nil
+		}
+		return sink.Record(ctx, audit.Event{
+			TenantID:     before.TenantID,
+			OrgID:        before.OrgID,
+			ProjectID:    projectID,
+			ActorID:      actorID,
+			ActorType:    audit.ActorUser,
+			Action:       ActionAssetUpdate,
+			ResourceType: ResourceTypeAsset,
+			ResourceID:   strconv.FormatUint(updated.ID, 10),
+			Result:       audit.ResultSuccess,
+			IP:           meta.IP,
+			UserAgent:    meta.UserAgent,
+			RequestID:    meta.RequestID,
+			Before:       before,
+			After:        updated,
+			Metadata:     map[string]any{"changed": changedFields(fields)},
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return after, nil
+}
+
+// updateWith loads the current row, merges the provided fields, validates,
+// writes, and re-reads — all against the given repository (the service repo for
+// plain reads, or a tx-scoped repo inside Update). It returns the before and
+// after snapshots so the caller can record an auditable before→after transition.
+func updateWith(ctx context.Context, repo Repository, projectID, id uint64, fields UpdateFields, actorID string) (*Asset, *Asset, error) {
+	before, err := repo.GetByID(ctx, projectID, id)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Merge provided fields onto the current values; omitted fields are preserved.
+	displayName := before.DisplayName
+	if fields.DisplayName != nil {
+		displayName = *fields.DisplayName
+	}
+	source := before.Source
+	if fields.Source != nil {
+		source = *fields.Source
+	}
+	owner := before.Owner
+	if fields.Owner != nil {
+		owner = *fields.Owner
+	}
+	businessUnit := before.BusinessUnit
+	if fields.BusinessUnit != nil {
+		businessUnit = *fields.BusinessUnit
+	}
+	status := before.Status
+	if fields.Status != nil {
+		status = *fields.Status
+		// Edit may not tombstone; 'deleted' is the soft-delete operation's job.
+		if !IsValidStatus(status) || status == StatusDeleted {
+			return nil, nil, ErrInvalidStatus
+		}
+	}
+
+	// Enforce column widths on the merged values so overflow is a typed 422, not
+	// an opaque DB truncation.
+	for _, f := range []struct {
+		val string
+		max int
+	}{
+		{displayName, maxDisplayNameLen},
+		{source, maxSourceLen},
+		{owner, maxOwnerLen},
+		{businessUnit, maxBusinessUnitLen},
+	} {
+		if len(f.val) > f.max {
+			return nil, nil, ErrMetadataTooLong
+		}
+	}
+
+	if err := repo.Update(ctx, UpdateParams{
+		ProjectID:    projectID,
+		ID:           id,
+		DisplayName:  displayName,
+		Source:       source,
+		Owner:        owner,
+		BusinessUnit: businessUnit,
+		Status:       status,
+		ActorID:      actorID,
+	}); err != nil {
+		return nil, nil, err
+	}
+	after, err := repo.GetByID(ctx, projectID, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return before, after, nil
+}
+
+// changedFields reports which UpdateFields pointers were set (the operator-
+// supplied change set), for the audit metadata.
+func changedFields(fields UpdateFields) map[string]string {
+	changed := make(map[string]string, 5)
+	if fields.DisplayName != nil {
+		changed["display_name"] = *fields.DisplayName
+	}
+	if fields.Source != nil {
+		changed["source"] = *fields.Source
+	}
+	if fields.Owner != nil {
+		changed["owner"] = *fields.Owner
+	}
+	if fields.BusinessUnit != nil {
+		changed["business_unit"] = *fields.BusinessUnit
+	}
+	if fields.Status != nil {
+		changed["status"] = *fields.Status
+	}
+	return changed
+}
+
+// runInTx runs fn against a transaction-scoped asset repository and audit sink.
+// When the service has a *sql.DB (production), fn runs on a real *sql.Tx so the
+// asset write and the audit insert commit together or roll back together. When
+// there is no DB (unit tests), fn runs on the injected repo and audit sink with
+// no real transaction — enough to exercise the asset/audit wiring without a DB.
+func (s *Service) runInTx(ctx context.Context, fn func(ctx context.Context, repo Repository, sink auditRecorder) error) error {
+	if s.db == nil {
+		return fn(ctx, s.repo, s.auditSink)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	txRepo := NewRepository(dbgen.New(tx))
+	txAudit := audit.NewService(audit.NewRepository(dbgen.New(tx)))
+	if err := fn(ctx, txRepo, txAudit); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// validateRowFields checks the non-normalizable ImportInput fields (status enum
+// + metadata widths) without touching the DB. It mirrors Import's guards so
+// dry-run surfaces the same issues the real import would reject on.
+func validateRowFields(in ImportInput) error {
+	status := in.Status
+	if status == "" {
+		status = StatusActive
+	}
+	if !IsValidStatus(status) {
+		return ErrInvalidStatus
+	}
+	return checkMetadataLen(in)
 }
 
 func clampLimit(limit int32) int32 {

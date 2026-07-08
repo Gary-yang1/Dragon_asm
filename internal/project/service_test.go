@@ -16,7 +16,8 @@ import (
 // fakeRepo is an in-memory Repository for service-level access tests (no DB).
 type fakeRepo struct {
 	projects map[uint64]*project.Project
-	members  map[string]bool // key: "<projectID>:<userID>"
+	members  map[string]bool   // key: "<projectID>:<userID>"
+	roles    map[string]string // key: "<projectID>:<userID>" -> role
 }
 
 func (f *fakeRepo) GetByID(_ context.Context, id uint64) (*project.Project, error) {
@@ -37,6 +38,19 @@ func (f *fakeRepo) GetByCode(_ context.Context, tenantID, code string) (*project
 
 func (f *fakeRepo) IsMember(_ context.Context, projectID uint64, userID string) (bool, error) {
 	return f.members[fmt.Sprintf("%d:%s", projectID, userID)], nil
+}
+
+func (f *fakeRepo) MemberRole(_ context.Context, projectID uint64, userID string) (string, error) {
+	k := fmt.Sprintf("%d:%s", projectID, userID)
+	if role, ok := f.roles[k]; ok {
+		return role, nil
+	}
+	// A member without an explicit role fixture is treated as viewer so the
+	// existing membership-only tests keep working under the role-aware path.
+	if f.members[k] {
+		return "viewer", nil
+	}
+	return "", project.ErrNotFound
 }
 
 // newEnforcer seeds an in-memory Casbin enforcer with one global role
@@ -108,6 +122,42 @@ func TestRequireActive(t *testing.T) {
 	require.ErrorIs(t, svc.RequireActive(&project.Project{Status: project.StatusSuspended}), project.ErrNotActive)
 	require.ErrorIs(t, svc.RequireActive(&project.Project{Status: project.StatusArchived}), project.ErrNotActive)
 	require.ErrorIs(t, svc.RequireActive(nil), project.ErrNotActive)
+}
+
+// Access returns the project plus the member's role in one call.
+func TestAccessReturnsProjectAndRole(t *testing.T) {
+	repo := &fakeRepo{
+		projects: map[uint64]*project.Project{
+			1: {ID: 1, TenantID: "t1", OrgID: "o1", Status: project.StatusActive},
+		},
+		members: map[string]bool{"1:alice": true},
+		roles:   map[string]string{"1:alice": "security_ops"},
+	}
+	svc := project.NewService(repo, newEnforcer(t))
+
+	p, role, err := svc.Access(context.Background(), "alice", 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), p.ID)
+	assert.Equal(t, "t1", p.TenantID, "Access returns the project for tenant/org derivation")
+	assert.Equal(t, "security_ops", role, "Access returns the membership role")
+}
+
+// Access denies a non-member and surfaces the project-not-found case.
+func TestAccessDenials(t *testing.T) {
+	repo := &fakeRepo{
+		projects: map[uint64]*project.Project{
+			1: {ID: 1, Status: project.StatusActive},
+			2: {ID: 2, Status: project.StatusActive},
+		},
+		members: map[string]bool{"1:alice": true}, // alice is a member of p1 only
+	}
+	svc := project.NewService(repo, newEnforcer(t))
+
+	_, _, err := svc.Access(context.Background(), "alice", 2) // alice not a member of p2
+	require.ErrorIs(t, err, project.ErrForbidden)
+
+	_, _, err = svc.Access(context.Background(), "alice", 999) // unknown project
+	require.ErrorIs(t, err, project.ErrNotFound)
 }
 
 func TestGetByIDAndByCode(t *testing.T) {

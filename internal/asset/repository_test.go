@@ -132,3 +132,49 @@ func TestRepoListScoped(t *testing.T) {
 	assert.Len(t, rows, 2)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// Count is project-scoped and excludes soft-deleted rows.
+func TestRepoCountScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM asset")).
+		WithArgs(uint64(1)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(42)))
+
+	repo := asset.NewRepository(dbgen.New(sqlDB))
+	n, err := repo.Count(context.Background(), 1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), n)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Update issues a single project-scoped UPDATE; the WHERE clause carries both
+// id and project_id plus the soft-delete filter.
+func TestRepoUpdateScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE asset")).
+		WithArgs(
+			"example.com", "seed", "bob", "team-a", "active", "u1",
+			uint64(7), uint64(1),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := asset.NewRepository(dbgen.New(sqlDB))
+	err = repo.Update(context.Background(), asset.UpdateParams{
+		ProjectID:    1,
+		ID:           7,
+		DisplayName:  "example.com",
+		Source:       "seed",
+		Owner:        "bob",
+		BusinessUnit: "team-a",
+		Status:       "active",
+		ActorID:      "u1",
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

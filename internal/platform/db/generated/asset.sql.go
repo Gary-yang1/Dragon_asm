@@ -11,6 +11,18 @@ import (
 	"time"
 )
 
+const countAssetsByProject = `-- name: CountAssetsByProject :one
+SELECT COUNT(*) FROM asset
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+func (q *Queries) CountAssetsByProject(ctx context.Context, projectID uint64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countAssetsByProject, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getAssetByID = `-- name: GetAssetByID :one
 
 SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at FROM asset
@@ -147,6 +159,48 @@ func (q *Queries) ListAssetsByProject(ctx context.Context, arg ListAssetsByProje
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateAssetFields = `-- name: UpdateAssetFields :exec
+UPDATE asset
+SET display_name  = ?,
+    source        = ?,
+    owner         = ?,
+    business_unit = ?,
+    status        = ?,
+    updated_by    = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdateAssetFieldsParams struct {
+	DisplayName  string `db:"display_name" json:"display_name"`
+	Source       string `db:"source" json:"source"`
+	Owner        string `db:"owner" json:"owner"`
+	BusinessUnit string `db:"business_unit" json:"business_unit"`
+	Status       string `db:"status" json:"status"`
+	UpdatedBy    string `db:"updated_by" json:"updated_by"`
+	ID           uint64 `db:"id" json:"id"`
+	ProjectID    uint64 `db:"project_id" json:"project_id"`
+}
+
+// Operator edit of the non-key metadata fields. asset_type/asset_key/value are
+// the normalized identity and are never touched here; status is restricted to
+// the live statuses (deleted is reserved for the soft-delete operation). The
+// WHERE clause carries both id and project_id so a cross-project update is
+// impossible at the DB layer, and the soft-delete filter prevents editing a
+// tombstoned row.
+func (q *Queries) UpdateAssetFields(ctx context.Context, arg UpdateAssetFieldsParams) error {
+	_, err := q.db.ExecContext(ctx, updateAssetFields,
+		arg.DisplayName,
+		arg.Source,
+		arg.Owner,
+		arg.BusinessUnit,
+		arg.Status,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
 }
 
 const upsertAsset = `-- name: UpsertAsset :execresult
