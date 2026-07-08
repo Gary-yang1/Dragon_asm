@@ -12,6 +12,10 @@ import (
 type Querier interface {
 	CountAssetsByProject(ctx context.Context, projectID uint64) (int64, error)
 	CountRelationsByAsset(ctx context.Context, arg CountRelationsByAssetParams) (int64, error)
+	// sqlc queries for the discovery scope domain.
+	// All reads are scoped by project_id and soft-delete sentinel so cross-project
+	// reads/writes cannot leak through missing repository checks.
+	CreateScope(ctx context.Context, arg CreateScopeParams) (sql.Result, error)
 	// Provisioning helper (used by seeding/tests; no public registration endpoint in M0-6).
 	CreateUser(ctx context.Context, arg CreateUserParams) (sql.Result, error)
 	// sqlc queries for the asset domain.
@@ -30,6 +34,7 @@ type Querier interface {
 	// Fetch the live edge for a (project, from, to, type) tuple. Used to return the
 	// upserted row; excludes soft-deleted rows.
 	GetRelationByEndpoints(ctx context.Context, arg GetRelationByEndpointsParams) (AssetRelation, error)
+	GetScopeByID(ctx context.Context, arg GetScopeByIDParams) (Scope, error)
 	GetUserByID(ctx context.Context, id uint64) (AppUser, error)
 	// sqlc queries for the auth (app_user) domain.
 	// Every read filters on the soft-delete sentinel so soft-deleted rows are
@@ -39,11 +44,15 @@ type Querier interface {
 	// sqlc queries for the audit_log domain.
 	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
+	InsertScopeTarget(ctx context.Context, arg InsertScopeTargetParams) error
 	ListAssetsByProject(ctx context.Context, arg ListAssetsByProjectParams) ([]Asset, error)
 	// Both directions for one asset (out-edges where from_asset_id = ? and in-edges
 	// where to_asset_id = ?), project-scoped and live. The service tags each row's
 	// direction based on which endpoint equals the requested asset id.
 	ListRelationsByAsset(ctx context.Context, arg ListRelationsByAssetParams) ([]AssetRelation, error)
+	ListScopeTargetsByScope(ctx context.Context, arg ListScopeTargetsByScopeParams) ([]ScopeTarget, error)
+	ListScopesByProject(ctx context.Context, projectID uint64) ([]Scope, error)
+	SoftDeleteScopeTargets(ctx context.Context, arg SoftDeleteScopeTargetsParams) error
 	// Operator edit of the non-key metadata fields. asset_type/asset_key/value are
 	// the normalized identity and are never touched here; status is restricted to
 	// the live statuses (deleted is reserved for the soft-delete operation). The
@@ -57,6 +66,8 @@ type Querier interface {
 	// WHERE clause carries project_id + the soft-delete filter so a cross-project or
 	// tombstoned asset cannot be transitioned.
 	UpdateAssetLifecycle(ctx context.Context, arg UpdateAssetLifecycleParams) error
+	UpdateScope(ctx context.Context, arg UpdateScopeParams) error
+	UpdateScopeStatus(ctx context.Context, arg UpdateScopeStatusParams) error
 	// Idempotent import: a new normalized asset_key inserts; a repeat within the same
 	// project updates only the discovery-refreshable fields (last_seen, source,
 	// confidence, display_name, value, updated_by). first_seen, owner, business_unit

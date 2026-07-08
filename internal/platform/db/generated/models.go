@@ -118,3 +118,36 @@ type ProjectMember struct {
 	UpdatedBy string    `db:"updated_by" json:"updated_by"`
 	DeletedAt time.Time `db:"deleted_at" json:"deleted_at"`
 }
+
+type Scope struct {
+	ID           uint64    `db:"id" json:"id"`
+	TenantID     string    `db:"tenant_id" json:"tenant_id"`
+	OrgID        string    `db:"org_id" json:"org_id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	Name         string    `db:"name" json:"name"`
+	Status       string    `db:"status" json:"status"`
+	AuthorizedBy string    `db:"authorized_by" json:"authorized_by"`
+	ValidFrom    time.Time `db:"valid_from" json:"valid_from"`
+	ValidUntil   time.Time `db:"valid_until" json:"valid_until"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy    string    `db:"created_by" json:"created_by"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
+type ScopeTarget struct {
+	ID          uint64    `db:"id" json:"id"`
+	TenantID    string    `db:"tenant_id" json:"tenant_id"`
+	OrgID       string    `db:"org_id" json:"org_id"`
+	ProjectID   uint64    `db:"project_id" json:"project_id"`
+	ScopeID     uint64    `db:"scope_id" json:"scope_id"`
+	TargetType  string    `db:"target_type" json:"target_type"`
+	MatchMode   string    `db:"match_mode" json:"match_mode"`
+	TargetValue string    `db:"target_value" json:"target_value"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy   string    `db:"created_by" json:"created_by"`
+	UpdatedBy   string    `db:"updated_by" json:"updated_by"`
+	DeletedAt   time.Time `db:"deleted_at" json:"deleted_at"`
+}
