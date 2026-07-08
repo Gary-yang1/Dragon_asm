@@ -15,8 +15,17 @@ import (
 )
 
 var (
-	scopeCols       = []string{"id", "tenant_id", "org_id", "project_id", "name", "status", "authorized_by", "valid_from", "valid_until", "created_at", "updated_at", "created_by", "updated_by", "deleted_at"}
-	scopeTargetCols = []string{"id", "tenant_id", "org_id", "project_id", "scope_id", "target_type", "match_mode", "target_value", "created_at", "updated_at", "created_by", "updated_by", "deleted_at"}
+	scopeCols        = []string{"id", "tenant_id", "org_id", "project_id", "name", "status", "authorized_by", "valid_from", "valid_until", "created_at", "updated_at", "created_by", "updated_by", "deleted_at"}
+	scopeTargetCols  = []string{"id", "tenant_id", "org_id", "project_id", "scope_id", "target_type", "match_mode", "target_value", "created_at", "updated_at", "created_by", "updated_by", "deleted_at"}
+	taskTemplateCols = []string{
+		"id", "tenant_id", "org_id", "project_id", "scope_id", "name", "task_type", "config", "schedule", "enabled",
+		"timeout_seconds", "rate_limit", "concurrency", "retry_limit", "created_at", "updated_at", "created_by", "updated_by", "deleted_at",
+	}
+	taskRunCols = []string{
+		"id", "tenant_id", "org_id", "project_id", "template_id", "scope_id", "task_type", "status", "progress", "timeout_seconds", "rate_limit", "concurrency", "retry_limit",
+		"attempt", "engine_job_id", "dispatched_at", "last_callback_at", "result_count", "callback_secret_ref",
+		"started_at", "finished_at", "error_summary", "created_at", "updated_at", "created_by", "updated_by", "deleted_at",
+	}
 )
 
 // softDeleteFilter mirrors the query predicate for all live-row reads.
@@ -35,6 +44,25 @@ func scopeTargetRows(now time.Time, scopeID, projectID uint64, targetType, match
 		uint64(10), "t1", "o1", projectID, scopeID,
 		targetType, matchMode, targetValue,
 		now, now, "u1", "u1", time.Time{},
+	)
+}
+
+func taskTemplateRows(now time.Time, templateID, projectID, scopeID uint64, name, taskType string, enabled bool) *sqlmock.Rows {
+	return sqlmock.NewRows(taskTemplateCols).AddRow(
+		templateID, "t1", "o1", projectID, scopeID,
+		name, taskType, []byte(`{"target":"example.com"}`), "* * * * *", enabled,
+		int32(30), int32(20), int32(10), int32(3),
+		now, now, "u1", "u1", time.Time{},
+	)
+}
+
+func taskRunRows(now time.Time, runID, projectID, templateID, scopeID uint64, taskType, status string) *sqlmock.Rows {
+	return sqlmock.NewRows(taskRunCols).AddRow(
+		runID, "t1", "o1", projectID, templateID, scopeID,
+		taskType, status,
+		int32(0), int32(30), int32(20), int32(10), int32(3),
+		int32(0), "", time.Time{}, time.Time{}, uint64(0), "",
+		time.Time{}, time.Time{}, "", now, now, "u1", "u1", time.Time{},
 	)
 }
 
@@ -231,6 +259,215 @@ func TestRepoClearScopeTargetsScoped(t *testing.T) {
 
 	repo := NewRepository(dbgen.New(sqlDB))
 	err = repo.ClearScopeTargets(context.Background(), 1, 7, "u1", now)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoCreateTaskTemplateWritesProjectScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO task_template")).
+		WithArgs(
+			"t1", "o1", uint64(4),
+			uint64(40), "scan", TaskTypeDNS,
+			[]byte(`{"target":"example.com"}`), "*/10 * * * *", true,
+			int32(30), int32(20), int32(10), int32(3),
+			"u1", "u1",
+		).
+		WillReturnResult(sqlmock.NewResult(55, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	id, err := repo.CreateTaskTemplate(context.Background(), CreateTaskTemplateParams{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      4,
+		ScopeID:        40,
+		Name:           "scan",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Schedule:       "*/10 * * * *",
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "u1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(55), id)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoGetTaskTemplateByIDScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, scope_id, name, task_type, config, schedule, enabled, timeout_seconds, rate_limit, concurrency, retry_limit, created_at, updated_at, created_by, updated_by, deleted_at FROM task_template")).
+		WithArgs(uint64(55), uint64(4)).
+		WillReturnRows(taskTemplateRows(now, 55, 4, 40, "scan", TaskTypeDNS, true))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	template, err := repo.GetTaskTemplate(context.Background(), 4, 55)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(55), template.ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoUpdateTaskTemplateScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_template")).
+		WithArgs(
+			"scan-updated",
+			TaskTypeWebProbe,
+			[]byte(`{"target":"api.example.com"}`),
+			"*/20 * * * *",
+			int32(45), int32(30), int32(11), int32(4),
+			"u2",
+			uint64(56), uint64(5),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	err = repo.UpdateTaskTemplate(context.Background(), UpdateTaskTemplateParams{
+		TemplateID:     56,
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      5,
+		Name:           "scan-updated",
+		TaskType:       TaskTypeWebProbe,
+		Config:         `{"target":"api.example.com"}`,
+		Schedule:       "*/20 * * * *",
+		TimeoutSeconds: 45,
+		RateLimit:      30,
+		Concurrency:    11,
+		RetryLimit:     4,
+		ActorID:        "u2",
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoCreateTaskRunWritesProjectScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Time{}
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO task_run")).
+		WithArgs(
+			"t1", "o1", uint64(6), uint64(77), uint64(66), TaskTypeDNS,
+			TaskRunStatusPending, int32(0),
+			int32(30), int32(20), int32(10), int32(3),
+			int32(0), "", now, now, uint64(0),
+			"", now, now, "", "u1", "u1",
+		).
+		WillReturnResult(sqlmock.NewResult(88, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	id, err := repo.CreateTaskRun(context.Background(), CreateTaskRunParams{
+		TenantID:          "t1",
+		OrgID:             "o1",
+		ProjectID:         6,
+		TemplateID:        77,
+		ScopeID:           66,
+		TaskType:          TaskTypeDNS,
+		Status:            TaskRunStatusPending,
+		Progress:          0,
+		TimeoutSeconds:    30,
+		RateLimit:         20,
+		Concurrency:       10,
+		RetryLimit:        3,
+		Attempt:           0,
+		EngineJobID:       "",
+		DispatchedAt:      now,
+		LastCallbackAt:    now,
+		ResultCount:       0,
+		CallbackSecretRef: "",
+		StartedAt:         now,
+		FinishedAt:        now,
+		ErrorSummary:      "",
+		ActorID:           "u1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(88), id)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoMarkTaskRunRunningScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_run")).
+		WithArgs(
+			TaskRunStatusRunning,
+			now,
+			"u1",
+			uint64(77),
+			uint64(6),
+			TaskRunStatusPending,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	err = repo.MarkRunRunning(context.Background(), 6, 77, "u1", TaskRunStatusPending, now)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoMarkTaskRunRunningRejectedWhenTransitionNotMatch(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_run")).
+		WithArgs(
+			TaskRunStatusRunning,
+			now,
+			"u1",
+			uint64(77),
+			uint64(6),
+			TaskRunStatusSuccess,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	err = repo.MarkRunRunning(context.Background(), 6, 77, "u1", TaskRunStatusSuccess, now)
+	require.ErrorIs(t, err, ErrInvalidRunTransition)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoMarkTaskRunTerminalTransitionChecksFromStatus(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_run")).
+		WithArgs(
+			TaskRunStatusFailed,
+			int32(0),
+			uint64(2),
+			"timeout",
+			now,
+			"u1",
+			uint64(77),
+			uint64(6),
+			TaskRunStatusRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	err = repo.MarkRunFailed(context.Background(), 6, 77, "u1", TaskRunStatusRunning, "timeout", 2, now)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

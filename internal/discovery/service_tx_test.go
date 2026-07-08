@@ -188,3 +188,90 @@ func TestDeactivateScopeRollbackOnAuditFailure(t *testing.T) {
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestCreateTaskTemplateRollbackOnAuditFailure(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	auditErr := errors.New("audit sink failure")
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
+		WithArgs(uint64(160), uint64(16)).
+		WillReturnRows(scopeRows(now, 160, 16, "scope"))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO task_template")).
+		WithArgs(
+			"t1", "o1", uint64(16),
+			uint64(160), "template", TaskTypeDNS, []byte(`{"target":"example.com"}`),
+			"* * * * *", true,
+			int32(30), int32(20), int32(10), int32(3),
+			"alice", "alice",
+		).
+		WillReturnResult(sqlmock.NewResult(88, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, scope_id, name, task_type, config, schedule, enabled, timeout_seconds, rate_limit, concurrency, retry_limit, created_at, updated_at, created_by, updated_by, deleted_at FROM task_template")).
+		WithArgs(uint64(88), uint64(16)).
+		WillReturnRows(taskTemplateRows(now, 88, 16, 160, "template", TaskTypeDNS, true))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_log")).WillReturnError(auditErr)
+	mock.ExpectRollback()
+
+	svc := NewService(NewRepository(dbgen.New(sqlDB)), WithDB(sqlDB))
+	_, err = svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      16,
+		ScopeID:        160,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Schedule:       "* * * * *",
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.ErrorIs(t, err, auditErr)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateTaskRunRollbackOnAuditFailure(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Time{}
+	auditErr := errors.New("audit sink failure")
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, scope_id, name, task_type, config, schedule, enabled, timeout_seconds, rate_limit, concurrency, retry_limit, created_at, updated_at, created_by, updated_by, deleted_at FROM task_template")).
+		WithArgs(uint64(1700), uint64(17)).
+		WillReturnRows(taskTemplateRows(now, 1700, 17, 170, "template", TaskTypeDNS, true))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO task_run")).
+		WithArgs(
+			"t1", "o1", uint64(17), uint64(1700), uint64(170),
+			TaskTypeDNS, TaskRunStatusPending, int32(0),
+			int32(30), int32(20), int32(10), int32(3), int32(0),
+			"", now, now, uint64(0), "",
+			now, now, "", "alice", "alice",
+		).
+		WillReturnResult(sqlmock.NewResult(int64(17000), 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run")).
+		WithArgs(uint64(17000), uint64(17)).
+		WillReturnRows(taskRunRows(now, 17000, 17, 1700, 170, TaskTypeDNS, TaskRunStatusPending))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_log")).WillReturnError(auditErr)
+	mock.ExpectRollback()
+
+	svc := NewService(NewRepository(dbgen.New(sqlDB)), WithDB(sqlDB))
+	_, err = svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+		TemplateID: 1700,
+		ProjectID:  17,
+		ActorID:    "alice",
+	})
+	require.ErrorIs(t, err, auditErr)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}

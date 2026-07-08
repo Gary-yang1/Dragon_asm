@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"net/netip"
@@ -16,6 +17,15 @@ var (
 	ErrInvalidActorID      = errors.New("discovery: invalid actor id")
 	ErrInvalidAuthorizedBy = errors.New("discovery: invalid authorized_by")
 	ErrInvalidStatus       = errors.New("discovery: invalid status")
+	ErrInvalidTaskType     = errors.New("discovery: invalid task type")
+	ErrInvalidTaskStatus   = errors.New("discovery: invalid task status")
+	ErrInvalidTemplate     = errors.New("discovery: invalid task template")
+	ErrInvalidTaskSchedule = errors.New("discovery: invalid task schedule")
+	ErrInvalidTaskLimits   = errors.New("discovery: invalid task limits")
+	ErrInvalidTaskConfig   = errors.New("discovery: invalid task config")
+	ErrInvalidTemplateID   = errors.New("discovery: invalid template id")
+	ErrInvalidTaskRunID    = errors.New("discovery: invalid run id")
+	ErrTemplateDisabled    = errors.New("discovery: template disabled")
 	ErrInvalidTargetType   = errors.New("discovery: invalid target type")
 	ErrInvalidMatchMode    = errors.New("discovery: invalid match mode")
 	ErrInvalidScopeID      = errors.New("discovery: invalid scope id")
@@ -29,13 +39,16 @@ var (
 )
 
 const (
-	maxTenantIDLen   = 64
-	maxOrgIDLen      = 64
-	maxScopeNameLen  = 128
-	maxActorLen      = 64
-	maxTargetValue   = 512
-	maxAuthorizedLen = 64
-	maxDomainLen     = 255
+	maxTenantIDLen       = 64
+	maxOrgIDLen          = 64
+	maxScopeNameLen      = 128
+	maxActorLen          = 64
+	maxTargetValue       = 512
+	maxAuthorizedLen     = 64
+	maxDomainLen         = 255
+	maxTemplateName      = 128
+	maxTemplateConfigLen = 8192
+	maxTaskScheduleLen   = 255
 )
 
 const (
@@ -46,6 +59,26 @@ const (
 var validStatuses = map[string]bool{
 	StatusActive:   true,
 	StatusInactive: true,
+}
+
+var validTaskTypes = map[string]bool{
+	TaskTypeDNS:          true,
+	TaskTypeCTLog:        true,
+	TaskTypePortProbe:    true,
+	TaskTypeWebProbe:     true,
+	TaskTypeFingerprint:  true,
+	TaskTypeCloudSync:    true,
+	TaskTypePassiveIntel: true,
+	TaskTypeImport:       true,
+}
+
+var validTaskStatuses = map[string]bool{
+	TaskRunStatusPending:   true,
+	TaskRunStatusRunning:   true,
+	TaskRunStatusSuccess:   true,
+	TaskRunStatusPartial:   true,
+	TaskRunStatusFailed:    true,
+	TaskRunStatusCancelled: true,
 }
 
 var validTargetTypes = map[string]bool{
@@ -87,6 +120,99 @@ func validateStatus(raw string) (string, error) {
 		return "", ErrInvalidStatus
 	}
 	return raw, nil
+}
+
+func validateTaskType(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if !validTaskTypes[v] {
+		return "", ErrInvalidTaskType
+	}
+	return v, nil
+}
+
+func validateTaskStatus(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if !validTaskStatuses[v] {
+		return "", ErrInvalidTaskStatus
+	}
+	return v, nil
+}
+
+func validateTemplateMeta(tenantID, orgID, name string, scopeID, projectID uint64, taskType, actorID string) error {
+	if len(name) == 0 || len(name) > maxTemplateName {
+		return ErrInvalidName
+	}
+	if len(tenantID) > maxTenantIDLen || len(orgID) > maxOrgIDLen {
+		return ErrMetadataTooLong
+	}
+	if scopeID == 0 || projectID == 0 {
+		return ErrInvalidProjectID
+	}
+	if _, err := validateTaskType(taskType); err != nil {
+		return err
+	}
+	if len(actorID) == 0 || len(actorID) > maxActorLen {
+		return ErrInvalidActorID
+	}
+	return nil
+}
+
+func normalizeTemplateConfig(raw string) (string, error) {
+	config := strings.TrimSpace(raw)
+	if config == "" {
+		return "{}", nil
+	}
+	if len(config) > maxTemplateConfigLen {
+		return "", ErrInvalidTaskConfig
+	}
+	if !json.Valid([]byte(config)) {
+		return "", ErrInvalidTaskConfig
+	}
+	if err := validateSensitiveConfig(config); err != nil {
+		return "", err
+	}
+	return config, nil
+}
+
+func validateTemplateConfig(raw string) error {
+	_, err := normalizeTemplateConfig(raw)
+	return err
+}
+
+func validateTemplateSchedule(raw string) error {
+	s := strings.TrimSpace(raw)
+	if len(s) > maxTaskScheduleLen {
+		return ErrInvalidTaskSchedule
+	}
+	return nil
+}
+
+func validateSensitiveConfig(raw string) error {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	if strings.Contains(lower, "password") ||
+		strings.Contains(lower, "token") ||
+		strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "authorization") ||
+		strings.Contains(lower, "cookie") {
+		return ErrInvalidTaskConfig
+	}
+	return nil
+}
+
+func validateTaskLimits(timeoutSeconds, rateLimit, concurrency, retryLimit int) error {
+	if timeoutSeconds < 1 || timeoutSeconds > 86400 {
+		return ErrInvalidTaskLimits
+	}
+	if rateLimit < 1 || rateLimit > 10000 {
+		return ErrInvalidTaskLimits
+	}
+	if concurrency < 1 || concurrency > 500 {
+		return ErrInvalidTaskLimits
+	}
+	if retryLimit < 0 || retryLimit > 100 {
+		return ErrInvalidTaskLimits
+	}
+	return nil
 }
 
 func validateScopeWindow(validFrom, validUntil time.Time) error {

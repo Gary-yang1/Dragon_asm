@@ -13,11 +13,25 @@ import (
 )
 
 var (
-	ErrInvalidScopeAction = errors.New("discovery: invalid scope action")
+	ErrInvalidScopeAction    = errors.New("discovery: invalid scope action")
+	ErrInvalidTemplateAction = errors.New("discovery: invalid template action")
+	ErrInvalidRunTransition  = errors.New("discovery: invalid task run transition")
 )
 
-// Service applies the M2-1 scope authorization rules and writes audit events for
-// mutating operations.
+var validRunTransitions = map[string]map[string]bool{
+	TaskRunStatusPending: {
+		TaskRunStatusRunning:   true,
+		TaskRunStatusCancelled: true,
+	},
+	TaskRunStatusRunning: {
+		TaskRunStatusSuccess:   true,
+		TaskRunStatusPartial:   true,
+		TaskRunStatusFailed:    true,
+		TaskRunStatusCancelled: true,
+	},
+}
+
+// Service applies the M2-1/M2-2 discovery scope/task operations and writes audit events.
 type Service struct {
 	repo      Repository
 	db        *sql.DB
@@ -33,7 +47,7 @@ type auditRecorder interface {
 // ServiceOption configures Service behavior.
 type ServiceOption func(*Service)
 
-// WithDB enables transaction boundaries for mutating scope APIs.
+// WithDB enables transaction boundaries for mutating APIs.
 func WithDB(db *sql.DB) ServiceOption {
 	return func(s *Service) {
 		s.db = db
@@ -54,7 +68,7 @@ func WithNow(now func() time.Time) ServiceOption {
 	}
 }
 
-// NewService builds the discovery scope service.
+// NewService builds the discovery service.
 func NewService(repo Repository, opts ...ServiceOption) *Service {
 	s := &Service{
 		repo:  repo,
@@ -140,7 +154,7 @@ func (s *Service) CreateScope(ctx context.Context, in CreateScopeInput) (*Scope,
 		if err != nil {
 			return err
 		}
-		return s.recordAuditWithSink(ctx, txAudit, ActionScopeCreate, nil, scope, in.ActorID, in.Meta)
+		return s.recordAuditWithSink(ctx, txAudit, ActionScopeCreate, scope, nil, in.ActorID, in.Meta)
 	}); err != nil {
 		return nil, err
 	}
@@ -304,7 +318,6 @@ func (s *Service) ListScopes(ctx context.Context, projectID uint64) ([]*Scope, e
 }
 
 // IsTargetAllowed validates time window + target policy and returns a reason.
-// Downstream engine layers can use this reason for explicit decisions and audit.
 func (s *Service) IsTargetAllowed(ctx context.Context, projectID, scopeID uint64, rawTarget string) (bool, ScopeRejectReason, error) {
 	if projectID == 0 || scopeID == 0 {
 		return false, ReasonScopeNotFound, ErrInvalidScopeID
@@ -360,41 +373,449 @@ func (s *Service) IsTargetAllowed(ctx context.Context, projectID, scopeID uint64
 	return false, ReasonNoMatch, nil
 }
 
-func (s *Service) recordAudit(ctx context.Context, action string, before, after *Scope, actorID string, meta AuditMeta) error {
+// CreateTaskTemplate creates a task template and validates scope ownership by project.
+func (s *Service) CreateTaskTemplate(ctx context.Context, in CreateTaskTemplateInput) (*TaskTemplate, error) {
+	if err := validateTemplateMeta(in.TenantID, in.OrgID, in.Name, in.ScopeID, in.ProjectID, in.TaskType, in.ActorID); err != nil {
+		return nil, err
+	}
+	if err := validateTemplateSchedule(in.Schedule); err != nil {
+		return nil, err
+	}
+	config, err := normalizeTemplateConfig(in.Config)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTaskLimits(in.TimeoutSeconds, in.RateLimit, in.Concurrency, in.RetryLimit); err != nil {
+		return nil, err
+	}
+	template := (*TaskTemplate)(nil)
+
+	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		if _, err := repo.GetScope(ctx, in.ProjectID, in.ScopeID); err != nil {
+			return err
+		}
+		id, err := repo.CreateTaskTemplate(ctx, CreateTaskTemplateParams{
+			TenantID:       in.TenantID,
+			OrgID:          in.OrgID,
+			ProjectID:      in.ProjectID,
+			ScopeID:        in.ScopeID,
+			Name:           in.Name,
+			TaskType:       in.TaskType,
+			Config:         config,
+			Schedule:       in.Schedule,
+			Enabled:        in.Enabled,
+			TimeoutSeconds: in.TimeoutSeconds,
+			RateLimit:      in.RateLimit,
+			Concurrency:    in.Concurrency,
+			RetryLimit:     in.RetryLimit,
+			ActorID:        in.ActorID,
+		})
+		if err != nil {
+			return err
+		}
+		t, err := repo.GetTaskTemplate(ctx, in.ProjectID, id)
+		if err != nil {
+			return err
+		}
+		if err := s.recordAuditWithSink(ctx, txAudit, ActionTemplateCreate, nil, t, in.ActorID, in.Meta); err != nil {
+			return err
+		}
+		template = t
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return template, nil
+}
+
+// UpdateTaskTemplate updates fields but does not change scope association.
+func (s *Service) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateInput) (*TaskTemplate, error) {
+	if in.ProjectID == 0 || in.TemplateID == 0 {
+		return nil, ErrInvalidTemplateID
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return nil, ErrInvalidActorID
+	}
+	var updated *TaskTemplate
+
+	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		before, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
+		if err != nil {
+			return err
+		}
+
+		name := before.Name
+		if in.Name != nil {
+			name = strings.TrimSpace(*in.Name)
+			if len(name) == 0 || len(name) > maxTemplateName {
+				return ErrInvalidName
+			}
+		}
+		taskType := before.TaskType
+		if in.TaskType != nil {
+			t, err := validateTaskType(*in.TaskType)
+			if err != nil {
+				return err
+			}
+			taskType = t
+		}
+		config := before.Config
+		if in.Config != nil {
+			var normalizedConfig string
+			normalizedConfig, err = normalizeTemplateConfig(*in.Config)
+			if err != nil {
+				return err
+			}
+			config = normalizedConfig
+		}
+		schedule := before.Schedule
+		if in.Schedule != nil {
+			if err := validateTemplateSchedule(*in.Schedule); err != nil {
+				return err
+			}
+			schedule = *in.Schedule
+		}
+
+		timeoutSeconds := before.TimeoutSeconds
+		if in.TimeoutSeconds != nil {
+			timeoutSeconds = *in.TimeoutSeconds
+		}
+		rateLimit := before.RateLimit
+		if in.RateLimit != nil {
+			rateLimit = *in.RateLimit
+		}
+		concurrency := before.Concurrency
+		if in.Concurrency != nil {
+			concurrency = *in.Concurrency
+		}
+		retryLimit := before.RetryLimit
+		if in.RetryLimit != nil {
+			retryLimit = *in.RetryLimit
+		}
+		if err := validateTaskLimits(timeoutSeconds, rateLimit, concurrency, retryLimit); err != nil {
+			return err
+		}
+
+		if err := repo.UpdateTaskTemplate(ctx, UpdateTaskTemplateParams{
+			TemplateID:     in.TemplateID,
+			TenantID:       in.TenantID,
+			OrgID:          in.OrgID,
+			ProjectID:      in.ProjectID,
+			Name:           name,
+			TaskType:       taskType,
+			Config:         config,
+			Schedule:       schedule,
+			TimeoutSeconds: timeoutSeconds,
+			RateLimit:      rateLimit,
+			Concurrency:    concurrency,
+			RetryLimit:     retryLimit,
+			ActorID:        in.ActorID,
+		}); err != nil {
+			return err
+		}
+		after, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
+		if err != nil {
+			return err
+		}
+		if err := s.recordAuditWithSink(ctx, txAudit, ActionTemplateUpdate, before, after, in.ActorID, in.Meta); err != nil {
+			return err
+		}
+		updated = after
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// SetTaskTemplateEnabled updates template enabled flag.
+func (s *Service) SetTaskTemplateEnabled(ctx context.Context, in SetTaskTemplateEnabledInput) (*TaskTemplate, error) {
+	if in.ProjectID == 0 || in.TemplateID == 0 {
+		return nil, ErrInvalidTemplateID
+	}
+	if len(in.ActorID) == 0 || len(in.ActorID) > maxActorLen {
+		return nil, ErrInvalidActorID
+	}
+	var updated *TaskTemplate
+	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		before, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
+		if err != nil {
+			return err
+		}
+		if err := repo.SetTaskTemplateEnabled(ctx, in.ProjectID, in.TemplateID, in.Enabled, in.ActorID); err != nil {
+			return err
+		}
+		after, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
+		if err != nil {
+			return err
+		}
+		if err := s.recordAuditWithSink(ctx, txAudit, ActionTemplateEnable, before, after, in.ActorID, in.Meta); err != nil {
+			return err
+		}
+		updated = after
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, ErrNotFound
+	}
+	return updated, nil
+}
+
+// DeleteTaskTemplate soft-deletes one task template.
+func (s *Service) DeleteTaskTemplate(ctx context.Context, in DeleteTaskTemplateInput) error {
+	if in.ProjectID == 0 || in.TemplateID == 0 {
+		return ErrInvalidTemplateID
+	}
+	if len(in.ActorID) == 0 || len(in.ActorID) > maxActorLen {
+		return ErrInvalidActorID
+	}
+	return s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		before, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
+		if err != nil {
+			return err
+		}
+		if err := repo.DeleteTaskTemplate(ctx, in.ProjectID, in.TemplateID, in.ActorID); err != nil {
+			return err
+		}
+		if err := s.recordAuditWithSink(ctx, txAudit, ActionTemplateDelete, before, nil, in.ActorID, in.Meta); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// GetTaskTemplate returns one live template.
+func (s *Service) GetTaskTemplate(ctx context.Context, projectID, templateID uint64) (*TaskTemplate, error) {
+	if projectID == 0 || templateID == 0 {
+		return nil, ErrInvalidTemplateID
+	}
+	return s.repo.GetTaskTemplate(ctx, projectID, templateID)
+}
+
+// ListTaskTemplates returns one project's templates.
+func (s *Service) ListTaskTemplates(ctx context.Context, projectID uint64) ([]*TaskTemplate, error) {
+	if projectID == 0 {
+		return nil, ErrInvalidProjectID
+	}
+	return s.repo.ListTaskTemplates(ctx, projectID)
+}
+
+// CreateTaskRun creates a pending run bound to a template.
+func (s *Service) CreateTaskRun(ctx context.Context, in CreateTaskRunInput) (*TaskRun, error) {
+	if in.ProjectID == 0 || in.TemplateID == 0 {
+		return nil, ErrInvalidTemplateID
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return nil, ErrInvalidActorID
+	}
+	var run *TaskRun
+
+	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		template, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
+		if err != nil {
+			return err
+		}
+		if !template.Enabled {
+			return ErrTemplateDisabled
+		}
+		id, err := repo.CreateTaskRun(ctx, CreateTaskRunParams{
+			TenantID:       template.TenantID,
+			OrgID:          template.OrgID,
+			ProjectID:      in.ProjectID,
+			TemplateID:     in.TemplateID,
+			ScopeID:        template.ScopeID,
+			TaskType:       template.TaskType,
+			Status:         TaskRunStatusPending,
+			Progress:       0,
+			TimeoutSeconds: template.TimeoutSeconds,
+			RateLimit:      template.RateLimit,
+			Concurrency:    template.Concurrency,
+			RetryLimit:     template.RetryLimit,
+			Attempt:        0,
+			EngineJobID:    "",
+			DispatchedAt:   time.Time{},
+			LastCallbackAt: time.Time{},
+			ResultCount:    0,
+			ActorID:        in.ActorID,
+		})
+		if err != nil {
+			return err
+		}
+		run, err = repo.GetTaskRun(ctx, in.ProjectID, id)
+		if err != nil {
+			return err
+		}
+		if err := s.recordAuditWithSink(ctx, txAudit, ActionRunCreate, nil, run, in.ActorID, in.Meta); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+// GetTaskRun returns one live run.
+func (s *Service) GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
+	if projectID == 0 || runID == 0 {
+		return nil, ErrInvalidTaskRunID
+	}
+	return s.repo.GetTaskRun(ctx, projectID, runID)
+}
+
+// ListTaskRuns returns one project's live task runs.
+func (s *Service) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error) {
+	if projectID == 0 {
+		return nil, ErrInvalidProjectID
+	}
+	return s.repo.ListTaskRuns(ctx, projectID)
+}
+
+// MarkTaskRunRunning transitions pending -> running.
+func (s *Service) MarkTaskRunRunning(ctx context.Context, in UpdateTaskRunStatusInput) error {
+	return s.changeTaskRunStatus(ctx, in, ActionRunStatusChange, TaskRunStatusRunning)
+}
+
+// MarkTaskRunSucceeded transitions running -> success.
+func (s *Service) MarkTaskRunSucceeded(ctx context.Context, in UpdateTaskRunStatusInput) error {
+	return s.changeTaskRunStatus(ctx, in, ActionRunStatusChange, TaskRunStatusSuccess)
+}
+
+// MarkTaskRunPartialSuccess transitions running -> partial_success.
+func (s *Service) MarkTaskRunPartialSuccess(ctx context.Context, in UpdateTaskRunStatusInput) error {
+	return s.changeTaskRunStatus(ctx, in, ActionRunStatusChange, TaskRunStatusPartial)
+}
+
+// MarkTaskRunFailed transitions running -> failed.
+func (s *Service) MarkTaskRunFailed(ctx context.Context, in UpdateTaskRunStatusInput) error {
+	return s.changeTaskRunStatus(ctx, in, ActionRunStatusChange, TaskRunStatusFailed)
+}
+
+// MarkTaskRunCancelled transitions pending|running -> cancelled.
+func (s *Service) MarkTaskRunCancelled(ctx context.Context, in UpdateTaskRunStatusInput) error {
+	return s.changeTaskRunStatus(ctx, in, ActionRunCancel, TaskRunStatusCancelled)
+}
+
+// IncrementTaskRunAttempt increments one run attempt count.
+func (s *Service) IncrementTaskRunAttempt(ctx context.Context, in IncrementTaskRunAttemptInput) error {
+	if in.ProjectID == 0 || in.RunID == 0 {
+		return ErrInvalidTaskRunID
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return ErrInvalidActorID
+	}
+	return s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		if _, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID); err != nil {
+			return err
+		}
+		now := s.nowFn()
+		if err := repo.IncrementRunAttempt(ctx, in.ProjectID, in.RunID, in.ActorID, now); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (s *Service) changeTaskRunStatus(ctx context.Context, in UpdateTaskRunStatusInput, action, targetStatus string) error {
+	if in.ProjectID == 0 || in.RunID == 0 {
+		return ErrInvalidTaskRunID
+	}
+	if _, err := validateTaskStatus(targetStatus); err != nil {
+		return err
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return ErrInvalidActorID
+	}
+
+	return s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		before, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return err
+		}
+		if !isTaskRunTransitionAllowed(before.Status, targetStatus) {
+			return ErrInvalidRunTransition
+		}
+
+		now := s.nowFn()
+		switch targetStatus {
+		case TaskRunStatusRunning:
+			if err := repo.MarkRunRunning(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, now); err != nil {
+				return err
+			}
+		case TaskRunStatusSuccess:
+			if err := repo.MarkRunSucceeded(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now); err != nil {
+				return err
+			}
+		case TaskRunStatusPartial:
+			if err := repo.MarkRunPartialSuccess(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now); err != nil {
+				return err
+			}
+		case TaskRunStatusFailed:
+			if err := repo.MarkRunFailed(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, in.ResultCount, now); err != nil {
+				return err
+			}
+		case TaskRunStatusCancelled:
+			if err := repo.MarkRunCancelled(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, now); err != nil {
+				return err
+			}
+		}
+
+		after, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return err
+		}
+		if action == "" {
+			action = ActionRunStatusChange
+		}
+		return s.recordAuditWithSink(ctx, txAudit, action, before, after, in.ActorID, in.Meta)
+	})
+}
+
+func isTaskRunTransitionAllowed(from, to string) bool {
+	nexts, ok := validRunTransitions[from]
+	if !ok {
+		return false
+	}
+	return nexts[to]
+}
+
+func (s *Service) recordAudit(ctx context.Context, action string, before, after any, actorID string, meta AuditMeta) error {
 	return s.recordAuditWithSink(ctx, s.auditSink, action, before, after, actorID, meta)
 }
 
-func (s *Service) recordAuditWithSink(ctx context.Context, sink auditRecorder, action string, before, after *Scope, actorID string, meta AuditMeta) error {
+func (s *Service) recordAuditWithSink(ctx context.Context, sink auditRecorder, action string, before, after any, actorID string, meta AuditMeta) error {
 	if sink == nil {
 		return nil
 	}
-	if action != ActionScopeCreate && action != ActionScopeUpdate && action != ActionScopeDeactivate {
-		return ErrInvalidScopeAction
+	if action != ActionScopeCreate &&
+		action != ActionScopeUpdate &&
+		action != ActionScopeDeactivate &&
+		action != ActionTemplateCreate &&
+		action != ActionTemplateUpdate &&
+		action != ActionTemplateDelete &&
+		action != ActionTemplateEnable &&
+		action != ActionRunCreate &&
+		action != ActionRunStatusChange &&
+		action != ActionRunCancel {
+		return ErrInvalidTemplateAction
 	}
-	scope := after
-	if scope == nil {
-		scope = before
-	}
-	resourceID := ""
-	projectID := uint64(0)
-	tenantID := ""
-	orgID := ""
-	if scope != nil {
-		resourceID = fmt.Sprintf("%d", scope.ID)
-		projectID = scope.ProjectID
-		tenantID = scope.TenantID
-		orgID = scope.OrgID
+
+	entity, resourceType, err := extractAuditEntity(before, after)
+	if err != nil {
+		return err
 	}
 
 	return sink.Record(ctx, audit.Event{
-		TenantID:     tenantID,
-		OrgID:        orgID,
-		ProjectID:    projectID,
+		TenantID:     entity.tenantID,
+		OrgID:        entity.orgID,
+		ProjectID:    entity.projectID,
 		ActorID:      actorID,
 		ActorType:    audit.ActorUser,
 		Action:       action,
-		ResourceType: ResourceTypeScope,
-		ResourceID:   resourceID,
+		ResourceType: resourceType,
+		ResourceID:   fmt.Sprintf("%d", entity.resourceID),
 		Result:       audit.ResultSuccess,
 		IP:           meta.IP,
 		UserAgent:    meta.UserAgent,
@@ -403,4 +824,82 @@ func (s *Service) recordAuditWithSink(ctx context.Context, sink auditRecorder, a
 		After:        after,
 		Metadata:     meta,
 	})
+}
+
+type auditEntity struct {
+	resourceID uint64
+	projectID  uint64
+	tenantID   string
+	orgID      string
+}
+
+func extractAuditEntity(before any, after any) (auditEntity, string, error) {
+	var entity auditEntity
+	switch v := before.(type) {
+	case *Scope:
+		if v != nil {
+			entity = auditEntity{
+				resourceID: v.ID,
+				projectID:  v.ProjectID,
+				tenantID:   v.TenantID,
+				orgID:      v.OrgID,
+			}
+			return entity, ResourceTypeScope, nil
+		}
+	case *TaskTemplate:
+		if v != nil {
+			entity = auditEntity{
+				resourceID: v.ID,
+				projectID:  v.ProjectID,
+				tenantID:   v.TenantID,
+				orgID:      v.OrgID,
+			}
+			return entity, ResourceTypeTaskTemplate, nil
+		}
+	case *TaskRun:
+		if v != nil {
+			entity = auditEntity{
+				resourceID: v.ID,
+				projectID:  v.ProjectID,
+				tenantID:   v.TenantID,
+				orgID:      v.OrgID,
+			}
+			return entity, ResourceTypeTaskRun, nil
+		}
+	}
+
+	switch v := after.(type) {
+	case *Scope:
+		if v != nil {
+			entity = auditEntity{
+				resourceID: v.ID,
+				projectID:  v.ProjectID,
+				tenantID:   v.TenantID,
+				orgID:      v.OrgID,
+			}
+			return entity, ResourceTypeScope, nil
+		}
+	case *TaskTemplate:
+		if v != nil {
+			entity = auditEntity{
+				resourceID: v.ID,
+				projectID:  v.ProjectID,
+				tenantID:   v.TenantID,
+				orgID:      v.OrgID,
+			}
+			return entity, ResourceTypeTaskTemplate, nil
+		}
+	case *TaskRun:
+		if v != nil {
+			entity = auditEntity{
+				resourceID: v.ID,
+				projectID:  v.ProjectID,
+				tenantID:   v.TenantID,
+				orgID:      v.OrgID,
+			}
+			return entity, ResourceTypeTaskRun, nil
+		}
+	}
+
+	return entity, "", ErrInvalidTemplate
 }

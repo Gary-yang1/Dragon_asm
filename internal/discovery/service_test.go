@@ -12,17 +12,23 @@ import (
 )
 
 type fakeRepo struct {
-	scopes       map[uint64]map[uint64]*Scope
-	targets      map[uint64]map[uint64][]*ScopeTarget
-	clearCount   int
-	nextScopeID  uint64
-	nextTargetID uint64
+	scopes         map[uint64]map[uint64]*Scope
+	targets        map[uint64]map[uint64][]*ScopeTarget
+	clearCount     int
+	nextScopeID    uint64
+	nextTargetID   uint64
+	templates      map[uint64]map[uint64]*TaskTemplate
+	runs           map[uint64]map[uint64]*TaskRun
+	nextTemplateID uint64
+	nextRunID      uint64
 }
 
 func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
-		scopes:  make(map[uint64]map[uint64]*Scope),
-		targets: make(map[uint64]map[uint64][]*ScopeTarget),
+		scopes:    make(map[uint64]map[uint64]*Scope),
+		targets:   make(map[uint64]map[uint64][]*ScopeTarget),
+		templates: make(map[uint64]map[uint64]*TaskTemplate),
+		runs:      make(map[uint64]map[uint64]*TaskRun),
 	}
 }
 
@@ -154,6 +160,269 @@ func (r *fakeRepo) ClearScopeTargets(ctx context.Context, projectID, scopeID uin
 		return ErrNotFound
 	}
 	r.targets[projectID][scopeID] = nil
+	return nil
+}
+
+func (r *fakeRepo) CreateTaskTemplate(ctx context.Context, in CreateTaskTemplateParams) (uint64, error) {
+	_ = ctx
+	r.nextTemplateID++
+	id := r.nextTemplateID
+	if _, ok := r.templates[in.ProjectID]; !ok {
+		r.templates[in.ProjectID] = make(map[uint64]*TaskTemplate)
+	}
+	r.templates[in.ProjectID][id] = &TaskTemplate{
+		ID:             id,
+		TenantID:       in.TenantID,
+		OrgID:          in.OrgID,
+		ProjectID:      in.ProjectID,
+		ScopeID:        in.ScopeID,
+		Name:           in.Name,
+		TaskType:       in.TaskType,
+		Config:         in.Config,
+		Schedule:       in.Schedule,
+		Enabled:        in.Enabled,
+		TimeoutSeconds: in.TimeoutSeconds,
+		RateLimit:      in.RateLimit,
+		Concurrency:    in.Concurrency,
+		RetryLimit:     in.RetryLimit,
+		CreatedAt:      time.Time{},
+		UpdatedAt:      time.Time{},
+		CreatedBy:      in.ActorID,
+		UpdatedBy:      in.ActorID,
+	}
+	return id, nil
+}
+
+func (r *fakeRepo) GetTaskTemplate(ctx context.Context, projectID, templateID uint64) (*TaskTemplate, error) {
+	_ = ctx
+	pp, ok := r.templates[projectID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	template, ok := pp[templateID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *template
+	return &cp, nil
+}
+
+func (r *fakeRepo) ListTaskTemplates(ctx context.Context, projectID uint64) ([]*TaskTemplate, error) {
+	_ = ctx
+	pp, ok := r.templates[projectID]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]*TaskTemplate, 0, len(pp))
+	for _, template := range pp {
+		cp := *template
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (r *fakeRepo) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateParams) error {
+	_ = ctx
+	template, ok := r.templates[in.ProjectID][in.TemplateID]
+	if !ok {
+		return ErrNotFound
+	}
+	template.Name = in.Name
+	template.TaskType = in.TaskType
+	template.Config = in.Config
+	template.Schedule = in.Schedule
+	template.TimeoutSeconds = in.TimeoutSeconds
+	template.RateLimit = in.RateLimit
+	template.Concurrency = in.Concurrency
+	template.RetryLimit = in.RetryLimit
+	template.UpdatedBy = in.ActorID
+	return nil
+}
+
+func (r *fakeRepo) SetTaskTemplateEnabled(ctx context.Context, projectID, templateID uint64, enabled bool, actorID string) error {
+	_ = ctx
+	template, ok := r.templates[projectID][templateID]
+	if !ok {
+		return ErrNotFound
+	}
+	template.Enabled = enabled
+	template.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) DeleteTaskTemplate(ctx context.Context, projectID, templateID uint64, actorID string) error {
+	_ = ctx
+	if _, ok := r.templates[projectID]; !ok {
+		return ErrNotFound
+	}
+	template, ok := r.templates[projectID][templateID]
+	if !ok {
+		return ErrNotFound
+	}
+	template.DeletedAt = time.Now().UTC()
+	template.UpdatedBy = actorID
+	delete(r.templates[projectID], templateID)
+	return nil
+}
+
+func (r *fakeRepo) CreateTaskRun(ctx context.Context, in CreateTaskRunParams) (uint64, error) {
+	_ = ctx
+	r.nextRunID++
+	id := r.nextRunID
+	if _, ok := r.runs[in.ProjectID]; !ok {
+		r.runs[in.ProjectID] = make(map[uint64]*TaskRun)
+	}
+	r.runs[in.ProjectID][id] = &TaskRun{
+		ID:                id,
+		TenantID:          in.TenantID,
+		OrgID:             in.OrgID,
+		ProjectID:         in.ProjectID,
+		TemplateID:        in.TemplateID,
+		ScopeID:           in.ScopeID,
+		TaskType:          in.TaskType,
+		Status:            in.Status,
+		Progress:          in.Progress,
+		TimeoutSeconds:    in.TimeoutSeconds,
+		RateLimit:         in.RateLimit,
+		Concurrency:       in.Concurrency,
+		RetryLimit:        in.RetryLimit,
+		Attempt:           in.Attempt,
+		EngineJobID:       in.EngineJobID,
+		DispatchedAt:      in.DispatchedAt,
+		LastCallbackAt:    in.LastCallbackAt,
+		ResultCount:       in.ResultCount,
+		CallbackSecretRef: in.CallbackSecretRef,
+		StartedAt:         in.StartedAt,
+		FinishedAt:        in.FinishedAt,
+		ErrorSummary:      in.ErrorSummary,
+		CreatedBy:         in.ActorID,
+		UpdatedBy:         in.ActorID,
+	}
+	return id, nil
+}
+
+func (r *fakeRepo) GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
+	_ = ctx
+	pp, ok := r.runs[projectID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	run, ok := pp[runID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *run
+	return &cp, nil
+}
+
+func (r *fakeRepo) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error) {
+	_ = ctx
+	pp, ok := r.runs[projectID]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]*TaskRun, 0, len(pp))
+	for _, run := range pp {
+		cp := *run
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (r *fakeRepo) MarkRunRunning(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, startedAt time.Time) error {
+	_ = actorID
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != fromStatus {
+		return ErrInvalidRunTransition
+	}
+	run.Status = TaskRunStatusRunning
+	run.StartedAt = startedAt
+	run.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) MarkRunSucceeded(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error {
+	_ = actorID
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != fromStatus {
+		return ErrInvalidRunTransition
+	}
+	run.Status = TaskRunStatusSuccess
+	run.Progress = 100
+	run.ResultCount = resultCount
+	run.ErrorSummary = ""
+	run.FinishedAt = now
+	run.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error {
+	_ = actorID
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != fromStatus {
+		return ErrInvalidRunTransition
+	}
+	run.Status = TaskRunStatusPartial
+	run.Progress = 100
+	run.ResultCount = resultCount
+	run.ErrorSummary = ""
+	run.FinishedAt = now
+	run.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) MarkRunFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, resultCount uint64, now time.Time) error {
+	_ = actorID
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != fromStatus {
+		return ErrInvalidRunTransition
+	}
+	run.Status = TaskRunStatusFailed
+	run.Progress = 0
+	run.ResultCount = resultCount
+	run.ErrorSummary = errorSummary
+	run.FinishedAt = now
+	run.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) MarkRunCancelled(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, now time.Time) error {
+	_ = actorID
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != fromStatus {
+		return ErrInvalidRunTransition
+	}
+	run.Status = TaskRunStatusCancelled
+	run.ErrorSummary = errorSummary
+	run.Progress = 0
+	run.FinishedAt = now
+	run.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) IncrementRunAttempt(ctx context.Context, projectID, runID uint64, actorID string, now time.Time) error {
+	_ = now
+	_ = actorID
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	run.Attempt++
 	return nil
 }
 
@@ -545,4 +814,364 @@ func TestServiceGetScopeReturnsProjectScopedScopeAndTargets(t *testing.T) {
 
 	_, err = svc.GetScope(context.Background(), 13, id)
 	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestCreateTaskTemplateValidatesAndPersists(t *testing.T) {
+	repo := newFakeRepo()
+	auditSink := &fakeAudit{}
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+
+	svc := NewService(repo, WithAuditSink(auditSink))
+	out, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Schedule:       "*/10 * * * *",
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "template", out.Name)
+	require.Len(t, auditSink.events, 1)
+	assert.Equal(t, ActionTemplateCreate, auditSink.events[0].Action)
+}
+
+func TestCreateTaskTemplateRejectsSensitiveConfig(t *testing.T) {
+	repo := newFakeRepo()
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+
+	svc := NewService(repo)
+	_, err = svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"password":"super"}`,
+		Schedule:       "*/10 * * * *",
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	assert.ErrorIs(t, err, ErrInvalidTaskConfig)
+}
+
+func TestCreateTaskTemplateEmptyConfigDefaultsToEmptyObject(t *testing.T) {
+	repo := newFakeRepo()
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+
+	svc := NewService(repo)
+	out, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         "",
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "{}", out.Config)
+}
+
+func TestUpdateTaskTemplateEmptyConfigDefaultsToEmptyObject(t *testing.T) {
+	repo := newFakeRepo()
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+
+	svc := NewService(repo)
+	created, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+
+	empty := ""
+	updated, err := svc.UpdateTaskTemplate(context.Background(), UpdateTaskTemplateInput{
+		TemplateID: created.ID,
+		ProjectID:  1,
+		Config:     &empty,
+		ActorID:    "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "{}", updated.Config)
+}
+
+func TestCreateTaskRunUsesTemplateSnapshot(t *testing.T) {
+	repo := newFakeRepo()
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+
+	svc := NewService(repo)
+	template, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+
+	run, err := svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+		TemplateID: template.ID,
+		ProjectID:  1,
+		ActorID:    "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, template.ScopeID, run.ScopeID)
+	assert.Equal(t, template.TaskType, run.TaskType)
+	assert.Equal(t, TaskRunStatusPending, run.Status)
+}
+
+func TestCreateTaskRunRejectsDisabledTemplate(t *testing.T) {
+	repo := newFakeRepo()
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+
+	svc := NewService(repo)
+	template, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Enabled:        false,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+		TemplateID: template.ID,
+		ProjectID:  1,
+		ActorID:    "alice",
+	})
+	assert.ErrorIs(t, err, ErrTemplateDisabled)
+}
+
+func TestTaskRunTransitionMachineEnforced(t *testing.T) {
+	repo := newFakeRepo()
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+	svc := NewService(repo)
+	template, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+	run, err := svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+		TemplateID: template.ID,
+		ProjectID:  1,
+		ActorID:    "alice",
+	})
+	require.NoError(t, err)
+
+	err = svc.MarkTaskRunSucceeded(context.Background(), UpdateTaskRunStatusInput{
+		RunID:       run.ID,
+		ProjectID:   1,
+		ActorID:     "alice",
+		ResultCount: 8,
+	})
+	assert.ErrorIs(t, err, ErrInvalidRunTransition)
+
+	err = svc.MarkTaskRunRunning(context.Background(), UpdateTaskRunStatusInput{
+		RunID:     run.ID,
+		ProjectID: 1,
+		ActorID:   "alice",
+	})
+	require.NoError(t, err)
+
+	err = svc.MarkTaskRunFailed(context.Background(), UpdateTaskRunStatusInput{
+		RunID:        run.ID,
+		ProjectID:    1,
+		ActorID:      "alice",
+		ResultCount:  3,
+		ErrorSummary: "timeout",
+	})
+	require.NoError(t, err)
+
+	err = svc.MarkTaskRunRunning(context.Background(), UpdateTaskRunStatusInput{
+		RunID:     run.ID,
+		ProjectID: 1,
+		ActorID:   "alice",
+	})
+	assert.ErrorIs(t, err, ErrInvalidRunTransition)
+}
+
+func TestSetAndDeleteTaskTemplateAudit(t *testing.T) {
+	repo := newFakeRepo()
+	auditSink := &fakeAudit{}
+	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    time.Now().Add(-time.Minute),
+		ValidUntil:   time.Now().Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+
+	svc := NewService(repo, WithAuditSink(auditSink))
+	template, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        1,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         `{"target":"example.com"}`,
+		Enabled:        true,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.SetTaskTemplateEnabled(context.Background(), SetTaskTemplateEnabledInput{
+		TemplateID: template.ID,
+		ProjectID:  1,
+		Enabled:    false,
+		ActorID:    "alice",
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.DeleteTaskTemplate(context.Background(), DeleteTaskTemplateInput{
+		TemplateID: template.ID,
+		ProjectID:  1,
+		ActorID:    "alice",
+	}))
+
+	assert.Equal(t, ActionTemplateCreate, auditSink.events[0].Action)
+	assert.Equal(t, ActionTemplateEnable, auditSink.events[1].Action)
+	assert.Equal(t, ActionTemplateDelete, auditSink.events[2].Action)
 }

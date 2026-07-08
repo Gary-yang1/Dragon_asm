@@ -8,6 +8,7 @@ package dbgen
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -57,6 +58,130 @@ func (q *Queries) CreateScope(ctx context.Context, arg CreateScopeParams) (sql.R
 	)
 }
 
+const createTaskRun = `-- name: CreateTaskRun :execresult
+INSERT INTO task_run (
+    tenant_id, org_id, project_id, template_id, scope_id, task_type,
+    status, progress, timeout_seconds, rate_limit, concurrency, retry_limit,
+    attempt, engine_job_id, dispatched_at, last_callback_at, result_count,
+    callback_secret_ref, started_at, finished_at, error_summary, created_by, updated_by
+) VALUES (
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?
+)
+`
+
+type CreateTaskRunParams struct {
+	TenantID          string    `db:"tenant_id" json:"tenant_id"`
+	OrgID             string    `db:"org_id" json:"org_id"`
+	ProjectID         uint64    `db:"project_id" json:"project_id"`
+	TemplateID        uint64    `db:"template_id" json:"template_id"`
+	ScopeID           uint64    `db:"scope_id" json:"scope_id"`
+	TaskType          string    `db:"task_type" json:"task_type"`
+	Status            string    `db:"status" json:"status"`
+	Progress          int32     `db:"progress" json:"progress"`
+	TimeoutSeconds    int32     `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit         int32     `db:"rate_limit" json:"rate_limit"`
+	Concurrency       int32     `db:"concurrency" json:"concurrency"`
+	RetryLimit        int32     `db:"retry_limit" json:"retry_limit"`
+	Attempt           int32     `db:"attempt" json:"attempt"`
+	EngineJobID       string    `db:"engine_job_id" json:"engine_job_id"`
+	DispatchedAt      time.Time `db:"dispatched_at" json:"dispatched_at"`
+	LastCallbackAt    time.Time `db:"last_callback_at" json:"last_callback_at"`
+	ResultCount       uint64    `db:"result_count" json:"result_count"`
+	CallbackSecretRef string    `db:"callback_secret_ref" json:"callback_secret_ref"`
+	StartedAt         time.Time `db:"started_at" json:"started_at"`
+	FinishedAt        time.Time `db:"finished_at" json:"finished_at"`
+	ErrorSummary      string    `db:"error_summary" json:"error_summary"`
+	CreatedBy         string    `db:"created_by" json:"created_by"`
+	UpdatedBy         string    `db:"updated_by" json:"updated_by"`
+}
+
+// Task run queries.
+func (q *Queries) CreateTaskRun(ctx context.Context, arg CreateTaskRunParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createTaskRun,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.TemplateID,
+		arg.ScopeID,
+		arg.TaskType,
+		arg.Status,
+		arg.Progress,
+		arg.TimeoutSeconds,
+		arg.RateLimit,
+		arg.Concurrency,
+		arg.RetryLimit,
+		arg.Attempt,
+		arg.EngineJobID,
+		arg.DispatchedAt,
+		arg.LastCallbackAt,
+		arg.ResultCount,
+		arg.CallbackSecretRef,
+		arg.StartedAt,
+		arg.FinishedAt,
+		arg.ErrorSummary,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
+const createTaskTemplate = `-- name: CreateTaskTemplate :execresult
+INSERT INTO task_template (
+    tenant_id, org_id, project_id,
+    scope_id, name, task_type,
+    config, schedule, enabled,
+    timeout_seconds, rate_limit, concurrency, retry_limit,
+    created_by, updated_by
+) VALUES (
+    ?, ?, ?,
+    ?, ?, ?,
+    ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?
+)
+`
+
+type CreateTaskTemplateParams struct {
+	TenantID       string          `db:"tenant_id" json:"tenant_id"`
+	OrgID          string          `db:"org_id" json:"org_id"`
+	ProjectID      uint64          `db:"project_id" json:"project_id"`
+	ScopeID        uint64          `db:"scope_id" json:"scope_id"`
+	Name           string          `db:"name" json:"name"`
+	TaskType       string          `db:"task_type" json:"task_type"`
+	Config         json.RawMessage `db:"config" json:"config"`
+	Schedule       string          `db:"schedule" json:"schedule"`
+	Enabled        bool            `db:"enabled" json:"enabled"`
+	TimeoutSeconds int32           `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit      int32           `db:"rate_limit" json:"rate_limit"`
+	Concurrency    int32           `db:"concurrency" json:"concurrency"`
+	RetryLimit     int32           `db:"retry_limit" json:"retry_limit"`
+	CreatedBy      string          `db:"created_by" json:"created_by"`
+	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
+}
+
+// Task template queries.
+func (q *Queries) CreateTaskTemplate(ctx context.Context, arg CreateTaskTemplateParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createTaskTemplate,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.ScopeID,
+		arg.Name,
+		arg.TaskType,
+		arg.Config,
+		arg.Schedule,
+		arg.Enabled,
+		arg.TimeoutSeconds,
+		arg.RateLimit,
+		arg.Concurrency,
+		arg.RetryLimit,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
 const getScopeByID = `-- name: GetScopeByID :one
 SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
@@ -87,6 +212,115 @@ func (q *Queries) GetScopeByID(ctx context.Context, arg GetScopeByIDParams) (Sco
 		&i.DeletedAt,
 	)
 	return i, err
+}
+
+const getTaskRunByID = `-- name: GetTaskRunByID :one
+SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetTaskRunByIDParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) GetTaskRunByID(ctx context.Context, arg GetTaskRunByIDParams) (TaskRun, error) {
+	row := q.db.QueryRowContext(ctx, getTaskRunByID, arg.ID, arg.ProjectID)
+	var i TaskRun
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.TemplateID,
+		&i.ScopeID,
+		&i.TaskType,
+		&i.Status,
+		&i.Progress,
+		&i.TimeoutSeconds,
+		&i.RateLimit,
+		&i.Concurrency,
+		&i.RetryLimit,
+		&i.Attempt,
+		&i.EngineJobID,
+		&i.DispatchedAt,
+		&i.LastCallbackAt,
+		&i.ResultCount,
+		&i.CallbackSecretRef,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.ErrorSummary,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedBy,
+		&i.UpdatedBy,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getTaskTemplateByID = `-- name: GetTaskTemplateByID :one
+SELECT id, tenant_id, org_id, project_id, scope_id, name, task_type, config, schedule, enabled, timeout_seconds, rate_limit, concurrency, retry_limit, created_at, updated_at, created_by, updated_by, deleted_at FROM task_template
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetTaskTemplateByIDParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) GetTaskTemplateByID(ctx context.Context, arg GetTaskTemplateByIDParams) (TaskTemplate, error) {
+	row := q.db.QueryRowContext(ctx, getTaskTemplateByID, arg.ID, arg.ProjectID)
+	var i TaskTemplate
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.ScopeID,
+		&i.Name,
+		&i.TaskType,
+		&i.Config,
+		&i.Schedule,
+		&i.Enabled,
+		&i.TimeoutSeconds,
+		&i.RateLimit,
+		&i.Concurrency,
+		&i.RetryLimit,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedBy,
+		&i.UpdatedBy,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const incrementTaskRunAttempt = `-- name: IncrementTaskRunAttempt :exec
+UPDATE task_run
+SET attempt = attempt + ?,
+    updated_by = ?,
+    updated_at = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type IncrementTaskRunAttemptParams struct {
+	Attempt   int32     `db:"attempt" json:"attempt"`
+	UpdatedBy string    `db:"updated_by" json:"updated_by"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+	ID        uint64    `db:"id" json:"id"`
+	ProjectID uint64    `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) IncrementTaskRunAttempt(ctx context.Context, arg IncrementTaskRunAttemptParams) error {
+	_, err := q.db.ExecContext(ctx, incrementTaskRunAttempt,
+		arg.Attempt,
+		arg.UpdatedBy,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
 }
 
 const insertScopeTarget = `-- name: InsertScopeTarget :exec
@@ -220,6 +454,310 @@ func (q *Queries) ListScopesByProject(ctx context.Context, projectID uint64) ([]
 	return items, nil
 }
 
+const listTaskRunsByProject = `-- name: ListTaskRunsByProject :many
+SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id
+`
+
+func (q *Queries) ListTaskRunsByProject(ctx context.Context, projectID uint64) ([]TaskRun, error) {
+	rows, err := q.db.QueryContext(ctx, listTaskRunsByProject, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TaskRun{}
+	for rows.Next() {
+		var i TaskRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.TemplateID,
+			&i.ScopeID,
+			&i.TaskType,
+			&i.Status,
+			&i.Progress,
+			&i.TimeoutSeconds,
+			&i.RateLimit,
+			&i.Concurrency,
+			&i.RetryLimit,
+			&i.Attempt,
+			&i.EngineJobID,
+			&i.DispatchedAt,
+			&i.LastCallbackAt,
+			&i.ResultCount,
+			&i.CallbackSecretRef,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ErrorSummary,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTaskTemplatesByProject = `-- name: ListTaskTemplatesByProject :many
+SELECT id, tenant_id, org_id, project_id, scope_id, name, task_type, config, schedule, enabled, timeout_seconds, rate_limit, concurrency, retry_limit, created_at, updated_at, created_by, updated_by, deleted_at FROM task_template
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id
+`
+
+func (q *Queries) ListTaskTemplatesByProject(ctx context.Context, projectID uint64) ([]TaskTemplate, error) {
+	rows, err := q.db.QueryContext(ctx, listTaskTemplatesByProject, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TaskTemplate{}
+	for rows.Next() {
+		var i TaskTemplate
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.ScopeID,
+			&i.Name,
+			&i.TaskType,
+			&i.Config,
+			&i.Schedule,
+			&i.Enabled,
+			&i.TimeoutSeconds,
+			&i.RateLimit,
+			&i.Concurrency,
+			&i.RetryLimit,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markTaskRunCancelled = `-- name: MarkTaskRunCancelled :execresult
+UPDATE task_run
+SET status = ?,
+    progress = ?,
+    error_summary = ?,
+    finished_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunCancelledParams struct {
+	Status       string    `db:"status" json:"status"`
+	Progress     int32     `db:"progress" json:"progress"`
+	ErrorSummary string    `db:"error_summary" json:"error_summary"`
+	FinishedAt   time.Time `db:"finished_at" json:"finished_at"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	ID           uint64    `db:"id" json:"id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	Status_2     string    `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) MarkTaskRunCancelled(ctx context.Context, arg MarkTaskRunCancelledParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunCancelled,
+		arg.Status,
+		arg.Progress,
+		arg.ErrorSummary,
+		arg.FinishedAt,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status_2,
+	)
+}
+
+const markTaskRunFailed = `-- name: MarkTaskRunFailed :execresult
+UPDATE task_run
+SET status = ?,
+    progress = ?,
+    result_count = ?,
+    error_summary = ?,
+    finished_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunFailedParams struct {
+	Status       string    `db:"status" json:"status"`
+	Progress     int32     `db:"progress" json:"progress"`
+	ResultCount  uint64    `db:"result_count" json:"result_count"`
+	ErrorSummary string    `db:"error_summary" json:"error_summary"`
+	FinishedAt   time.Time `db:"finished_at" json:"finished_at"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	ID           uint64    `db:"id" json:"id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	Status_2     string    `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) MarkTaskRunFailed(ctx context.Context, arg MarkTaskRunFailedParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunFailed,
+		arg.Status,
+		arg.Progress,
+		arg.ResultCount,
+		arg.ErrorSummary,
+		arg.FinishedAt,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status_2,
+	)
+}
+
+const markTaskRunPartialSuccess = `-- name: MarkTaskRunPartialSuccess :execresult
+UPDATE task_run
+SET status = ?,
+    progress = ?,
+    result_count = ?,
+    error_summary = ?,
+    finished_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunPartialSuccessParams struct {
+	Status       string    `db:"status" json:"status"`
+	Progress     int32     `db:"progress" json:"progress"`
+	ResultCount  uint64    `db:"result_count" json:"result_count"`
+	ErrorSummary string    `db:"error_summary" json:"error_summary"`
+	FinishedAt   time.Time `db:"finished_at" json:"finished_at"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	ID           uint64    `db:"id" json:"id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	Status_2     string    `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) MarkTaskRunPartialSuccess(ctx context.Context, arg MarkTaskRunPartialSuccessParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunPartialSuccess,
+		arg.Status,
+		arg.Progress,
+		arg.ResultCount,
+		arg.ErrorSummary,
+		arg.FinishedAt,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status_2,
+	)
+}
+
+const markTaskRunRunning = `-- name: MarkTaskRunRunning :execresult
+UPDATE task_run
+SET status = ?,
+    progress = 0,
+    started_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunRunningParams struct {
+	Status    string    `db:"status" json:"status"`
+	StartedAt time.Time `db:"started_at" json:"started_at"`
+	UpdatedBy string    `db:"updated_by" json:"updated_by"`
+	ID        uint64    `db:"id" json:"id"`
+	ProjectID uint64    `db:"project_id" json:"project_id"`
+	Status_2  string    `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) MarkTaskRunRunning(ctx context.Context, arg MarkTaskRunRunningParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunRunning,
+		arg.Status,
+		arg.StartedAt,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status_2,
+	)
+}
+
+const markTaskRunSucceeded = `-- name: MarkTaskRunSucceeded :execresult
+UPDATE task_run
+SET status = ?,
+    progress = ?,
+    result_count = ?,
+    error_summary = ?,
+    finished_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunSucceededParams struct {
+	Status       string    `db:"status" json:"status"`
+	Progress     int32     `db:"progress" json:"progress"`
+	ResultCount  uint64    `db:"result_count" json:"result_count"`
+	ErrorSummary string    `db:"error_summary" json:"error_summary"`
+	FinishedAt   time.Time `db:"finished_at" json:"finished_at"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	ID           uint64    `db:"id" json:"id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	Status_2     string    `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) MarkTaskRunSucceeded(ctx context.Context, arg MarkTaskRunSucceededParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunSucceeded,
+		arg.Status,
+		arg.Progress,
+		arg.ResultCount,
+		arg.ErrorSummary,
+		arg.FinishedAt,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status_2,
+	)
+}
+
+const setTaskTemplateEnabled = `-- name: SetTaskTemplateEnabled :exec
+UPDATE task_template
+SET enabled = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type SetTaskTemplateEnabledParams struct {
+	Enabled   bool   `db:"enabled" json:"enabled"`
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) SetTaskTemplateEnabled(ctx context.Context, arg SetTaskTemplateEnabledParams) error {
+	_, err := q.db.ExecContext(ctx, setTaskTemplateEnabled,
+		arg.Enabled,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
+}
+
 const softDeleteScopeTargets = `-- name: SoftDeleteScopeTargets :exec
 UPDATE scope_target
 SET deleted_at = ?,
@@ -239,6 +777,30 @@ func (q *Queries) SoftDeleteScopeTargets(ctx context.Context, arg SoftDeleteScop
 		arg.DeletedAt,
 		arg.UpdatedBy,
 		arg.ScopeID,
+		arg.ProjectID,
+	)
+	return err
+}
+
+const softDeleteTaskTemplate = `-- name: SoftDeleteTaskTemplate :exec
+UPDATE task_template
+SET deleted_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type SoftDeleteTaskTemplateParams struct {
+	DeletedAt time.Time `db:"deleted_at" json:"deleted_at"`
+	UpdatedBy string    `db:"updated_by" json:"updated_by"`
+	ID        uint64    `db:"id" json:"id"`
+	ProjectID uint64    `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) SoftDeleteTaskTemplate(ctx context.Context, arg SoftDeleteTaskTemplateParams) error {
+	_, err := q.db.ExecContext(ctx, softDeleteTaskTemplate,
+		arg.DeletedAt,
+		arg.UpdatedBy,
+		arg.ID,
 		arg.ProjectID,
 	)
 	return err
@@ -301,6 +863,51 @@ func (q *Queries) UpdateScopeStatus(ctx context.Context, arg UpdateScopeStatusPa
 		arg.Status,
 		arg.UpdatedBy,
 		arg.UpdatedAt,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
+}
+
+const updateTaskTemplate = `-- name: UpdateTaskTemplate :exec
+UPDATE task_template
+SET name = ?,
+    task_type = ?,
+    config = ?,
+    schedule = ?,
+    timeout_seconds = ?,
+    rate_limit = ?,
+    concurrency = ?,
+    retry_limit = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdateTaskTemplateParams struct {
+	Name           string          `db:"name" json:"name"`
+	TaskType       string          `db:"task_type" json:"task_type"`
+	Config         json.RawMessage `db:"config" json:"config"`
+	Schedule       string          `db:"schedule" json:"schedule"`
+	TimeoutSeconds int32           `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit      int32           `db:"rate_limit" json:"rate_limit"`
+	Concurrency    int32           `db:"concurrency" json:"concurrency"`
+	RetryLimit     int32           `db:"retry_limit" json:"retry_limit"`
+	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
+	ID             uint64          `db:"id" json:"id"`
+	ProjectID      uint64          `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) UpdateTaskTemplate(ctx context.Context, arg UpdateTaskTemplateParams) error {
+	_, err := q.db.ExecContext(ctx, updateTaskTemplate,
+		arg.Name,
+		arg.TaskType,
+		arg.Config,
+		arg.Schedule,
+		arg.TimeoutSeconds,
+		arg.RateLimit,
+		arg.Concurrency,
+		arg.RetryLimit,
+		arg.UpdatedBy,
 		arg.ID,
 		arg.ProjectID,
 	)

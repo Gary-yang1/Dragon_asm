@@ -6,6 +6,7 @@ package dbgen
 
 import (
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -150,4 +151,56 @@ type ScopeTarget struct {
 	CreatedBy   string    `db:"created_by" json:"created_by"`
 	UpdatedBy   string    `db:"updated_by" json:"updated_by"`
 	DeletedAt   time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
+type TaskRun struct {
+	ID                uint64    `db:"id" json:"id"`
+	TenantID          string    `db:"tenant_id" json:"tenant_id"`
+	OrgID             string    `db:"org_id" json:"org_id"`
+	ProjectID         uint64    `db:"project_id" json:"project_id"`
+	TemplateID        uint64    `db:"template_id" json:"template_id"`
+	ScopeID           uint64    `db:"scope_id" json:"scope_id"`
+	TaskType          string    `db:"task_type" json:"task_type"`
+	Status            string    `db:"status" json:"status"`
+	Progress          int32     `db:"progress" json:"progress"`
+	TimeoutSeconds    int32     `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit         int32     `db:"rate_limit" json:"rate_limit"`
+	Concurrency       int32     `db:"concurrency" json:"concurrency"`
+	RetryLimit        int32     `db:"retry_limit" json:"retry_limit"`
+	Attempt           int32     `db:"attempt" json:"attempt"`
+	EngineJobID       string    `db:"engine_job_id" json:"engine_job_id"`
+	DispatchedAt      time.Time `db:"dispatched_at" json:"dispatched_at"`
+	LastCallbackAt    time.Time `db:"last_callback_at" json:"last_callback_at"`
+	ResultCount       uint64    `db:"result_count" json:"result_count"`
+	CallbackSecretRef string    `db:"callback_secret_ref" json:"callback_secret_ref"`
+	StartedAt         time.Time `db:"started_at" json:"started_at"`
+	FinishedAt        time.Time `db:"finished_at" json:"finished_at"`
+	ErrorSummary      string    `db:"error_summary" json:"error_summary"`
+	CreatedAt         time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy         string    `db:"created_by" json:"created_by"`
+	UpdatedBy         string    `db:"updated_by" json:"updated_by"`
+	DeletedAt         time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
+type TaskTemplate struct {
+	ID             uint64          `db:"id" json:"id"`
+	TenantID       string          `db:"tenant_id" json:"tenant_id"`
+	OrgID          string          `db:"org_id" json:"org_id"`
+	ProjectID      uint64          `db:"project_id" json:"project_id"`
+	ScopeID        uint64          `db:"scope_id" json:"scope_id"`
+	Name           string          `db:"name" json:"name"`
+	TaskType       string          `db:"task_type" json:"task_type"`
+	Config         json.RawMessage `db:"config" json:"config"`
+	Schedule       string          `db:"schedule" json:"schedule"`
+	Enabled        bool            `db:"enabled" json:"enabled"`
+	TimeoutSeconds int32           `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit      int32           `db:"rate_limit" json:"rate_limit"`
+	Concurrency    int32           `db:"concurrency" json:"concurrency"`
+	RetryLimit     int32           `db:"retry_limit" json:"retry_limit"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
+	CreatedBy      string          `db:"created_by" json:"created_by"`
+	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
+	DeletedAt      time.Time       `db:"deleted_at" json:"deleted_at"`
 }

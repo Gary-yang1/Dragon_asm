@@ -137,3 +137,21 @@ func TestValidateStatusDefaultsToInactive(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StatusInactive, status)
 }
+
+func TestNormalizeTemplateConfigDefaultsToEmptyJSONObject(t *testing.T) {
+	cfg, err := normalizeTemplateConfig("")
+	require.NoError(t, err)
+	assert.Equal(t, "{}", cfg)
+
+	cfg, err = normalizeTemplateConfig("  {\"target\":\"example.com\"} ")
+	require.NoError(t, err)
+	assert.Equal(t, `{"target":"example.com"}`, cfg)
+}
+
+func TestNormalizeTemplateConfigRejectsInvalidJSONAndSensitiveFields(t *testing.T) {
+	_, err := normalizeTemplateConfig("{bad json}")
+	assert.ErrorIs(t, err, ErrInvalidTaskConfig)
+
+	_, err = normalizeTemplateConfig(`{"authorization":"abc"}`)
+	assert.ErrorIs(t, err, ErrInvalidTaskConfig)
+}

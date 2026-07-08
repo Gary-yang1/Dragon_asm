@@ -16,6 +16,10 @@ type Querier interface {
 	// All reads are scoped by project_id and soft-delete sentinel so cross-project
 	// reads/writes cannot leak through missing repository checks.
 	CreateScope(ctx context.Context, arg CreateScopeParams) (sql.Result, error)
+	// Task run queries.
+	CreateTaskRun(ctx context.Context, arg CreateTaskRunParams) (sql.Result, error)
+	// Task template queries.
+	CreateTaskTemplate(ctx context.Context, arg CreateTaskTemplateParams) (sql.Result, error)
 	// Provisioning helper (used by seeding/tests; no public registration endpoint in M0-6).
 	CreateUser(ctx context.Context, arg CreateUserParams) (sql.Result, error)
 	// sqlc queries for the asset domain.
@@ -35,12 +39,15 @@ type Querier interface {
 	// upserted row; excludes soft-deleted rows.
 	GetRelationByEndpoints(ctx context.Context, arg GetRelationByEndpointsParams) (AssetRelation, error)
 	GetScopeByID(ctx context.Context, arg GetScopeByIDParams) (Scope, error)
+	GetTaskRunByID(ctx context.Context, arg GetTaskRunByIDParams) (TaskRun, error)
+	GetTaskTemplateByID(ctx context.Context, arg GetTaskTemplateByIDParams) (TaskTemplate, error)
 	GetUserByID(ctx context.Context, id uint64) (AppUser, error)
 	// sqlc queries for the auth (app_user) domain.
 	// Every read filters on the soft-delete sentinel so soft-deleted rows are
 	// excluded by default; callers never need to remember to add the filter.
 	// Login lookup. username is globally unique, so this returns at most one live row.
 	GetUserByUsername(ctx context.Context, username string) (AppUser, error)
+	IncrementTaskRunAttempt(ctx context.Context, arg IncrementTaskRunAttemptParams) error
 	// sqlc queries for the audit_log domain.
 	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
@@ -52,7 +59,16 @@ type Querier interface {
 	ListRelationsByAsset(ctx context.Context, arg ListRelationsByAssetParams) ([]AssetRelation, error)
 	ListScopeTargetsByScope(ctx context.Context, arg ListScopeTargetsByScopeParams) ([]ScopeTarget, error)
 	ListScopesByProject(ctx context.Context, projectID uint64) ([]Scope, error)
+	ListTaskRunsByProject(ctx context.Context, projectID uint64) ([]TaskRun, error)
+	ListTaskTemplatesByProject(ctx context.Context, projectID uint64) ([]TaskTemplate, error)
+	MarkTaskRunCancelled(ctx context.Context, arg MarkTaskRunCancelledParams) (sql.Result, error)
+	MarkTaskRunFailed(ctx context.Context, arg MarkTaskRunFailedParams) (sql.Result, error)
+	MarkTaskRunPartialSuccess(ctx context.Context, arg MarkTaskRunPartialSuccessParams) (sql.Result, error)
+	MarkTaskRunRunning(ctx context.Context, arg MarkTaskRunRunningParams) (sql.Result, error)
+	MarkTaskRunSucceeded(ctx context.Context, arg MarkTaskRunSucceededParams) (sql.Result, error)
+	SetTaskTemplateEnabled(ctx context.Context, arg SetTaskTemplateEnabledParams) error
 	SoftDeleteScopeTargets(ctx context.Context, arg SoftDeleteScopeTargetsParams) error
+	SoftDeleteTaskTemplate(ctx context.Context, arg SoftDeleteTaskTemplateParams) error
 	// Operator edit of the non-key metadata fields. asset_type/asset_key/value are
 	// the normalized identity and are never touched here; status is restricted to
 	// the live statuses (deleted is reserved for the soft-delete operation). The
@@ -68,6 +84,7 @@ type Querier interface {
 	UpdateAssetLifecycle(ctx context.Context, arg UpdateAssetLifecycleParams) error
 	UpdateScope(ctx context.Context, arg UpdateScopeParams) error
 	UpdateScopeStatus(ctx context.Context, arg UpdateScopeStatusParams) error
+	UpdateTaskTemplate(ctx context.Context, arg UpdateTaskTemplateParams) error
 	// Idempotent import: a new normalized asset_key inserts; a repeat within the same
 	// project updates only the discovery-refreshable fields (last_seen, source,
 	// confidence, display_name, value, updated_by). first_seen, owner, business_unit
