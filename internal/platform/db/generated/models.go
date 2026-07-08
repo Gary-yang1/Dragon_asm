@@ -47,6 +47,25 @@ type Asset struct {
 	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
+type AssetRelation struct {
+	ID           uint64    `db:"id" json:"id"`
+	TenantID     string    `db:"tenant_id" json:"tenant_id"`
+	OrgID        string    `db:"org_id" json:"org_id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	FromAssetID  uint64    `db:"from_asset_id" json:"from_asset_id"`
+	ToAssetID    uint64    `db:"to_asset_id" json:"to_asset_id"`
+	RelationType string    `db:"relation_type" json:"relation_type"`
+	Source       string    `db:"source" json:"source"`
+	Confidence   uint8     `db:"confidence" json:"confidence"`
+	FirstSeen    time.Time `db:"first_seen" json:"first_seen"`
+	LastSeen     time.Time `db:"last_seen" json:"last_seen"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy    string    `db:"created_by" json:"created_by"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
 type AuditLog struct {
 	ID           uint64         `db:"id" json:"id"`
 	TenantID     string         `db:"tenant_id" json:"tenant_id"`

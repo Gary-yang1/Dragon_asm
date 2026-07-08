@@ -11,6 +11,7 @@ import (
 
 type Querier interface {
 	CountAssetsByProject(ctx context.Context, projectID uint64) (int64, error)
+	CountRelationsByAsset(ctx context.Context, arg CountRelationsByAssetParams) (int64, error)
 	// Provisioning helper (used by seeding/tests; no public registration endpoint in M0-6).
 	CreateUser(ctx context.Context, arg CreateUserParams) (sql.Result, error)
 	// sqlc queries for the asset domain.
@@ -26,6 +27,9 @@ type Querier interface {
 	GetProjectByID(ctx context.Context, id uint64) (Project, error)
 	// Returns the member's role, or sql.ErrNoRows when the user is not a member.
 	GetProjectMemberRole(ctx context.Context, arg GetProjectMemberRoleParams) (string, error)
+	// Fetch the live edge for a (project, from, to, type) tuple. Used to return the
+	// upserted row; excludes soft-deleted rows.
+	GetRelationByEndpoints(ctx context.Context, arg GetRelationByEndpointsParams) (AssetRelation, error)
 	GetUserByID(ctx context.Context, id uint64) (AppUser, error)
 	// sqlc queries for the auth (app_user) domain.
 	// Every read filters on the soft-delete sentinel so soft-deleted rows are
@@ -36,6 +40,10 @@ type Querier interface {
 	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
 	ListAssetsByProject(ctx context.Context, arg ListAssetsByProjectParams) ([]Asset, error)
+	// Both directions for one asset (out-edges where from_asset_id = ? and in-edges
+	// where to_asset_id = ?), project-scoped and live. The service tags each row's
+	// direction based on which endpoint equals the requested asset id.
+	ListRelationsByAsset(ctx context.Context, arg ListRelationsByAssetParams) ([]AssetRelation, error)
 	// Operator edit of the non-key metadata fields. asset_type/asset_key/value are
 	// the normalized identity and are never touched here; status is restricted to
 	// the live statuses (deleted is reserved for the soft-delete operation). The
@@ -49,6 +57,14 @@ type Querier interface {
 	// and status are preserved so a re-import never resets ownership or un-ignores an
 	// asset an operator deliberately set to 'ignored'/'inactive'.
 	UpsertAsset(ctx context.Context, arg UpsertAssetParams) (sql.Result, error)
+	// sqlc queries for the asset_relation domain.
+	// Every read is scoped by project_id AND filters on the soft-delete sentinel, so
+	// soft-deleted rows and cross-project rows are excluded by default.
+	// Idempotent relation upsert: a new (project_id, from, to, type) edge inserts; a
+	// repeat refreshes only the discovery-updatable fields (last_seen, source,
+	// confidence, updated_by). first_seen and created_by are preserved so a re-import
+	// never resets the edge's origin.
+	UpsertRelation(ctx context.Context, arg UpsertRelationParams) (sql.Result, error)
 }
 
 var _ Querier = (*Queries)(nil)

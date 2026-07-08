@@ -68,6 +68,11 @@ func (h *Handler) RegisterRoutes(protected *gin.RouterGroup) {
 	g.GET("/:id", h.detail)
 	g.POST("/import", h.importAssets)
 	g.PATCH("/:id", h.update)
+
+	// Relations sub-resource: directed edges scoped to one asset (:id is the
+	// from-asset on POST). Both routes reuse the project access + action permit.
+	g.GET("/:id/relations", h.listRelations)
+	g.POST("/:id/relations", h.createRelation)
 }
 
 // assetResponse is the external representation of an Asset.
@@ -416,6 +421,165 @@ func writeAssetErr(c *gin.Context, err error) {
 		return
 	}
 	httpx.Internal(c)
+}
+
+// relationResponse is the external representation of a Relation. Direction is
+// "out"/"in" relative to the queried asset on list responses; empty on create.
+type relationResponse struct {
+	ID           uint64 `json:"id"`
+	ProjectID    uint64 `json:"project_id"`
+	FromAssetID  uint64 `json:"from_asset_id"`
+	ToAssetID    uint64 `json:"to_asset_id"`
+	RelationType string `json:"relation_type"`
+	Source       string `json:"source"`
+	Confidence   uint8  `json:"confidence"`
+	Direction    string `json:"direction,omitempty"`
+	FirstSeen    string `json:"first_seen"`
+	LastSeen     string `json:"last_seen"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	CreatedBy    string `json:"created_by"`
+	UpdatedBy    string `json:"updated_by"`
+}
+
+func toRelationResponse(r *Relation) relationResponse {
+	return relationResponse{
+		ID:           r.ID,
+		ProjectID:    r.ProjectID,
+		FromAssetID:  r.FromAssetID,
+		ToAssetID:    r.ToAssetID,
+		RelationType: r.RelationType,
+		Source:       r.Source,
+		Confidence:   r.Confidence,
+		Direction:    r.Direction,
+		FirstSeen:    r.FirstSeen.UTC().Format(timeRFC3339Millis),
+		LastSeen:     r.LastSeen.UTC().Format(timeRFC3339Millis),
+		CreatedAt:    r.CreatedAt.UTC().Format(timeRFC3339Millis),
+		UpdatedAt:    r.UpdatedAt.UTC().Format(timeRFC3339Millis),
+		CreatedBy:    r.CreatedBy,
+		UpdatedBy:    r.UpdatedBy,
+	}
+}
+
+// createRelationRequest is the POST /assets/:id/relations body. :id is the
+// from-asset; the body names the to-asset and the edge type.
+type createRelationRequest struct {
+	ToAssetID    uint64 `json:"to_asset_id" binding:"required"`
+	RelationType string `json:"relation_type" binding:"required"`
+	Source       string `json:"source"`
+	Confidence   uint8  `json:"confidence"`
+}
+
+// listRelations handles GET /projects/:project_id/assets/:id/relations.
+func (h *Handler) listRelations(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	_, role, ok := h.access(c, pid)
+	if !ok {
+		return
+	}
+	if !h.permit(c, role, pid, asmcasbin.PermAssetRead) {
+		return
+	}
+	id, ok := parseAssetID(c)
+	if !ok {
+		return
+	}
+
+	pq, ok := httpx.BindPageQuery(c)
+	if !ok {
+		return
+	}
+	const maxInt32 = 1<<31 - 1
+	limit := int32(pq.Limit()) //nolint:gosec // G115: bounded to MaxPageSize by BindPageQuery
+	offset := pq.Offset()
+	if offset > maxInt32 {
+		httpx.BadRequest(c, "page_number out of range")
+		return
+	}
+
+	rows, total, err := h.svc.ListRelations(c.Request.Context(), pid, id, limit, int32(offset)) //nolint:gosec // G115: guarded above
+	if err != nil {
+		// A missing parent asset surfaces as ErrNotFound -> 404 ASSET_NOT_FOUND
+		// (via writeAssetErr); other errors are 500.
+		writeAssetErr(c, err)
+		return
+	}
+	items := make([]relationResponse, 0, len(rows))
+	for _, r := range rows {
+		items = append(items, toRelationResponse(r))
+	}
+	httpx.OK(c, httpx.PageData[relationResponse]{
+		Items:      items,
+		Total:      total,
+		PageSize:   pq.PageSize,
+		PageNumber: pq.PageNumber,
+	})
+}
+
+// createRelation handles POST /projects/:project_id/assets/:id/relations. The
+// edge write and its audit event run in one transaction in the service.
+func (h *Handler) createRelation(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	p, role, ok := h.access(c, pid)
+	if !ok {
+		return
+	}
+	if !h.permit(c, role, pid, asmcasbin.PermAssetWrite) {
+		return
+	}
+	fromID, ok := parseAssetID(c)
+	if !ok {
+		return
+	}
+
+	var req createRelationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, "invalid relation request")
+		return
+	}
+
+	rel, err := h.svc.UpsertRelation(c.Request.Context(), RelationInput{
+		TenantID:     p.TenantID,
+		OrgID:        p.OrgID,
+		ProjectID:    pid,
+		FromAssetID:  fromID,
+		ToAssetID:    req.ToAssetID,
+		RelationType: req.RelationType,
+		Source:       req.Source,
+		Confidence:   req.Confidence,
+		ActorID:      c.GetString(auth.CtxUserID),
+	}, h.auditMetaFromContext(c))
+	if err != nil {
+		h.logServiceError(c, ActionRelationSave, err)
+		writeRelationErr(c, err)
+		return
+	}
+	httpx.Created(c, toRelationResponse(rel))
+}
+
+func writeRelationErr(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrRelationEndpointNotFound):
+		httpx.NotFound(c, httpx.ErrCodeAssetNotFound, "relation endpoint not found in project")
+	case errors.Is(err, ErrInvalidRelationType):
+		httpx.Unprocessable(c, "invalid relation_type")
+	case errors.Is(err, ErrSelfRelation):
+		httpx.Unprocessable(c, "self relation not allowed")
+	case errors.Is(err, ErrMetadataTooLong):
+		httpx.Unprocessable(c, "field too long")
+	case errors.Is(err, ErrInvalidProjectID):
+		httpx.BadRequest(c, "invalid project_id")
+	default:
+		// Includes transaction/audit-write failures: the service rolled the
+		// change back, so the caller sees a failed request.
+		httpx.Internal(c)
+	}
 }
 
 func writeUpdateErr(c *gin.Context, err error) {

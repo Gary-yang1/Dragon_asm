@@ -75,12 +75,13 @@ func (f *fakeAudit) Record(_ context.Context, e audit.Event) error {
 // into the asset service (non-tx test path). The test user "1" is a member of the
 // listed projects with the configured role.
 type testEnv struct {
-	handler   *asset.Handler
-	assetRepo *fakeRepo
-	projects  *fakeProjectRepo
-	enforcer  *casbin.Enforcer
-	audit     *fakeAudit
-	engine    *gin.Engine
+	handler      *asset.Handler
+	assetRepo    *fakeRepo
+	relationRepo *fakeRelationRepo
+	projects     *fakeProjectRepo
+	enforcer     *casbin.Enforcer
+	audit        *fakeAudit
+	engine       *gin.Engine
 }
 
 // newTestEnv makes the test user a member of the listed projects with the
@@ -115,9 +116,11 @@ func newTestEnvWithRole(t *testing.T, role string, memberOf ...uint64) *testEnv 
 
 	projectSvc := project.NewService(projects, enforcer)
 	auditSink := &fakeAudit{}
+	relationRepo := newFakeRelationRepo()
 	// WithAuditSink wires the non-tx audit path so handler tests can assert on
-	// audit events without a real database transaction.
-	assetSvc := asset.NewService(assetRepo, asset.WithAuditSink(auditSink))
+	// audit events without a real database transaction; WithRelationRepository
+	// wires the relation store for the relation routes.
+	assetSvc := asset.NewService(assetRepo, asset.WithAuditSink(auditSink), asset.WithRelationRepository(relationRepo))
 
 	h := asset.NewHandler(assetSvc, projectSvc, enforcer, nil)
 
@@ -127,7 +130,7 @@ func newTestEnvWithRole(t *testing.T, role string, memberOf ...uint64) *testEnv 
 	api := r.Group("/api/v1")
 	h.RegisterRoutes(api)
 
-	return &testEnv{handler: h, assetRepo: assetRepo, projects: projects, enforcer: enforcer, audit: auditSink, engine: r}
+	return &testEnv{handler: h, assetRepo: assetRepo, relationRepo: relationRepo, projects: projects, enforcer: enforcer, audit: auditSink, engine: r}
 }
 
 // newTestEnvGlobalRole wires a user who is NOT a project_member of any project
@@ -157,7 +160,8 @@ func newTestEnvGlobalRole(t *testing.T, role string) *testEnv {
 
 	projectSvc := project.NewService(projects, enforcer)
 	auditSink := &fakeAudit{}
-	assetSvc := asset.NewService(assetRepo, asset.WithAuditSink(auditSink))
+	relationRepo := newFakeRelationRepo()
+	assetSvc := asset.NewService(assetRepo, asset.WithAuditSink(auditSink), asset.WithRelationRepository(relationRepo))
 	h := asset.NewHandler(assetSvc, projectSvc, enforcer, nil)
 
 	r := gin.New()
@@ -165,7 +169,7 @@ func newTestEnvGlobalRole(t *testing.T, role string) *testEnv {
 	api := r.Group("/api/v1")
 	h.RegisterRoutes(api)
 
-	return &testEnv{handler: h, assetRepo: assetRepo, projects: projects, enforcer: enforcer, audit: auditSink, engine: r}
+	return &testEnv{handler: h, assetRepo: assetRepo, relationRepo: relationRepo, projects: projects, enforcer: enforcer, audit: auditSink, engine: r}
 }
 
 func do(t *testing.T, r *gin.Engine, method, path string, body any) *httptest.ResponseRecorder {
@@ -451,4 +455,177 @@ func TestHandlerGlobalProjectScopedRoleDeniedAccess(t *testing.T) {
 
 	w := do(t, env.engine, http.MethodGet, "/api/v1/projects/1/assets", nil)
 	assert.Equal(t, http.StatusForbidden, w.Code, "project-scoped role has no project:access -> 403")
+}
+
+// relationJSON mirrors the handler's relationResponse with the fields tests
+// assert on (snake_case json tags).
+type relationJSON struct {
+	ID           uint64 `json:"id"`
+	FromAssetID  uint64 `json:"from_asset_id"`
+	ToAssetID    uint64 `json:"to_asset_id"`
+	RelationType string `json:"relation_type"`
+	Direction    string `json:"direction"`
+}
+
+// relPath builds the relations URL for an asset.
+func relPath(pid, id uint64) string {
+	return fmt.Sprintf("/api/v1/projects/%d/assets/%d/relations", pid, id)
+}
+
+// importTwoAssets seeds two assets in project 1 via the import API and returns
+// their ids; a helper for the relation handler tests.
+func importTwoAssets(t *testing.T, env *testEnv) (uint64, uint64) {
+	t.Helper()
+	body := map[string]any{"rows": []map[string]any{
+		{"asset_type": "domain", "value": "from.example.com"},
+		{"asset_type": "ip", "value": "1.2.3.4"},
+	}}
+	w := do(t, env.engine, http.MethodPost, "/api/v1/projects/1/assets/import", body)
+	require.Equal(t, http.StatusOK, w.Code)
+	var report asset.ImportBatchReport
+	unwrap(t, w, &report)
+	require.Len(t, report.Rows, 2)
+	require.NotZero(t, report.Rows[0].AssetID)
+	require.NotZero(t, report.Rows[1].AssetID)
+	return report.Rows[0].AssetID, report.Rows[1].AssetID
+}
+
+// GET relations lists an asset's edges (asset:read), tagged with direction. The
+// edge is seeded via the POST API (asset:write), so this also exercises create.
+func TestHandlerListRelations(t *testing.T) {
+	env := newTestEnv(t, 1) // security_ops member: asset:read + asset:write
+	fromID, toID := importTwoAssets(t, env)
+
+	create := map[string]any{"to_asset_id": toID, "relation_type": "resolves_to", "source": "seed"}
+	w := do(t, env.engine, http.MethodPost, relPath(1, fromID), create)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	w = do(t, env.engine, http.MethodGet, relPath(1, fromID), nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	var page struct {
+		Items []relationJSON `json:"items"`
+		Total int64          `json:"total"`
+	}
+	unwrap(t, w, &page)
+	assert.Equal(t, int64(1), page.Total)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, asset.DirectionOut, page.Items[0].Direction)
+	assert.Equal(t, toID, page.Items[0].ToAssetID)
+
+	// The target sees the same edge as an in-edge.
+	w = do(t, env.engine, http.MethodGet, relPath(1, toID), nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	unwrap(t, w, &page)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, asset.DirectionIn, page.Items[0].Direction)
+	assert.Equal(t, fromID, page.Items[0].FromAssetID)
+}
+
+// POST relations creates an edge (asset:write) and audits it.
+func TestHandlerCreateRelation(t *testing.T) {
+	env := newTestEnv(t, 1)
+	fromID, toID := importTwoAssets(t, env)
+
+	body := map[string]any{"to_asset_id": toID, "relation_type": "resolves_to", "source": "seed"}
+	w := do(t, env.engine, http.MethodPost, relPath(1, fromID), body)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var resp relationJSON
+	unwrap(t, w, &resp)
+	assert.Equal(t, fromID, resp.FromAssetID)
+	assert.Equal(t, toID, resp.ToAssetID)
+	assert.Equal(t, asset.RelationResolvesTo, resp.RelationType)
+	// importTwoAssets wrote an import audit event; the create adds the relation
+	// event. Assert the most recent event is the relation save.
+	require.NotEmpty(t, env.audit.events)
+	assert.Equal(t, asset.ActionRelationSave, env.audit.events[len(env.audit.events)-1].Action)
+}
+
+// POST relations with a to-asset in another project is rejected (404 endpoint).
+func TestHandlerCreateRelationCrossProject(t *testing.T) {
+	env := newTestEnv(t, 1, 2)           // member of both projects
+	fromID, _ := importTwoAssets(t, env) // fromID in project 1
+	// Import an asset into project 2 to get a real to-asset id there.
+	body2 := map[string]any{"rows": []map[string]any{{"asset_type": "domain", "value": "other.example.com"}}}
+	w2 := do(t, env.engine, http.MethodPost, "/api/v1/projects/2/assets/import", body2)
+	require.Equal(t, http.StatusOK, w2.Code)
+	var rep2 asset.ImportBatchReport
+	unwrap(t, w2, &rep2)
+	otherID := rep2.Rows[0].AssetID
+
+	body := map[string]any{"to_asset_id": otherID, "relation_type": "resolves_to"}
+	w := do(t, env.engine, http.MethodPost, relPath(1, fromID), body)
+	assert.Equal(t, http.StatusNotFound, w.Code, "cross-project to-asset is rejected")
+	assert.Empty(t, env.relationRepo.rows, "no edge written")
+}
+
+// A viewer (asset:read, not asset:write) can list relations but not create them.
+// Assets are seeded directly (a viewer cannot import), so the test isolates the
+// relation permission path from the import permission path.
+func TestHandlerRelationPermissionPaths(t *testing.T) {
+	env := newTestEnvWithRole(t, asmcasbin.RoleViewer, 1)
+	seedAsset(env.assetRepo, 100, 1, "domain:from.example.com", asset.StatusActive)
+	seedAsset(env.assetRepo, 101, 1, "ip:1.2.3.4", asset.StatusActive)
+
+	w := do(t, env.engine, http.MethodGet, relPath(1, 100), nil)
+	assert.Equal(t, http.StatusOK, w.Code, "viewer can asset:read relations")
+
+	body := map[string]any{"to_asset_id": 101, "relation_type": "resolves_to"}
+	w = do(t, env.engine, http.MethodPost, relPath(1, 100), body)
+	assert.Equal(t, http.StatusForbidden, w.Code, "viewer is denied asset:write (create relation)")
+	assert.Empty(t, env.relationRepo.rows)
+	assert.Empty(t, env.audit.events, "denied create is not audited")
+}
+
+// A non-member cannot list an asset's relations (project boundary).
+func TestHandlerListRelationsNonMemberDenied(t *testing.T) {
+	env := newTestEnv(t, 1) // member of project 1 only
+	fromID, _ := importTwoAssets(t, env)
+
+	w := do(t, env.engine, http.MethodGet, relPath(2, fromID), nil)
+	assert.Equal(t, http.StatusForbidden, w.Code, "non-member denied at project boundary")
+}
+
+// A nonexistent parent asset on GET /relations is 404, not 200 with an empty
+// list — distinguishable from "asset exists but has no relations". Project access
+// and asset:read run first, so this only triggers for a member of the project.
+func TestHandlerListRelationsNonexistentParent(t *testing.T) {
+	env := newTestEnv(t, 1) // security_ops member of project 1
+
+	w := do(t, env.engine, http.MethodGet, relPath(1, 9999), nil)
+	assert.Equal(t, http.StatusNotFound, w.Code, "nonexistent parent asset is 404")
+}
+
+// A valid parent with no relations returns 200 with an empty page (distinct from
+// the 404 above).
+func TestHandlerListRelationsEmptyOK(t *testing.T) {
+	env := newTestEnv(t, 1)
+	fromID, _ := importTwoAssets(t, env)
+
+	w := do(t, env.engine, http.MethodGet, relPath(1, fromID), nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	var page struct {
+		Items []relationJSON `json:"items"`
+		Total int64          `json:"total"`
+	}
+	unwrap(t, w, &page)
+	assert.Equal(t, int64(0), page.Total)
+	assert.Empty(t, page.Items)
+}
+
+// Cross-project parent: a member of both projects queries an asset that exists
+// only in project 2 via project 1's path -> 404 (parent not in project 1), not a
+// leak of project 2's edges.
+func TestHandlerListRelationsCrossProjectParent(t *testing.T) {
+	env := newTestEnv(t, 1, 2) // member of both
+	// Import one asset into project 2 only.
+	body2 := map[string]any{"rows": []map[string]any{{"asset_type": "domain", "value": "only.example.com"}}}
+	w2 := do(t, env.engine, http.MethodPost, "/api/v1/projects/2/assets/import", body2)
+	require.Equal(t, http.StatusOK, w2.Code)
+	var rep2 asset.ImportBatchReport
+	unwrap(t, w2, &rep2)
+	otherID := rep2.Rows[0].AssetID
+
+	w := do(t, env.engine, http.MethodGet, relPath(1, otherID), nil)
+	assert.Equal(t, http.StatusNotFound, w.Code, "parent not in project 1 -> 404, no cross-project leak")
 }

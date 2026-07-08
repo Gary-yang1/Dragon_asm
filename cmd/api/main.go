@@ -129,7 +129,11 @@ func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 	userRepo := auth.NewUserRepository(queries)
 	authSvc := auth.NewService(userRepo, mgr, enforcer, auditSvc)
 	projectSvc := project.NewService(project.NewRepository(queries), enforcer)
-	assetSvc := asset.NewService(asset.NewRepository(queries), asset.WithDB(sqlDB))
+	assetSvc := asset.NewService(
+		asset.NewRepository(queries),
+		asset.WithDB(sqlDB),
+		asset.WithRelationRepository(asset.NewRelationRepository(queries)),
+	)
 
 	// Split /api/v1 into public (login, refresh) and protected (everything
 	// else) groups. Business routes added to apiProtected automatically get

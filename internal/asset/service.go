@@ -14,9 +14,10 @@ import (
 // Audit action names and resource type for asset change events. Stable
 // vocabulary for the audit log.
 const (
-	ActionAssetImport = "asset.import"
-	ActionAssetUpdate = "asset.update"
-	ResourceTypeAsset = "asset"
+	ActionAssetImport  = "asset.import"
+	ActionAssetUpdate  = "asset.update"
+	ActionRelationSave = "asset.relation.save"
+	ResourceTypeAsset  = "asset"
 )
 
 // Service validation errors.
@@ -31,6 +32,13 @@ var (
 	ErrBatchTooLarge = errors.New("asset: batch too large")
 	// ErrNoFields is returned when an update request changes no editable field.
 	ErrNoFields = errors.New("asset: no fields to update")
+	// ErrInvalidRelationType is returned when a relation_type is outside the enum.
+	ErrInvalidRelationType = errors.New("asset: invalid relation_type")
+	// ErrSelfRelation is returned when from and to are the same asset.
+	ErrSelfRelation = errors.New("asset: self relation not allowed")
+	// ErrRelationEndpointNotFound is returned when a relation endpoint does not
+	// exist in the relation's project (covers cross-project endpoints).
+	ErrRelationEndpointNotFound = errors.New("asset: relation endpoint not found in project")
 )
 
 // Metadata length bounds mirror the asset table column widths, so oversized
@@ -71,9 +79,10 @@ type AuditMeta struct {
 // (or roll back together — a committed change never exists without its audit
 // record).
 type Service struct {
-	repo      Repository
-	db        *sql.DB       // nil in unit tests; non-nil in production to run a real tx
-	auditSink auditRecorder // used on the non-tx path (tests); the tx path builds its own
+	repo         Repository
+	relationRepo RelationRepository
+	db           *sql.DB       // nil in unit tests; non-nil in production to run a real tx
+	auditSink    auditRecorder // used on the non-tx path (tests); the tx path builds its own
 }
 
 // ServiceOption configures a Service. Use WithDB in production (enables the
@@ -90,6 +99,13 @@ func WithDB(db *sql.DB) ServiceOption {
 // On the transactional path the sink is built from the tx and this is ignored.
 func WithAuditSink(sink auditRecorder) ServiceOption {
 	return func(s *Service) { s.auditSink = sink }
+}
+
+// WithRelationRepository wires the asset_relation store required by the relation
+// methods (UpsertRelation / ListRelations). Without it those methods return
+// ErrRelationEndpointNotFound-style guard errors only if invoked.
+func WithRelationRepository(rr RelationRepository) ServiceOption {
+	return func(s *Service) { s.relationRepo = rr }
 }
 
 // NewService builds a Service over the given repository. With no options it runs
@@ -414,7 +430,7 @@ func (s *Service) ImportBatch(ctx context.Context, in ImportBatchInput, meta Aud
 	}
 
 	report := ImportBatchReport{Total: int64(len(in.Rows)), Rows: make([]ImportRowResult, 0, len(in.Rows))}
-	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, sink auditRecorder) error {
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, _ RelationRepository, sink auditRecorder) error {
 		for i, row := range in.Rows {
 			row.ProjectID = in.ProjectID
 			row.TenantID = in.TenantID
@@ -503,7 +519,7 @@ func (s *Service) Update(ctx context.Context, projectID, id uint64, fields Updat
 	}
 
 	var after *Asset
-	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, sink auditRecorder) error {
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, _ RelationRepository, sink auditRecorder) error {
 		before, updated, err := updateWith(ctx, repo, projectID, id, fields, actorID)
 		if err != nil {
 			return err
@@ -535,6 +551,154 @@ func (s *Service) Update(ctx context.Context, projectID, id uint64, fields Updat
 		return nil, err
 	}
 	return after, nil
+}
+
+// RelationInput is the validated input for an idempotent relation upsert.
+// TenantID/OrgID/ProjectID scope the edge and must match both endpoints; the
+// handler derives them from the project (Access), never from the request body.
+type RelationInput struct {
+	TenantID     string
+	OrgID        string
+	ProjectID    uint64
+	FromAssetID  uint64
+	ToAssetID    uint64
+	RelationType string
+	Source       string
+	Confidence   uint8
+	ActorID      string
+}
+
+// UpsertRelation idempotently creates or refreshes a directed edge between two
+// assets in one project. It validates the type enum, rejects self-loops, and
+// explicitly verifies both endpoints exist in the relation's project (and share
+// its tenant/org) — so a cross-project endpoint is rejected with
+// ErrRelationEndpointNotFound before hitting the composite FK. The edge write and
+// its audit event run in one transaction.
+func (s *Service) UpsertRelation(ctx context.Context, in RelationInput, meta AuditMeta) (*Relation, error) {
+	if in.ProjectID == 0 {
+		return nil, ErrInvalidProjectID
+	}
+	if s.relationRepo == nil {
+		return nil, errors.New("asset: relation store not configured")
+	}
+	if !IsValidRelationType(in.RelationType) {
+		return nil, ErrInvalidRelationType
+	}
+	if in.FromAssetID == in.ToAssetID {
+		return nil, ErrSelfRelation
+	}
+	if len(in.Source) > maxSourceLen || len(in.ActorID) > maxActorIDLen {
+		return nil, ErrMetadataTooLong
+	}
+	confidence := in.Confidence
+	if confidence > MaxRelationConfidence {
+		confidence = MaxRelationConfidence
+	}
+
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, relRepo RelationRepository, sink auditRecorder) error {
+		// Explicit endpoint validation: both assets must live in this project and
+		// share its tenant/org. GetByID is project-scoped, so a cross-project
+		// endpoint surfaces as ErrNotFound -> ErrRelationEndpointNotFound.
+		from, err := repo.GetByID(ctx, in.ProjectID, in.FromAssetID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return ErrRelationEndpointNotFound
+			}
+			return err
+		}
+		to, err := repo.GetByID(ctx, in.ProjectID, in.ToAssetID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return ErrRelationEndpointNotFound
+			}
+			return err
+		}
+		if from.TenantID != in.TenantID || from.OrgID != in.OrgID ||
+			to.TenantID != in.TenantID || to.OrgID != in.OrgID {
+			// Defense-in-depth: the composite FK would also reject this, but a
+			// typed error is clearer than an opaque FK violation.
+			return ErrRelationEndpointNotFound
+		}
+
+		if err := relRepo.Upsert(ctx, UpsertRelationParams{
+			TenantID:     in.TenantID,
+			OrgID:        in.OrgID,
+			ProjectID:    in.ProjectID,
+			FromAssetID:  in.FromAssetID,
+			ToAssetID:    in.ToAssetID,
+			RelationType: in.RelationType,
+			Source:       in.Source,
+			Confidence:   confidence,
+			ActorID:      in.ActorID,
+		}); err != nil {
+			return err
+		}
+
+		if sink == nil {
+			return nil
+		}
+		return sink.Record(ctx, audit.Event{
+			TenantID:     in.TenantID,
+			OrgID:        in.OrgID,
+			ProjectID:    in.ProjectID,
+			ActorID:      in.ActorID,
+			ActorType:    audit.ActorUser,
+			Action:       ActionRelationSave,
+			ResourceType: ResourceTypeAsset,
+			Result:       audit.ResultSuccess,
+			IP:           meta.IP,
+			UserAgent:    meta.UserAgent,
+			RequestID:    meta.RequestID,
+			Metadata: map[string]any{
+				"from_asset_id": in.FromAssetID,
+				"to_asset_id":   in.ToAssetID,
+				"relation_type": in.RelationType,
+				"source":        in.Source,
+			},
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Read the committed edge back so the response carries id/timestamps. On the
+	// tx path this reads via the non-tx relation repo (the row is committed); on
+	// the test path via the injected fake.
+	return s.relationRepo.GetByEndpoints(ctx, in.ProjectID, in.FromAssetID, in.ToAssetID, in.RelationType)
+}
+
+// ListRelations returns live edges where the asset is either endpoint (both
+// directions), paginated; each row is tagged Direction relative to the asset.
+//
+// The parent asset must exist in the project: a missing asset returns ErrNotFound
+// (rather than an empty 200) so the caller can distinguish "no such asset" from
+// "asset exists but has no relations". The handler runs the project access and
+// asset:read permission checks before this, so the existence check never leaks
+// cross-project asset state.
+func (s *Service) ListRelations(ctx context.Context, projectID, assetID uint64, limit, offset int32) ([]*Relation, int64, error) {
+	if projectID == 0 {
+		return nil, 0, ErrInvalidProjectID
+	}
+	if s.relationRepo == nil {
+		return nil, 0, errors.New("asset: relation store not configured")
+	}
+	// Validate the parent asset exists in this project before listing its edges.
+	// GetByID is project-scoped, so a cross-project or nonexistent id is ErrNotFound.
+	if _, err := s.repo.GetByID(ctx, projectID, assetID); err != nil {
+		return nil, 0, err
+	}
+	limit = clampLimit(limit)
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.relationRepo.ListByAsset(ctx, projectID, assetID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.relationRepo.CountByAsset(ctx, projectID, assetID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
 }
 
 // updateWith loads the current row, merges the provided fields, validates,
@@ -630,22 +794,24 @@ func changedFields(fields UpdateFields) map[string]string {
 	return changed
 }
 
-// runInTx runs fn against a transaction-scoped asset repository and audit sink.
-// When the service has a *sql.DB (production), fn runs on a real *sql.Tx so the
-// asset write and the audit insert commit together or roll back together. When
-// there is no DB (unit tests), fn runs on the injected repo and audit sink with
-// no real transaction — enough to exercise the asset/audit wiring without a DB.
-func (s *Service) runInTx(ctx context.Context, fn func(ctx context.Context, repo Repository, sink auditRecorder) error) error {
+// runInTx runs fn against transaction-scoped asset + relation repositories and
+// an audit sink. When the service has a *sql.DB (production), fn runs on a real
+// *sql.Tx so the asset/relation write and the audit insert commit together or
+// roll back together. When there is no DB (unit tests), fn runs on the injected
+// repos and audit sink with no real transaction — enough to exercise the wiring
+// without a DB.
+func (s *Service) runInTx(ctx context.Context, fn func(ctx context.Context, repo Repository, relRepo RelationRepository, sink auditRecorder) error) error {
 	if s.db == nil {
-		return fn(ctx, s.repo, s.auditSink)
+		return fn(ctx, s.repo, s.relationRepo, s.auditSink)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	txRepo := NewRepository(dbgen.New(tx))
+	txRelRepo := NewRelationRepository(dbgen.New(tx))
 	txAudit := audit.NewService(audit.NewRepository(dbgen.New(tx)))
-	if err := fn(ctx, txRepo, txAudit); err != nil {
+	if err := fn(ctx, txRepo, txRelRepo, txAudit); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
