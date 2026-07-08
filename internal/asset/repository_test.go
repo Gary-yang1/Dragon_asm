@@ -16,11 +16,13 @@ import (
 )
 
 // assetCols mirrors the column order of SELECT * FROM asset in the generated query.
+// sqlc appends an ALTER-added column at the end of the SELECT list, so miss_count
+// follows deleted_at (not its physical AFTER confidence position).
 var assetCols = []string{
 	"id", "tenant_id", "org_id", "project_id", "asset_type", "asset_key",
 	"display_name", "value", "source", "owner", "business_unit", "confidence",
 	"status", "first_seen", "last_seen", "created_at", "updated_at",
-	"created_by", "updated_by", "deleted_at",
+	"created_by", "updated_by", "deleted_at", "miss_count",
 }
 
 // softDeleteFilter is the literal WHERE clause every live-row query must carry.
@@ -30,7 +32,7 @@ func assetRow(id, projectID uint64, key string) *sqlmock.Rows {
 	now := time.Now()
 	return sqlmock.NewRows(assetCols).AddRow(
 		id, "t1", "o1", projectID, "domain", key, key, key, "seed", "", "",
-		uint8(100), "active", now, now, now, now, "", "", time.Time{},
+		uint8(100), "active", now, now, now, now, "", "", time.Time{}, uint32(0),
 	)
 }
 
@@ -122,7 +124,7 @@ func TestRepoListScoped(t *testing.T) {
 			assetRow(7, 1, "domain:a.com").AddRow(
 				uint64(8), "t1", "o1", uint64(1), "domain", "domain:b.com", "b.com",
 				"b.com", "seed", "", "", uint8(100), "active",
-				time.Now(), time.Now(), time.Now(), time.Now(), "", "", time.Time{},
+				time.Now(), time.Now(), time.Now(), time.Now(), "", "", time.Time{}, uint32(0),
 			),
 		)
 
@@ -174,6 +176,25 @@ func TestRepoUpdateScoped(t *testing.T) {
 		BusinessUnit: "team-a",
 		Status:       "active",
 		ActorID:      "u1",
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// UpdateLifecycle issues a project-scoped UPDATE setting miss_count + status;
+// the WHERE clause carries id + project_id + the soft-delete filter.
+func TestRepoUpdateLifecycleScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE asset")).
+		WithArgs(uint32(3), "inactive", "discovery", uint64(7), uint64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := asset.NewRepository(dbgen.New(sqlDB))
+	err = repo.UpdateLifecycle(context.Background(), asset.UpdateLifecycleParams{
+		ProjectID: 1, ID: 7, MissCount: 3, Status: "inactive", ActorID: "discovery",
 	})
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())

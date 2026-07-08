@@ -87,6 +87,7 @@ type assetResponse struct {
 	Owner        string `json:"owner"`
 	BusinessUnit string `json:"business_unit"`
 	Confidence   uint8  `json:"confidence"`
+	MissCount    uint32 `json:"miss_count"`
 	Status       string `json:"status"`
 	FirstSeen    string `json:"first_seen"`
 	LastSeen     string `json:"last_seen"`
@@ -108,6 +109,7 @@ func toResponse(a *Asset) assetResponse {
 		Owner:        a.Owner,
 		BusinessUnit: a.BusinessUnit,
 		Confidence:   a.Confidence,
+		MissCount:    a.MissCount,
 		Status:       a.Status,
 		FirstSeen:    a.FirstSeen.UTC().Format(timeRFC3339Millis),
 		LastSeen:     a.LastSeen.UTC().Format(timeRFC3339Millis),

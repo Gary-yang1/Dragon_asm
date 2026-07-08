@@ -25,7 +25,7 @@ func (q *Queries) CountAssetsByProject(ctx context.Context, projectID uint64) (i
 
 const getAssetByID = `-- name: GetAssetByID :one
 
-SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at FROM asset
+SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
@@ -62,12 +62,13 @@ func (q *Queries) GetAssetByID(ctx context.Context, arg GetAssetByIDParams) (Ass
 		&i.CreatedBy,
 		&i.UpdatedBy,
 		&i.DeletedAt,
+		&i.MissCount,
 	)
 	return i, err
 }
 
 const getAssetByKey = `-- name: GetAssetByKey :one
-SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at FROM asset
+SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset
 WHERE project_id = ? AND asset_key = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
@@ -100,12 +101,13 @@ func (q *Queries) GetAssetByKey(ctx context.Context, arg GetAssetByKeyParams) (A
 		&i.CreatedBy,
 		&i.UpdatedBy,
 		&i.DeletedAt,
+		&i.MissCount,
 	)
 	return i, err
 }
 
 const listAssetsByProject = `-- name: ListAssetsByProject :many
-SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at FROM asset
+SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 LIMIT ? OFFSET ?
@@ -147,6 +149,7 @@ func (q *Queries) ListAssetsByProject(ctx context.Context, arg ListAssetsByProje
 			&i.CreatedBy,
 			&i.UpdatedBy,
 			&i.DeletedAt,
+			&i.MissCount,
 		); err != nil {
 			return nil, err
 		}
@@ -195,6 +198,38 @@ func (q *Queries) UpdateAssetFields(ctx context.Context, arg UpdateAssetFieldsPa
 		arg.Source,
 		arg.Owner,
 		arg.BusinessUnit,
+		arg.Status,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
+}
+
+const updateAssetLifecycle = `-- name: UpdateAssetLifecycle :exec
+UPDATE asset
+SET miss_count = ?,
+    status     = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdateAssetLifecycleParams struct {
+	MissCount uint32 `db:"miss_count" json:"miss_count"`
+	Status    string `db:"status" json:"status"`
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+// Lifecycle transition: set miss_count and status together for one project-scoped
+// live asset. The service decides the target (status, miss_count) after reading
+// the current row and the configurable threshold; this query applies it. The
+// WHERE clause carries project_id + the soft-delete filter so a cross-project or
+// tombstoned asset cannot be transitioned.
+func (q *Queries) UpdateAssetLifecycle(ctx context.Context, arg UpdateAssetLifecycleParams) error {
+	_, err := q.db.ExecContext(ctx, updateAssetLifecycle,
+		arg.MissCount,
 		arg.Status,
 		arg.UpdatedBy,
 		arg.ID,

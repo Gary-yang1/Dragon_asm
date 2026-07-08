@@ -48,6 +48,7 @@ type Asset struct {
 	Owner        string
 	BusinessUnit string
 	Confidence   uint8
+	MissCount    uint32
 	Status       string
 	FirstSeen    time.Time
 	LastSeen     time.Time

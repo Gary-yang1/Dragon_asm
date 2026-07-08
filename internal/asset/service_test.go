@@ -57,7 +57,7 @@ func (f *fakeRepo) Upsert(_ context.Context, in asset.UpsertParams) error {
 
 func (f *fakeRepo) GetByKey(_ context.Context, projectID uint64, assetKey string) (*asset.Asset, error) {
 	if a, ok := f.rows[key(projectID, assetKey)]; ok {
-		return a, nil
+		return cloneAsset(a), nil
 	}
 	return nil, asset.ErrNotFound
 }
@@ -65,7 +65,7 @@ func (f *fakeRepo) GetByKey(_ context.Context, projectID uint64, assetKey string
 func (f *fakeRepo) GetByID(_ context.Context, projectID, id uint64) (*asset.Asset, error) {
 	for _, a := range f.rows {
 		if a.ProjectID == projectID && a.ID == id {
-			return a, nil
+			return cloneAsset(a), nil
 		}
 	}
 	return nil, asset.ErrNotFound
@@ -75,10 +75,19 @@ func (f *fakeRepo) List(_ context.Context, projectID uint64, _, _ int32) ([]*ass
 	var out []*asset.Asset
 	for _, a := range f.rows {
 		if a.ProjectID == projectID {
-			out = append(out, a)
+			out = append(out, cloneAsset(a))
 		}
 	}
 	return out, nil
+}
+
+// cloneAsset returns a shallow copy so callers (and audit before/after snapshots)
+// hold distinct values, matching the sqlc repository which builds a fresh struct
+// per read. Without this, an in-place mutation by Update/UpdateLifecycle would
+// retroactively change a previously returned "before" snapshot.
+func cloneAsset(a *asset.Asset) *asset.Asset {
+	cp := *a
+	return &cp
 }
 
 func (f *fakeRepo) Count(_ context.Context, projectID uint64) (int64, error) {
@@ -98,6 +107,18 @@ func (f *fakeRepo) Update(_ context.Context, in asset.UpdateParams) error {
 			a.Source = in.Source
 			a.Owner = in.Owner
 			a.BusinessUnit = in.BusinessUnit
+			a.Status = in.Status
+			a.UpdatedBy = in.ActorID
+			return nil
+		}
+	}
+	return asset.ErrNotFound
+}
+
+func (f *fakeRepo) UpdateLifecycle(_ context.Context, in asset.UpdateLifecycleParams) error {
+	for _, a := range f.rows {
+		if a.ProjectID == in.ProjectID && a.ID == in.ID {
+			a.MissCount = in.MissCount
 			a.Status = in.Status
 			a.UpdatedBy = in.ActorID
 			return nil

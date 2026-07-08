@@ -59,3 +59,15 @@ SET display_name  = ?,
     status        = ?,
     updated_by    = ?
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: UpdateAssetLifecycle :exec
+-- Lifecycle transition: set miss_count and status together for one project-scoped
+-- live asset. The service decides the target (status, miss_count) after reading
+-- the current row and the configurable threshold; this query applies it. The
+-- WHERE clause carries project_id + the soft-delete filter so a cross-project or
+-- tombstoned asset cannot be transitioned.
+UPDATE asset
+SET miss_count = ?,
+    status     = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';

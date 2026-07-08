@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -84,6 +85,21 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// envIntOr reads an integer env var, falling back to fallback when unset or
+// non-numeric. A non-positive value also falls back (defensive: a 0/negative
+// threshold would never trigger).
+func envIntOr(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
 // wireAPIRoutes builds the shared platform stack (DB, JWT manager, audit sink,
 // Casbin enforcer) and the domain services (auth, project, asset), then
 // registers the API routes under /api/v1. Any missing prerequisite — unset/short
@@ -133,6 +149,7 @@ func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 		asset.NewRepository(queries),
 		asset.WithDB(sqlDB),
 		asset.WithRelationRepository(asset.NewRelationRepository(queries)),
+		asset.WithMissThreshold(envIntOr("ASSET_MISS_THRESHOLD", asset.DefaultMissThreshold)),
 	)
 
 	// Split /api/v1 into public (login, refresh) and protected (everything

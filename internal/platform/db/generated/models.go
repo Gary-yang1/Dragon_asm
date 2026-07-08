@@ -45,6 +45,7 @@ type Asset struct {
 	CreatedBy    string    `db:"created_by" json:"created_by"`
 	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
 	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
+	MissCount    uint32    `db:"miss_count" json:"miss_count"`
 }
 
 type AssetRelation struct {

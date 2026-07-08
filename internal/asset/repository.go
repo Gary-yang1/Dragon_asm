@@ -32,6 +32,11 @@ type Repository interface {
 	// The WHERE clause carries project_id so a cross-project update is impossible
 	// at the DB layer. It returns ErrNotFound when no live row matched.
 	Update(ctx context.Context, in UpdateParams) error
+	// UpdateLifecycle applies a lifecycle transition (miss_count + status) to one
+	// project-scoped live asset. The service computes the target after reading the
+	// current row and the configurable threshold; the repo just applies it. The
+	// WHERE clause carries project_id so a cross-project transition is impossible.
+	UpdateLifecycle(ctx context.Context, in UpdateLifecycleParams) error
 }
 
 // UpdateParams carries the operator-editable fields for Update. The identity
@@ -47,6 +52,17 @@ type UpdateParams struct {
 	BusinessUnit string
 	Status       string
 	ActorID      string
+}
+
+// UpdateLifecycleParams carries a lifecycle transition. MissCount and Status are
+// set together; ActorID records who/what drove the transition (the discovery
+// pipeline, an operator, etc.).
+type UpdateLifecycleParams struct {
+	ProjectID uint64
+	ID        uint64
+	MissCount uint32
+	Status    string
+	ActorID   string
 }
 
 // UpsertParams carries the already-normalized fields for an idempotent write.
@@ -162,6 +178,19 @@ func (r *sqlcRepository) Update(ctx context.Context, in UpdateParams) error {
 	})
 }
 
+// UpdateLifecycle applies the (miss_count, status) transition. Like Update, the
+// service re-reads via GetByID to confirm and to surface a non-existent /
+// cross-project / soft-deleted asset as ErrNotFound.
+func (r *sqlcRepository) UpdateLifecycle(ctx context.Context, in UpdateLifecycleParams) error {
+	return r.q.UpdateAssetLifecycle(ctx, dbgen.UpdateAssetLifecycleParams{
+		MissCount: in.MissCount,
+		Status:    in.Status,
+		UpdatedBy: in.ActorID,
+		ID:        in.ID,
+		ProjectID: in.ProjectID,
+	})
+}
+
 // mapErr converts database/sql's no-rows sentinel into the domain ErrNotFound.
 func mapErr(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
@@ -184,6 +213,7 @@ func toDomain(a dbgen.Asset) *Asset {
 		Owner:        a.Owner,
 		BusinessUnit: a.BusinessUnit,
 		Confidence:   a.Confidence,
+		MissCount:    a.MissCount,
 		Status:       a.Status,
 		FirstSeen:    a.FirstSeen,
 		LastSeen:     a.LastSeen,

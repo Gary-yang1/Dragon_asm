@@ -51,6 +51,12 @@ type Querier interface {
 	// impossible at the DB layer, and the soft-delete filter prevents editing a
 	// tombstoned row.
 	UpdateAssetFields(ctx context.Context, arg UpdateAssetFieldsParams) error
+	// Lifecycle transition: set miss_count and status together for one project-scoped
+	// live asset. The service decides the target (status, miss_count) after reading
+	// the current row and the configurable threshold; this query applies it. The
+	// WHERE clause carries project_id + the soft-delete filter so a cross-project or
+	// tombstoned asset cannot be transitioned.
+	UpdateAssetLifecycle(ctx context.Context, arg UpdateAssetLifecycleParams) error
 	// Idempotent import: a new normalized asset_key inserts; a repeat within the same
 	// project updates only the discovery-refreshable fields (last_seen, source,
 	// confidence, display_name, value, updated_by). first_seen, owner, business_unit

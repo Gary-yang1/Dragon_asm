@@ -14,11 +14,28 @@ import (
 // Audit action names and resource type for asset change events. Stable
 // vocabulary for the audit log.
 const (
-	ActionAssetImport  = "asset.import"
-	ActionAssetUpdate  = "asset.update"
-	ActionRelationSave = "asset.relation.save"
-	ResourceTypeAsset  = "asset"
+	ActionAssetImport    = "asset.import"
+	ActionAssetUpdate    = "asset.update"
+	ActionRelationSave   = "asset.relation.save"
+	ActionAssetLifecycle = "asset.lifecycle"
+	ResourceTypeAsset    = "asset"
 )
+
+// DefaultMissThreshold is the default consecutive-miss count after which an
+// active asset transitions to inactive. Overridable via WithMissThreshold.
+const DefaultMissThreshold = 3
+
+// MaxMissThreshold is the upper bound on the configurable miss threshold. It
+// guards the int->uint32 cast in the comparison: a value above this is clamped
+// (not truncated), so a misconfigured ASSET_MISS_THRESHOLD cannot wrap uint32
+// and trigger a premature active->inactive transition. 1000 is far above any
+// sane consecutive-miss count.
+const MaxMissThreshold = 1000
+
+// maxMissCount is the saturation ceiling for miss_count (uint32 max). In
+// practice miss_count is capped at the threshold by the active->inactive
+// transition, so this is defense-in-depth against a uint32 wrap on +1.
+const maxMissCount = 1<<32 - 1
 
 // Service validation errors.
 var (
@@ -79,10 +96,11 @@ type AuditMeta struct {
 // (or roll back together — a committed change never exists without its audit
 // record).
 type Service struct {
-	repo         Repository
-	relationRepo RelationRepository
-	db           *sql.DB       // nil in unit tests; non-nil in production to run a real tx
-	auditSink    auditRecorder // used on the non-tx path (tests); the tx path builds its own
+	repo          Repository
+	relationRepo  RelationRepository
+	db            *sql.DB       // nil in unit tests; non-nil in production to run a real tx
+	auditSink     auditRecorder // used on the non-tx path (tests); the tx path builds its own
+	missThreshold int           // consecutive misses before active -> inactive, bounded to [1, MaxMissThreshold]
 }
 
 // ServiceOption configures a Service. Use WithDB in production (enables the
@@ -108,11 +126,28 @@ func WithRelationRepository(rr RelationRepository) ServiceOption {
 	return func(s *Service) { s.relationRepo = rr }
 }
 
+// WithMissThreshold sets the consecutive-miss count after which an active asset
+// transitions to inactive. A non-positive value is ignored (the default stays);
+// a value above MaxMissThreshold is clamped to MaxMissThreshold so the
+// int->uint32 comparison cast can never truncate/wrap.
+func WithMissThreshold(n int) ServiceOption {
+	return func(s *Service) {
+		if n <= 0 {
+			return
+		}
+		if n > MaxMissThreshold {
+			n = MaxMissThreshold
+		}
+		s.missThreshold = n
+	}
+}
+
 // NewService builds a Service over the given repository. With no options it runs
 // without a transaction and without audit (legacy single-row behaviour used by
-// the unit tests that assert only on asset state).
+// the unit tests that assert only on asset state), and with the default miss
+// threshold.
 func NewService(repo Repository, opts ...ServiceOption) *Service {
-	s := &Service{repo: repo}
+	s := &Service{repo: repo, missThreshold: DefaultMissThreshold}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -699,6 +734,168 @@ func (s *Service) ListRelations(ctx context.Context, projectID, assetID uint64, 
 		return nil, 0, err
 	}
 	return rows, total, nil
+}
+
+// RecordMiss increments an active asset's consecutive-miss count and, when the
+// count reaches the configured threshold, transitions it active -> inactive.
+// Non-active assets (inactive/ignored/deleted) are left untouched so the
+// lifecycle never re-triggers or un-ignores them. The transition (asset write +
+// audit + lifecycle hook) runs in one transaction; a miss below threshold only
+// updates miss_count (no audit, no hook). Returns the resulting asset and
+// whether a status transition occurred.
+func (s *Service) RecordMiss(ctx context.Context, projectID, assetID uint64, actorID string, meta AuditMeta) (*Asset, bool, error) {
+	if projectID == 0 {
+		return nil, false, ErrInvalidProjectID
+	}
+	var (
+		after        *Asset
+		transitioned bool
+	)
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, _ RelationRepository, sink auditRecorder) error {
+		before, err := repo.GetByID(ctx, projectID, assetID)
+		if err != nil {
+			return err
+		}
+		if before.Status != StatusActive {
+			// Only active assets accumulate misses / can go inactive.
+			after = before
+			return nil
+		}
+		// Saturate at the uint32 ceiling so miss_count+1 can never wrap to 0.
+		// Unreachable in practice (the transition caps miss_count at the
+		// threshold, <= MaxMissThreshold), but defensive against a wrap.
+		if before.MissCount >= maxMissCount {
+			after = before
+			return nil
+		}
+		newMiss := before.MissCount + 1
+		if newMiss < uint32(s.missThreshold) { //nolint:gosec // G115: missThreshold is bounded to [1, MaxMissThreshold] (1000) by WithMissThreshold, so the cast cannot overflow/truncate.
+			if err := repo.UpdateLifecycle(ctx, UpdateLifecycleParams{
+				ProjectID: projectID, ID: assetID, MissCount: newMiss, Status: StatusActive, ActorID: actorID,
+			}); err != nil {
+				return err
+			}
+			after, err = repo.GetByID(ctx, projectID, assetID)
+			if err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := repo.UpdateLifecycle(ctx, UpdateLifecycleParams{
+			ProjectID: projectID, ID: assetID, MissCount: newMiss, Status: StatusInactive, ActorID: actorID,
+		}); err != nil {
+			return err
+		}
+		after, err = repo.GetByID(ctx, projectID, assetID)
+		if err != nil {
+			return err
+		}
+		transitioned = true
+		return s.recordLifecycleTransition(ctx, sink, before, after, StatusActive, StatusInactive, actorID, meta)
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return after, transitioned, nil
+}
+
+// RecordHit records a discovery "hit" for an asset: resets miss_count to 0 and,
+// if the asset was inactive (stale), re-activates it (inactive -> active).
+// active assets keep their status (miss_count reset only if it had climbed);
+// ignored/deleted assets are preserved — a hit never un-ignores or un-deletes.
+// The re-activation (asset write + audit + lifecycle hook) runs in one
+// transaction. Returns the resulting asset and whether a transition occurred.
+func (s *Service) RecordHit(ctx context.Context, projectID, assetID uint64, actorID string, meta AuditMeta) (*Asset, bool, error) {
+	if projectID == 0 {
+		return nil, false, ErrInvalidProjectID
+	}
+	var (
+		after        *Asset
+		transitioned bool
+	)
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, _ RelationRepository, sink auditRecorder) error {
+		before, err := repo.GetByID(ctx, projectID, assetID)
+		if err != nil {
+			return err
+		}
+		switch before.Status {
+		case StatusActive:
+			if before.MissCount == 0 {
+				after = before
+				return nil
+			}
+			if err := repo.UpdateLifecycle(ctx, UpdateLifecycleParams{
+				ProjectID: projectID, ID: assetID, MissCount: 0, Status: StatusActive, ActorID: actorID,
+			}); err != nil {
+				return err
+			}
+			after, err = repo.GetByID(ctx, projectID, assetID)
+			if err != nil {
+				return err
+			}
+			return nil
+		case StatusInactive:
+			if err := repo.UpdateLifecycle(ctx, UpdateLifecycleParams{
+				ProjectID: projectID, ID: assetID, MissCount: 0, Status: StatusActive, ActorID: actorID,
+			}); err != nil {
+				return err
+			}
+			after, err = repo.GetByID(ctx, projectID, assetID)
+			if err != nil {
+				return err
+			}
+			transitioned = true
+			return s.recordLifecycleTransition(ctx, sink, before, after, StatusInactive, StatusActive, actorID, meta)
+		default:
+			// ignored/deleted: preserve, no lifecycle action.
+			after = before
+			return nil
+		}
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return after, transitioned, nil
+}
+
+// recordLifecycleTransition writes the audit event and invokes the lifecycle
+// hook for a status transition, inside the caller's transaction. Either failure
+// returns an error so the transition rolls back (audit and future change_event
+// stay atomic with the asset write).
+func (s *Service) recordLifecycleTransition(ctx context.Context, sink auditRecorder, before, after *Asset, fromStatus, toStatus, actorID string, meta AuditMeta) error {
+	if sink != nil {
+		if err := sink.Record(ctx, audit.Event{
+			TenantID:     before.TenantID,
+			OrgID:        before.OrgID,
+			ProjectID:    before.ProjectID,
+			ActorID:      actorID,
+			ActorType:    audit.ActorSystem,
+			Action:       ActionAssetLifecycle,
+			ResourceType: ResourceTypeAsset,
+			ResourceID:   strconv.FormatUint(after.ID, 10),
+			Result:       audit.ResultSuccess,
+			IP:           meta.IP,
+			UserAgent:    meta.UserAgent,
+			RequestID:    meta.RequestID,
+			Before:       before,
+			After:        after,
+			Metadata: map[string]any{
+				"from":       fromStatus,
+				"to":         toStatus,
+				"miss_count": after.MissCount,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	// TODO(M2-5): produce a change_event row on THIS transaction (not a side
+	// channel). The event writer must be tx-scoped — built from the same
+	// *sql.Tx the asset write and the audit event run on — so a commit/rollback
+	// covers all three. A hook that only receives ctx/ids cannot honour that
+	// contract (it would have to open its own connection), so M1-4 deliberately
+	// does not wire one; M2-5 will extend runInTx to pass a tx-scoped event
+	// writer when the change_event table lands.
+	return nil
 }
 
 // updateWith loads the current row, merges the provided fields, validates,
