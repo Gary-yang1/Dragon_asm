@@ -8,7 +8,146 @@ package dbgen
 import (
 	"context"
 	"database/sql"
+	"time"
 )
+
+const changeCurrentUserPassword = `-- name: ChangeCurrentUserPassword :execresult
+UPDATE app_user
+SET password_hash = ?,
+    must_change_password = FALSE,
+    auth_version = auth_version + 1,
+    updated_by = ?
+WHERE tenant_id = ?
+  AND id = ?
+  AND status = 'active'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type ChangeCurrentUserPasswordParams struct {
+	PasswordHash string `db:"password_hash" json:"password_hash"`
+	UpdatedBy    string `db:"updated_by" json:"updated_by"`
+	TenantID     string `db:"tenant_id" json:"tenant_id"`
+	UserID       uint64 `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) ChangeCurrentUserPassword(ctx context.Context, arg ChangeCurrentUserPasswordParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, changeCurrentUserPassword,
+		arg.PasswordHash,
+		arg.UpdatedBy,
+		arg.TenantID,
+		arg.UserID,
+	)
+}
+
+const countPlatformUsers = `-- name: CountPlatformUsers :one
+SELECT COUNT(*)
+FROM app_user u
+WHERE u.tenant_id = ?
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+  AND (
+      ? = ''
+      OR u.username LIKE CONCAT('%', ?, '%')
+      OR u.display_name LIKE CONCAT('%', ?, '%')
+      OR COALESCE(u.email, '') LIKE CONCAT('%', ?, '%')
+      OR COALESCE(u.phone, '') LIKE CONCAT('%', ?, '%')
+      OR u.department LIKE CONCAT('%', ?, '%')
+  )
+  AND (? = '' OR u.status = ?)
+  AND (
+      ? = ''
+      OR (
+          ? = 'none'
+          AND NOT EXISTS (
+              SELECT 1 FROM tenant_user_role no_role
+              WHERE no_role.tenant_id = u.tenant_id
+                AND no_role.user_id = u.id
+                AND no_role.deleted_at = '1970-01-01 00:00:00.000'
+          )
+      )
+      OR EXISTS (
+          SELECT 1 FROM tenant_user_role role_match
+          WHERE role_match.tenant_id = u.tenant_id
+            AND role_match.user_id = u.id
+            AND role_match.role = ?
+            AND role_match.deleted_at = '1970-01-01 00:00:00.000'
+      )
+  )
+`
+
+type CountPlatformUsersParams struct {
+	TenantID     string      `db:"tenant_id" json:"tenant_id"`
+	Search       interface{} `db:"search" json:"search"`
+	StatusFilter string      `db:"status_filter" json:"status_filter"`
+	RoleFilter   string      `db:"role_filter" json:"role_filter"`
+}
+
+func (q *Queries) CountPlatformUsers(ctx context.Context, arg CountPlatformUsersParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPlatformUsers,
+		arg.TenantID,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.StatusFilter,
+		arg.StatusFilter,
+		arg.RoleFilter,
+		arg.RoleFilter,
+		arg.RoleFilter,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createPlatformUser = `-- name: CreatePlatformUser :execresult
+INSERT INTO app_user (
+    tenant_id,
+    org_id,
+    username,
+    display_name,
+    email,
+    phone,
+    department,
+    password_hash,
+    status,
+    must_change_password,
+    auth_version,
+    created_by,
+    updated_by
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 1, ?, ?)
+`
+
+type CreatePlatformUserParams struct {
+	TenantID     string         `db:"tenant_id" json:"tenant_id"`
+	OrgID        string         `db:"org_id" json:"org_id"`
+	Username     string         `db:"username" json:"username"`
+	DisplayName  string         `db:"display_name" json:"display_name"`
+	Email        sql.NullString `db:"email" json:"email"`
+	Phone        sql.NullString `db:"phone" json:"phone"`
+	Department   string         `db:"department" json:"department"`
+	PasswordHash string         `db:"password_hash" json:"password_hash"`
+	Status       string         `db:"status" json:"status"`
+	CreatedBy    string         `db:"created_by" json:"created_by"`
+	UpdatedBy    string         `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) CreatePlatformUser(ctx context.Context, arg CreatePlatformUserParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createPlatformUser,
+		arg.TenantID,
+		arg.OrgID,
+		arg.Username,
+		arg.DisplayName,
+		arg.Email,
+		arg.Phone,
+		arg.Department,
+		arg.PasswordHash,
+		arg.Status,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
 
 const createUser = `-- name: CreateUser :execresult
 INSERT INTO app_user (
@@ -41,8 +180,172 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (sql.Res
 	)
 }
 
+const getDefaultProjectMembershipByUserID = `-- name: GetDefaultProjectMembershipByUserID :one
+SELECT pm.project_id, pm.role
+FROM project_member pm
+INNER JOIN app_user u
+  ON pm.user_id = (CAST(u.id AS CHAR) COLLATE utf8mb4_unicode_ci)
+INNER JOIN project p ON p.id = pm.project_id
+WHERE pm.user_id = ?
+  AND pm.deleted_at = '1970-01-01 00:00:00.000'
+  AND u.status = 'active'
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+  AND p.tenant_id = u.tenant_id
+  AND p.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY pm.project_id ASC
+LIMIT 1
+`
+
+type GetDefaultProjectMembershipByUserIDRow struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	Role      string `db:"role" json:"role"`
+}
+
+// Returns the user's first live project membership, used by the web shell as
+// the default project context after login.
+func (q *Queries) GetDefaultProjectMembershipByUserID(ctx context.Context, userID string) (GetDefaultProjectMembershipByUserIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getDefaultProjectMembershipByUserID, userID)
+	var i GetDefaultProjectMembershipByUserIDRow
+	err := row.Scan(&i.ProjectID, &i.Role)
+	return i, err
+}
+
+const getGlobalRoleByUserID = `-- name: GetGlobalRoleByUserID :one
+SELECT pm.role
+FROM app_user u
+INNER JOIN project_member pm
+  ON pm.user_id = (CAST(u.id AS CHAR) COLLATE utf8mb4_unicode_ci)
+INNER JOIN project p ON p.id = pm.project_id
+WHERE u.id = ?
+  AND u.status = 'active'
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+  AND pm.role IN ('system_admin', 'security_admin')
+  AND pm.deleted_at = '1970-01-01 00:00:00.000'
+  AND p.tenant_id = u.tenant_id
+  AND p.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY CASE pm.role WHEN 'system_admin' THEN 0 ELSE 1 END
+LIMIT 1
+`
+
+// Legacy compatibility path: global role is temporarily cached in project_member
+// during migration. This query remains for backward compatibility and should
+// be removed after migration cut-over.
+func (q *Queries) GetGlobalRoleByUserID(ctx context.Context, userID uint64) (string, error) {
+	row := q.db.QueryRowContext(ctx, getGlobalRoleByUserID, userID)
+	var role string
+	err := row.Scan(&role)
+	return role, err
+}
+
+const getGlobalRoleByUserIDFromTenantRole = `-- name: GetGlobalRoleByUserIDFromTenantRole :one
+SELECT tur.role
+FROM app_user u
+INNER JOIN tenant_user_role tur
+  ON tur.user_id = u.id
+WHERE u.id = ?
+  AND u.status = 'active'
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+  AND tur.deleted_at = '1970-01-01 00:00:00.000'
+  AND tur.role IN ('system_admin', 'security_admin')
+  AND tur.tenant_id = u.tenant_id
+LIMIT 1
+`
+
+// Authoritative role source after platform-user migration.
+func (q *Queries) GetGlobalRoleByUserIDFromTenantRole(ctx context.Context, userID uint64) (string, error) {
+	row := q.db.QueryRowContext(ctx, getGlobalRoleByUserIDFromTenantRole, userID)
+	var role string
+	err := row.Scan(&role)
+	return role, err
+}
+
+const getPlatformUserByTenantID = `-- name: GetPlatformUserByTenantID :one
+SELECT
+    u.id,
+    u.tenant_id,
+    u.org_id,
+    u.username,
+    u.display_name,
+    u.email,
+    u.phone,
+    u.department,
+    u.status,
+    u.last_login_at,
+    u.must_change_password,
+    u.created_at,
+    u.updated_at,
+    CAST(COALESCE((
+        SELECT tur.role
+        FROM tenant_user_role tur
+        WHERE tur.tenant_id = u.tenant_id
+          AND tur.user_id = u.id
+          AND tur.deleted_at = '1970-01-01 00:00:00.000'
+        LIMIT 1
+    ), '') AS CHAR) AS tenant_role,
+    (
+        SELECT COUNT(DISTINCT pm.project_id)
+        FROM project_member pm
+        INNER JOIN project p ON p.id = pm.project_id
+        WHERE pm.user_id = (CAST(u.id AS CHAR) COLLATE utf8mb4_unicode_ci)
+          AND pm.deleted_at = '1970-01-01 00:00:00.000'
+          AND p.tenant_id = u.tenant_id
+          AND p.deleted_at = '1970-01-01 00:00:00.000'
+    ) AS project_count
+FROM app_user u
+WHERE u.tenant_id = ?
+  AND u.id = ?
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+LIMIT 1
+`
+
+type GetPlatformUserByTenantIDParams struct {
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+	UserID   uint64 `db:"user_id" json:"user_id"`
+}
+
+type GetPlatformUserByTenantIDRow struct {
+	ID                 uint64         `db:"id" json:"id"`
+	TenantID           string         `db:"tenant_id" json:"tenant_id"`
+	OrgID              string         `db:"org_id" json:"org_id"`
+	Username           string         `db:"username" json:"username"`
+	DisplayName        string         `db:"display_name" json:"display_name"`
+	Email              sql.NullString `db:"email" json:"email"`
+	Phone              sql.NullString `db:"phone" json:"phone"`
+	Department         string         `db:"department" json:"department"`
+	Status             string         `db:"status" json:"status"`
+	LastLoginAt        sql.NullTime   `db:"last_login_at" json:"last_login_at"`
+	MustChangePassword bool           `db:"must_change_password" json:"must_change_password"`
+	CreatedAt          time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time      `db:"updated_at" json:"updated_at"`
+	TenantRole         interface{}    `db:"tenant_role" json:"tenant_role"`
+	ProjectCount       int64          `db:"project_count" json:"project_count"`
+}
+
+func (q *Queries) GetPlatformUserByTenantID(ctx context.Context, arg GetPlatformUserByTenantIDParams) (GetPlatformUserByTenantIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getPlatformUserByTenantID, arg.TenantID, arg.UserID)
+	var i GetPlatformUserByTenantIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.Username,
+		&i.DisplayName,
+		&i.Email,
+		&i.Phone,
+		&i.Department,
+		&i.Status,
+		&i.LastLoginAt,
+		&i.MustChangePassword,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.TenantRole,
+		&i.ProjectCount,
+	)
+	return i, err
+}
+
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, tenant_id, org_id, username, display_name, password_hash, status, created_at, updated_at, created_by, updated_by, deleted_at FROM app_user
+SELECT id, tenant_id, org_id, username, display_name, email, phone, department, password_hash, status, last_login_at, must_change_password, auth_version, created_at, updated_at, created_by, updated_by, deleted_at FROM app_user
 WHERE id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
@@ -55,8 +358,14 @@ func (q *Queries) GetUserByID(ctx context.Context, id uint64) (AppUser, error) {
 		&i.OrgID,
 		&i.Username,
 		&i.DisplayName,
+		&i.Email,
+		&i.Phone,
+		&i.Department,
 		&i.PasswordHash,
 		&i.Status,
+		&i.LastLoginAt,
+		&i.MustChangePassword,
+		&i.AuthVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CreatedBy,
@@ -68,7 +377,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id uint64) (AppUser, error) {
 
 const getUserByUsername = `-- name: GetUserByUsername :one
 
-SELECT id, tenant_id, org_id, username, display_name, password_hash, status, created_at, updated_at, created_by, updated_by, deleted_at FROM app_user
+SELECT id, tenant_id, org_id, username, display_name, email, phone, department, password_hash, status, last_login_at, must_change_password, auth_version, created_at, updated_at, created_by, updated_by, deleted_at FROM app_user
 WHERE username = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
@@ -85,8 +394,14 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (AppUs
 		&i.OrgID,
 		&i.Username,
 		&i.DisplayName,
+		&i.Email,
+		&i.Phone,
+		&i.Department,
 		&i.PasswordHash,
 		&i.Status,
+		&i.LastLoginAt,
+		&i.MustChangePassword,
+		&i.AuthVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CreatedBy,
@@ -94,4 +409,429 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (AppUs
 		&i.DeletedAt,
 	)
 	return i, err
+}
+
+const incrementPlatformUserAuthVersion = `-- name: IncrementPlatformUserAuthVersion :execresult
+UPDATE app_user
+SET auth_version = auth_version + 1,
+    updated_by = ?
+WHERE tenant_id = ?
+  AND id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type IncrementPlatformUserAuthVersionParams struct {
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	TenantID  string `db:"tenant_id" json:"tenant_id"`
+	UserID    uint64 `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) IncrementPlatformUserAuthVersion(ctx context.Context, arg IncrementPlatformUserAuthVersionParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, incrementPlatformUserAuthVersion, arg.UpdatedBy, arg.TenantID, arg.UserID)
+}
+
+const listActiveSystemAdminIDsForUpdate = `-- name: ListActiveSystemAdminIDsForUpdate :many
+SELECT u.id
+FROM tenant_user_role tur
+INNER JOIN app_user u
+    ON u.id = tur.user_id
+   AND u.tenant_id = tur.tenant_id
+WHERE tur.tenant_id = ?
+  AND tur.role = 'system_admin'
+  AND tur.deleted_at = '1970-01-01 00:00:00.000'
+  AND u.status = 'active'
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+FOR UPDATE
+`
+
+// Lock the active system-admin rows so concurrent disable/downgrade operations
+// cannot both pass the "last administrator" guard.
+func (q *Queries) ListActiveSystemAdminIDsForUpdate(ctx context.Context, tenantID string) ([]uint64, error) {
+	rows, err := q.db.QueryContext(ctx, listActiveSystemAdminIDsForUpdate, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uint64{}
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPlatformUserProjects = `-- name: ListPlatformUserProjects :many
+SELECT
+    p.id,
+    p.project_code,
+    p.name,
+    pm.role,
+    p.status,
+    pm.updated_at
+FROM app_user u
+INNER JOIN project_member pm
+    ON pm.user_id = (CAST(u.id AS CHAR) COLLATE utf8mb4_unicode_ci)
+INNER JOIN project p
+    ON p.id = pm.project_id
+   AND p.tenant_id = u.tenant_id
+WHERE u.tenant_id = ?
+  AND u.id = ?
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+  AND pm.deleted_at = '1970-01-01 00:00:00.000'
+  AND p.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY p.name ASC, p.id ASC
+`
+
+type ListPlatformUserProjectsParams struct {
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+	UserID   uint64 `db:"user_id" json:"user_id"`
+}
+
+type ListPlatformUserProjectsRow struct {
+	ID          uint64    `db:"id" json:"id"`
+	ProjectCode string    `db:"project_code" json:"project_code"`
+	Name        string    `db:"name" json:"name"`
+	Role        string    `db:"role" json:"role"`
+	Status      string    `db:"status" json:"status"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+
+func (q *Queries) ListPlatformUserProjects(ctx context.Context, arg ListPlatformUserProjectsParams) ([]ListPlatformUserProjectsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPlatformUserProjects, arg.TenantID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPlatformUserProjectsRow{}
+	for rows.Next() {
+		var i ListPlatformUserProjectsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectCode,
+			&i.Name,
+			&i.Role,
+			&i.Status,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPlatformUsers = `-- name: ListPlatformUsers :many
+SELECT
+    u.id,
+    u.tenant_id,
+    u.org_id,
+    u.username,
+    u.display_name,
+    u.email,
+    u.phone,
+    u.department,
+    u.status,
+    u.last_login_at,
+    u.must_change_password,
+    u.created_at,
+    u.updated_at,
+    CAST(COALESCE((
+        SELECT tur.role
+        FROM tenant_user_role tur
+        WHERE tur.tenant_id = u.tenant_id
+          AND tur.user_id = u.id
+          AND tur.deleted_at = '1970-01-01 00:00:00.000'
+        LIMIT 1
+    ), '') AS CHAR) AS tenant_role,
+    (
+        SELECT COUNT(DISTINCT pm.project_id)
+        FROM project_member pm
+        INNER JOIN project p ON p.id = pm.project_id
+        WHERE pm.user_id = (CAST(u.id AS CHAR) COLLATE utf8mb4_unicode_ci)
+          AND pm.deleted_at = '1970-01-01 00:00:00.000'
+          AND p.tenant_id = u.tenant_id
+          AND p.deleted_at = '1970-01-01 00:00:00.000'
+    ) AS project_count
+FROM app_user u
+WHERE u.tenant_id = ?
+  AND u.deleted_at = '1970-01-01 00:00:00.000'
+  AND (
+      ? = ''
+      OR u.username LIKE CONCAT('%', ?, '%')
+      OR u.display_name LIKE CONCAT('%', ?, '%')
+      OR COALESCE(u.email, '') LIKE CONCAT('%', ?, '%')
+      OR COALESCE(u.phone, '') LIKE CONCAT('%', ?, '%')
+      OR u.department LIKE CONCAT('%', ?, '%')
+  )
+  AND (? = '' OR u.status = ?)
+  AND (
+      ? = ''
+      OR (
+          ? = 'none'
+          AND NOT EXISTS (
+              SELECT 1 FROM tenant_user_role no_role
+              WHERE no_role.tenant_id = u.tenant_id
+                AND no_role.user_id = u.id
+                AND no_role.deleted_at = '1970-01-01 00:00:00.000'
+          )
+      )
+      OR EXISTS (
+          SELECT 1 FROM tenant_user_role role_match
+          WHERE role_match.tenant_id = u.tenant_id
+            AND role_match.user_id = u.id
+            AND role_match.role = ?
+            AND role_match.deleted_at = '1970-01-01 00:00:00.000'
+      )
+  )
+ORDER BY u.updated_at DESC, u.id DESC
+LIMIT ? OFFSET ?
+`
+
+type ListPlatformUsersParams struct {
+	TenantID     string      `db:"tenant_id" json:"tenant_id"`
+	Search       interface{} `db:"search" json:"search"`
+	StatusFilter string      `db:"status_filter" json:"status_filter"`
+	RoleFilter   string      `db:"role_filter" json:"role_filter"`
+	Limit        int32       `db:"limit" json:"limit"`
+	Offset       int32       `db:"offset" json:"offset"`
+}
+
+type ListPlatformUsersRow struct {
+	ID                 uint64         `db:"id" json:"id"`
+	TenantID           string         `db:"tenant_id" json:"tenant_id"`
+	OrgID              string         `db:"org_id" json:"org_id"`
+	Username           string         `db:"username" json:"username"`
+	DisplayName        string         `db:"display_name" json:"display_name"`
+	Email              sql.NullString `db:"email" json:"email"`
+	Phone              sql.NullString `db:"phone" json:"phone"`
+	Department         string         `db:"department" json:"department"`
+	Status             string         `db:"status" json:"status"`
+	LastLoginAt        sql.NullTime   `db:"last_login_at" json:"last_login_at"`
+	MustChangePassword bool           `db:"must_change_password" json:"must_change_password"`
+	CreatedAt          time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time      `db:"updated_at" json:"updated_at"`
+	TenantRole         interface{}    `db:"tenant_role" json:"tenant_role"`
+	ProjectCount       int64          `db:"project_count" json:"project_count"`
+}
+
+func (q *Queries) ListPlatformUsers(ctx context.Context, arg ListPlatformUsersParams) ([]ListPlatformUsersRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPlatformUsers,
+		arg.TenantID,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.Search,
+		arg.StatusFilter,
+		arg.StatusFilter,
+		arg.RoleFilter,
+		arg.RoleFilter,
+		arg.RoleFilter,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPlatformUsersRow{}
+	for rows.Next() {
+		var i ListPlatformUsersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.Username,
+			&i.DisplayName,
+			&i.Email,
+			&i.Phone,
+			&i.Department,
+			&i.Status,
+			&i.LastLoginAt,
+			&i.MustChangePassword,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.TenantRole,
+			&i.ProjectCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resetPlatformUserPassword = `-- name: ResetPlatformUserPassword :execresult
+UPDATE app_user
+SET password_hash = ?,
+    must_change_password = TRUE,
+    auth_version = auth_version + 1,
+    updated_by = ?
+WHERE tenant_id = ?
+  AND id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type ResetPlatformUserPasswordParams struct {
+	PasswordHash string `db:"password_hash" json:"password_hash"`
+	UpdatedBy    string `db:"updated_by" json:"updated_by"`
+	TenantID     string `db:"tenant_id" json:"tenant_id"`
+	UserID       uint64 `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) ResetPlatformUserPassword(ctx context.Context, arg ResetPlatformUserPasswordParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, resetPlatformUserPassword,
+		arg.PasswordHash,
+		arg.UpdatedBy,
+		arg.TenantID,
+		arg.UserID,
+	)
+}
+
+const softDeleteTenantUserRole = `-- name: SoftDeleteTenantUserRole :exec
+UPDATE tenant_user_role
+SET deleted_at = CURRENT_TIMESTAMP(3),
+    updated_by = ?,
+    updated_at = CURRENT_TIMESTAMP(3)
+WHERE tenant_id = ?
+  AND user_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type SoftDeleteTenantUserRoleParams struct {
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	TenantID  string `db:"tenant_id" json:"tenant_id"`
+	UserID    uint64 `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) SoftDeleteTenantUserRole(ctx context.Context, arg SoftDeleteTenantUserRoleParams) error {
+	_, err := q.db.ExecContext(ctx, softDeleteTenantUserRole, arg.UpdatedBy, arg.TenantID, arg.UserID)
+	return err
+}
+
+const transitionPlatformUserStatus = `-- name: TransitionPlatformUserStatus :execresult
+UPDATE app_user
+SET status = ?,
+    auth_version = auth_version + 1,
+    updated_by = ?
+WHERE tenant_id = ?
+  AND id = ?
+  AND status = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type TransitionPlatformUserStatusParams struct {
+	NextStatus     string `db:"next_status" json:"next_status"`
+	UpdatedBy      string `db:"updated_by" json:"updated_by"`
+	TenantID       string `db:"tenant_id" json:"tenant_id"`
+	UserID         uint64 `db:"user_id" json:"user_id"`
+	PreviousStatus string `db:"previous_status" json:"previous_status"`
+}
+
+func (q *Queries) TransitionPlatformUserStatus(ctx context.Context, arg TransitionPlatformUserStatusParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, transitionPlatformUserStatus,
+		arg.NextStatus,
+		arg.UpdatedBy,
+		arg.TenantID,
+		arg.UserID,
+		arg.PreviousStatus,
+	)
+}
+
+const updatePlatformUserProfile = `-- name: UpdatePlatformUserProfile :execresult
+UPDATE app_user
+SET display_name = ?,
+    email = ?,
+    phone = ?,
+    department = ?,
+    updated_by = ?
+WHERE tenant_id = ?
+  AND id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdatePlatformUserProfileParams struct {
+	DisplayName string         `db:"display_name" json:"display_name"`
+	Email       sql.NullString `db:"email" json:"email"`
+	Phone       sql.NullString `db:"phone" json:"phone"`
+	Department  string         `db:"department" json:"department"`
+	UpdatedBy   string         `db:"updated_by" json:"updated_by"`
+	TenantID    string         `db:"tenant_id" json:"tenant_id"`
+	UserID      uint64         `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) UpdatePlatformUserProfile(ctx context.Context, arg UpdatePlatformUserProfileParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, updatePlatformUserProfile,
+		arg.DisplayName,
+		arg.Email,
+		arg.Phone,
+		arg.Department,
+		arg.UpdatedBy,
+		arg.TenantID,
+		arg.UserID,
+	)
+}
+
+const updateUserLastLoginAt = `-- name: UpdateUserLastLoginAt :exec
+UPDATE app_user
+SET last_login_at = CURRENT_TIMESTAMP(3), updated_at = updated_at
+WHERE id = ?
+  AND status = 'active'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+func (q *Queries) UpdateUserLastLoginAt(ctx context.Context, id uint64) error {
+	_, err := q.db.ExecContext(ctx, updateUserLastLoginAt, id)
+	return err
+}
+
+const upsertTenantUserRole = `-- name: UpsertTenantUserRole :exec
+INSERT INTO tenant_user_role (
+    tenant_id, user_id, role, created_by, updated_by
+) VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+    role = VALUES(role),
+    updated_by = VALUES(updated_by),
+    updated_at = CURRENT_TIMESTAMP(3)
+`
+
+type UpsertTenantUserRoleParams struct {
+	TenantID  string `db:"tenant_id" json:"tenant_id"`
+	UserID    uint64 `db:"user_id" json:"user_id"`
+	Role      string `db:"role" json:"role"`
+	CreatedBy string `db:"created_by" json:"created_by"`
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) UpsertTenantUserRole(ctx context.Context, arg UpsertTenantUserRoleParams) error {
+	_, err := q.db.ExecContext(ctx, upsertTenantUserRole,
+		arg.TenantID,
+		arg.UserID,
+		arg.Role,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+	return err
 }

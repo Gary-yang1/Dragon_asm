@@ -2,8 +2,10 @@ package project
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/casbin/casbin/v2"
 
@@ -28,13 +30,34 @@ var (
 
 // Service applies project business rules and the project access boundary.
 type Service struct {
-	repo     Repository
-	enforcer *casbin.Enforcer
+	repo        Repository
+	workspace   WorkspaceRepository
+	actorScopes actorScopeResolver
+	globalRoles GlobalRoleResolver
+	enforcer    *casbin.Enforcer
+	db          *sql.DB
+	auditSink   auditRecorder
+}
+
+type actorScopeResolver interface {
+	ActorScope(ctx context.Context, actorID string) (ActorScope, error)
+}
+
+// GlobalRoleResolver resolves the actor's tenant-scoped system/security admin
+// role from authoritative backend data. It must never trust request input.
+type GlobalRoleResolver interface {
+	GetGlobalRole(ctx context.Context, userID uint64) (string, error)
 }
 
 // NewService builds a Service over the given repository and Casbin enforcer.
-func NewService(repo Repository, enforcer *casbin.Enforcer) *Service {
-	return &Service{repo: repo, enforcer: enforcer}
+func NewService(repo Repository, enforcer *casbin.Enforcer, opts ...ServiceOption) *Service {
+	workspace, _ := repo.(WorkspaceRepository)
+	actorScopes, _ := repo.(actorScopeResolver)
+	s := &Service{repo: repo, workspace: workspace, actorScopes: actorScopes, enforcer: enforcer}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // GetByID returns the live project, or ErrNotFound (including for soft-deleted
@@ -73,8 +96,8 @@ func (s *Service) Authorize(ctx context.Context, userID string, projectID uint64
 }
 
 // Access resolves the project access boundary for (userID, projectID) and, in
-// one call, returns the live project and the user's membership role ("" when
-// access was granted via an explicit Casbin permission rather than membership).
+// one call, returns the live project and the user's effective admitted role
+// ("" only when access was granted via a direct Casbin permission).
 // It mirrors Authorize's three steps:
 //
 //  1. The project must exist (ErrNotFound).
@@ -89,10 +112,35 @@ func (s *Service) Access(ctx context.Context, userID string, projectID uint64) (
 	if err != nil {
 		return nil, "", err
 	}
+	if s.actorScopes == nil {
+		return nil, "", ErrForbidden
+	}
+	scope, err := s.actorScopes.ActorScope(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidActor) {
+			return nil, "", ErrForbidden
+		}
+		return nil, "", err
+	}
+	if scope.TenantID == "" || p.TenantID == "" || scope.TenantID != p.TenantID {
+		return nil, "", ErrForbidden
+	}
+
+	// Authoritative global roles are tenant-scoped by their resolver. Returning
+	// the role lets every module apply the canonical role-permission matrix.
+	globalRole, err := s.resolveGlobalRole(ctx, userID)
+	if err != nil {
+		return nil, "", err
+	}
+	if asmcasbin.RoleHasPerm(globalRole, PermAccess) {
+		return p, globalRole, nil
+	}
 
 	// Step 2: explicit permission judgment (covers global roles via domain "*").
-	if ok, err := s.enforcer.Enforce(userID, projectDomain(projectID), PermAccess, "allow"); err == nil && ok {
-		return p, "", nil
+	if s.enforcer != nil {
+		if ok, err := s.enforcer.Enforce(userID, projectDomain(projectID), PermAccess, "allow"); err == nil && ok {
+			return p, "", nil
+		}
 	}
 
 	// Step 3: project-scoped membership — resolve the role for the caller.
@@ -104,6 +152,24 @@ func (s *Service) Access(ctx context.Context, userID string, projectID uint64) (
 		return nil, "", err
 	}
 	return p, role, nil
+}
+
+func (s *Service) resolveGlobalRole(ctx context.Context, actorID string) (string, error) {
+	if s.globalRoles == nil {
+		return "", nil
+	}
+	id, err := strconv.ParseUint(actorID, 10, 64)
+	if err != nil || id == 0 {
+		return "", ErrForbidden
+	}
+	role, err := s.globalRoles.GetGlobalRole(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if role != asmcasbin.RoleSystemAdmin && role != asmcasbin.RoleSecurityAdmin {
+		return "", nil
+	}
+	return role, nil
 }
 
 // projectDomain renders the numeric project id as the Casbin domain string.

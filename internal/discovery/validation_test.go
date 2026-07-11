@@ -155,3 +155,30 @@ func TestNormalizeTemplateConfigRejectsInvalidJSONAndSensitiveFields(t *testing.
 	_, err = normalizeTemplateConfig(`{"authorization":"abc"}`)
 	assert.ErrorIs(t, err, ErrInvalidTaskConfig)
 }
+
+func TestParseDispatchConfigNormalizesTargetsAndOptions(t *testing.T) {
+	config, err := parseDispatchConfig(`{
+		"targets":[
+			{"type":"domain","value":"Example.COM."},
+			{"type":"url","value":"https://API.EXAMPLE.COM/path"}
+		],
+		"options":{"profile":"standard"}
+	}`)
+	require.NoError(t, err)
+	assert.Equal(t, []DispatchTarget{
+		{Type: TargetTypeDomain, Value: "example.com"},
+		{Type: TargetTypeURL, Value: "https://api.example.com"},
+	}, config.Targets)
+	assert.Equal(t, "standard", config.Options["profile"])
+}
+
+func TestParseDispatchConfigRejectsMissingTargetsAndInvalidTarget(t *testing.T) {
+	_, err := parseDispatchConfig(`{"options":{}}`)
+	assert.ErrorIs(t, err, ErrInvalidTaskConfig)
+
+	_, err = parseDispatchConfig(`{"targets":[{"type":"bad","value":"example.com"}]}`)
+	assert.ErrorIs(t, err, ErrInvalidTargetType)
+
+	_, err = parseDispatchConfig(`{"targets":[{"type":"ip","value":"127.0.0.1"}]}`)
+	assert.ErrorIs(t, err, ErrDangerousTarget)
+}

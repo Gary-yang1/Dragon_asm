@@ -23,6 +23,29 @@ func (q *Queries) CountAssetsByProject(ctx context.Context, projectID uint64) (i
 	return count, err
 }
 
+const findProjectRootDomainAsset = `-- name: FindProjectRootDomainAsset :one
+SELECT a.id FROM project_domain_profile pdp
+INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id
+WHERE pdp.project_id = ?
+  AND ? LIKE CONCAT('%.', a.value)
+  AND pdp.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY CHAR_LENGTH(a.value) DESC, a.id
+LIMIT 1
+`
+
+type FindProjectRootDomainAssetParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	Value     string `db:"value" json:"value"`
+}
+
+func (q *Queries) FindProjectRootDomainAsset(ctx context.Context, arg FindProjectRootDomainAssetParams) (uint64, error) {
+	row := q.db.QueryRowContext(ctx, findProjectRootDomainAsset, arg.ProjectID, arg.Value)
+	var id uint64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getAssetByID = `-- name: GetAssetByID :one
 
 SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset

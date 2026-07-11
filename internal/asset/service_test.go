@@ -15,11 +15,14 @@ import (
 // fakeRepo is an in-memory Repository keyed by "<projectID>:<assetKey>" so tests
 // can assert both idempotency and project-level isolation without a DB.
 type fakeRepo struct {
-	rows   map[string]*asset.Asset
-	nextID uint64
+	rows               map[string]*asset.Asset
+	rootDomainAssetIDs map[string]uint64
+	nextID             uint64
 }
 
-func newFakeRepo() *fakeRepo { return &fakeRepo{rows: map[string]*asset.Asset{}} }
+func newFakeRepo() *fakeRepo {
+	return &fakeRepo{rows: map[string]*asset.Asset{}, rootDomainAssetIDs: map[string]uint64{}}
+}
 
 func key(projectID uint64, assetKey string) string {
 	return fmt.Sprintf("%d:%s", projectID, assetKey)
@@ -125,6 +128,13 @@ func (f *fakeRepo) UpdateLifecycle(_ context.Context, in asset.UpdateLifecyclePa
 		}
 	}
 	return asset.ErrNotFound
+}
+
+func (f *fakeRepo) FindRootDomainAssetID(_ context.Context, projectID uint64, subdomain string) (uint64, error) {
+	if id, ok := f.rootDomainAssetIDs[fmt.Sprintf("%d:%s", projectID, subdomain)]; ok {
+		return id, nil
+	}
+	return 0, asset.ErrNotFound
 }
 
 // Acceptance: importing the same normalized asset twice in one project does not
@@ -398,6 +408,32 @@ func TestImportBatchStatsAndIdempotent(t *testing.T) {
 	assert.Equal(t, int64(1), report.Failed)
 	assert.Len(t, repo.rows, 1, "two same-key rows collapse to one")
 	assert.Equal(t, asset.RowFailed, report.Rows[2].Status)
+}
+
+func TestImportBatchLinksSubdomainToProjectRoot(t *testing.T) {
+	repo := newFakeRepo()
+	relations := newFakeRelationRepo()
+	svc := asset.NewService(repo, asset.WithRelationRepository(relations))
+
+	root, err := svc.Import(context.Background(), asset.ImportInput{
+		ProjectID: 1, TenantID: "t1", OrgID: "o1", AssetType: asset.TypeDomain, Value: "example.com",
+	})
+	require.NoError(t, err)
+	repo.rootDomainAssetIDs["1:api.example.com"] = root.ID
+
+	report, err := svc.ImportBatch(context.Background(), asset.ImportBatchInput{
+		ProjectID: 1, TenantID: "t1", OrgID: "o1", ActorID: "u1",
+		Rows: []asset.ImportInput{{AssetType: asset.TypeSubdomain, Value: "api.example.com"}},
+	}, asset.AuditMeta{})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), report.Success)
+
+	subdomain, err := repo.GetByKey(context.Background(), 1, "subdomain:api.example.com")
+	require.NoError(t, err)
+	relation, err := relations.GetByEndpoints(context.Background(), 1, root.ID, subdomain.ID, asset.RelationContains)
+	require.NoError(t, err)
+	assert.Equal(t, "project_profile", relation.Source)
+	assert.Equal(t, uint8(100), relation.Confidence)
 }
 
 // Acceptance: re-importing an asset deliberately set to 'ignored' must NOT flip

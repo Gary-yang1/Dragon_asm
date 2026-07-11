@@ -1,0 +1,1411 @@
+openapi: 3.0.3
+info:
+  title: ASM Platform API
+  version: 0.8.0
+  description: |
+    Contract for the HTTP routes currently mounted by cmd/api. Discovery scope,
+    task template, and task run management are implemented below service level
+    but are not listed here until HTTP handlers are added.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+  - name: platform-users
+  - name: workspace
+  - name: projects
+  - name: assets
+  - name: discovery
+  - name: exposures
+  - name: risks
+  - name: tickets
+  - name: notifications
+  - name: reports
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Login and return an access/refresh token pair.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Token pair and initial user session state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginEnvelope"
+        "400":
+          description: Malformed login request.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /auth/refresh:
+    post:
+      tags: [auth]
+      security: []
+      summary: Refresh an access token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Token pair.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Return the current user profile.
+      responses:
+        "200":
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /auth/permissions:
+    get:
+      tags: [auth]
+      summary: Return permissions for the current principal.
+      responses:
+        "200":
+          description: Permission list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /auth/password/change:
+    post:
+      tags: [auth]
+      summary: Change the authenticated user's password.
+      description: Verifies the current password, clears must_change_password, increments auth_version, revokes existing access/refresh tokens, and writes an audit event atomically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordChangeRequest" }
+      responses:
+        "200":
+          description: Password changed; the caller must authenticate again.
+          content: { application/json: { schema: { $ref: "#/components/schemas/PasswordChangeEnvelope" } } }
+        "400": { description: Malformed request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { description: Invalid current password, unchanged password, or password-policy failure., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /admin/users:
+    get:
+      tags: [platform-users]
+      summary: List users in the current actor's tenant.
+      description: Requires user:read. The tenant is always resolved from the authenticated actor.
+      parameters:
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 128 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, disabled] }
+        - name: role
+          in: query
+          schema: { type: string, enum: [system_admin, security_admin, none] }
+      responses:
+        "200": { description: Tenant-scoped user page., content: { application/json: { schema: { $ref: "#/components/schemas/PlatformUserPageEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [platform-users]
+      summary: Create a user in the current actor's tenant and organization.
+      description: Requires user:write. A non-null role additionally requires user:role:write. Usernames are normalized to lowercase ASCII and are immutable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformUserCreateRequest" }
+      responses:
+        "201": { description: Created user., content: { application/json: { schema: { $ref: "#/components/schemas/PlatformUserEnvelope" } } } }
+        "400": { description: Malformed request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { description: Invalid profile, role, or temporary password., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /admin/users/{user_id}:
+    get:
+      tags: [platform-users]
+      summary: Get a user in the current actor's tenant.
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      responses:
+        "200": { description: Platform user., content: { application/json: { schema: { $ref: "#/components/schemas/PlatformUserEnvelope" } } } }
+        "400": { description: Invalid user id., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Missing or cross-tenant users both return not found., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+    patch:
+      tags: [platform-users]
+      summary: Update mutable platform-user profile fields.
+      description: Username, status, password, and role are not mutable through this endpoint.
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformUserUpdateRequest" }
+      responses:
+        "200": { description: Updated user., content: { application/json: { schema: { $ref: "#/components/schemas/PlatformUserEnvelope" } } } }
+        "400": { description: Invalid user id or malformed request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Missing or cross-tenant user., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: Invalid profile fields., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /admin/users/{user_id}/transitions:
+    post:
+      tags: [platform-users]
+      summary: Enable or disable a platform user.
+      description: Requires user:write. A reason is mandatory. Self-disable and removal of the last active system administrator are rejected. Successful transitions revoke existing sessions and are transactionally audited.
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformUserTransitionRequest" }
+      responses:
+        "200": { description: Updated user., content: { application/json: { schema: { $ref: "#/components/schemas/PlatformUserEnvelope" } } } }
+        "400": { description: Invalid user id or malformed request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Missing or cross-tenant user., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: Invalid status or reason., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /admin/users/{user_id}/password-reset:
+    post:
+      tags: [platform-users]
+      summary: Replace a user's password with an administrator-supplied temporary password.
+      description: Requires user:credential:reset. The password is bcrypt-hashed, never returned or audited, and existing sessions are revoked.
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformUserPasswordResetRequest" }
+      responses:
+        "200": { description: Password reset acknowledgement., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "400": { description: Invalid user id or malformed request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Missing or cross-tenant user., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: Temporary password violates policy., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /admin/users/{user_id}/tenant-role:
+    put:
+      tags: [platform-users]
+      summary: Set or clear a user's tenant-level platform role.
+      description: Requires user:role:write. A null role clears the assignment. Role changes revoke existing sessions and are transactionally audited.
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantRoleUpdateRequest" }
+      responses:
+        "200": { description: Role assignment acknowledgement., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "400": { description: Invalid user id or malformed request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Missing or cross-tenant user., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: Invalid tenant role., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /admin/users/{user_id}/projects:
+    get:
+      tags: [platform-users]
+      summary: List a user's project memberships without modifying them.
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      responses:
+        "200": { description: Project membership list., content: { application/json: { schema: { $ref: "#/components/schemas/PlatformUserProjectsEnvelope" } } } }
+        "400": { description: Invalid user id., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Missing or cross-tenant user., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /admin/roles:
+    get:
+      tags: [platform-users]
+      summary: Return the fixed read-only role matrix.
+      description: Requires user:read. Only system administrators receive user-management permissions.
+      responses:
+        "200": { description: Fixed role matrix., content: { application/json: { schema: { $ref: "#/components/schemas/AdminRolesEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /workspace/summary:
+    get:
+      tags: [workspace]
+      summary: Return an actor-scoped cross-project workspace summary.
+      description: Ordinary members are aggregated only across their memberships. Explicit cross-project administrators are still restricted to their tenant and the read is audited.
+      responses:
+        "200":
+          description: Workspace summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceSummaryEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /projects:
+    get:
+      tags: [projects]
+      summary: List projects visible to the current principal.
+      parameters:
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200": { description: Paged projects, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectPageEnvelope" } } } }
+    post:
+      tags: [projects]
+      summary: Create a draft project and initialize its owner membership.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProjectCreateRequest" }
+      responses:
+        "201": { description: Draft project, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /projects/{project_id}:
+    get:
+      tags: [projects]
+      summary: Get a project profile.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      responses:
+        "200": { description: Project, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectEnvelope" } } } }
+    patch:
+      tags: [projects]
+      summary: Update editable project fields.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProjectUpdateRequest" }
+      responses:
+        "200": { description: Updated project, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectEnvelope" } } } }
+  /projects/{project_id}/transitions:
+    post:
+      tags: [projects]
+      summary: Transition project lifecycle state.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, suspended, archived] }
+                reason: { type: string, maxLength: 512 }
+      responses:
+        "200": { description: Updated project, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { description: Project onboarding is incomplete, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /projects/{project_id}/onboarding-status:
+    get:
+      tags: [projects]
+      summary: Return project activation readiness.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      responses:
+        "200": { description: Readiness, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+  /projects/{project_id}/capabilities:
+    get:
+      tags: [projects]
+      summary: Return effective capabilities for the current actor in one project.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      responses:
+        "200":
+          description: Effective project role, permissions and activation readiness.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectCapabilitiesEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /projects/{project_id}/subjects:
+    get:
+      tags: [projects]
+      summary: List project subjects.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      responses:
+        "200": { description: Subjects, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+    post:
+      tags: [projects]
+      summary: Create a project subject.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectSubjectRequest" } } } }
+      responses:
+        "201": { description: Subject, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+  /projects/{project_id}/subjects/{id}:
+    patch:
+      tags: [projects]
+      summary: Update a project subject.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }, { $ref: "#/components/parameters/ID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectSubjectRequest" } } } }
+      responses:
+        "200": { description: Subject, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+  /projects/{project_id}/domains:
+    get:
+      tags: [projects]
+      summary: List registrable root-domain profiles.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      responses:
+        "200": { description: Domains, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+    post:
+      tags: [projects]
+      summary: Add a root-domain profile and idempotently materialize its domain asset.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectDomainRequest" } } } }
+      responses:
+        "201": { description: Domain profile, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "422": { description: Invalid registrable domain, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /projects/{project_id}/domains/{id}:
+    patch:
+      tags: [projects]
+      summary: Update root-domain profile metadata.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }, { $ref: "#/components/parameters/ID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectDomainUpdateRequest" } } } }
+      responses:
+        "200": { description: Domain profile, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+  /projects/{project_id}/icp-filings:
+    get:
+      tags: [projects]
+      summary: List ICP filing profiles.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      responses:
+        "200": { description: ICP filings, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+    post:
+      tags: [projects]
+      summary: Create an ICP filing and associate root-domain profiles.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ICPRequest" } } } }
+      responses:
+        "201": { description: ICP filing, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+  /projects/{project_id}/icp-filings/{id}:
+    patch:
+      tags: [projects]
+      summary: Update an ICP filing and replace domain associations.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }, { $ref: "#/components/parameters/ID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ICPRequest" } } } }
+      responses:
+        "200": { description: ICP filing, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+  /discovery/callback:
+    post:
+      tags: [discovery]
+      security: []
+      summary: External engine callback endpoint protected by HMAC headers.
+      parameters:
+        - $ref: "#/components/parameters/ProjectIDQuery"
+        - name: run_id
+          in: query
+          required: true
+          schema: { type: integer, format: uint64, minimum: 1 }
+        - name: seq
+          in: query
+          required: true
+          schema: { type: integer, format: uint64, minimum: 1 }
+        - name: X-Signature
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Timestamp
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Callback accepted or detected as duplicate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DuplicateEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /projects/{project_id}/assets:
+    get:
+      tags: [assets]
+      summary: List assets in a project.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Paged assets.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetPageEnvelope"
+  /projects/{project_id}/assets/import:
+    post:
+      tags: [assets]
+      summary: Import or dry-run import project assets.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - name: dry_run
+          in: query
+          schema: { type: boolean, default: false }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetImportRequest"
+      responses:
+        "200":
+          description: Import result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/assets/{id}:
+    get:
+      tags: [assets]
+      summary: Get asset detail.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Asset detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetEnvelope"
+    patch:
+      tags: [assets]
+      summary: Patch editable asset fields.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetUpdateRequest"
+      responses:
+        "200":
+          description: Updated asset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetEnvelope"
+  /projects/{project_id}/assets/{id}/relations:
+    get:
+      tags: [assets]
+      summary: List asset relations.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Relation list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+    post:
+      tags: [assets]
+      summary: Create an asset relation.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created relation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/exposures:
+    get:
+      tags: [exposures]
+      summary: List exposure snapshots.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Paged exposures.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/exposures/{id}:
+    get:
+      tags: [exposures]
+      summary: Get exposure detail.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Exposure detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/risks:
+    get:
+      tags: [risks]
+      summary: List risks.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Paged risks.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/risks/{id}:
+    get:
+      tags: [risks]
+      summary: Get risk detail.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Risk detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/risks/{id}/status-transitions:
+    post:
+      tags: [risks]
+      summary: Transition a risk status.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated risk.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/sla-policies:
+    get:
+      tags: [risks]
+      summary: List SLA policies.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: SLA policies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+    put:
+      tags: [risks]
+      summary: Upsert an SLA policy.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Upserted SLA policy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/tickets:
+    get:
+      tags: [tickets]
+      summary: List tickets.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Paged tickets.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+    post:
+      tags: [tickets]
+      summary: Create a ticket.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/tickets/{id}:
+    get:
+      tags: [tickets]
+      summary: Get ticket detail.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Ticket detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/tickets/{id}/status-transitions:
+    post:
+      tags: [tickets]
+      summary: Transition a ticket status.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/notification-rules:
+    get:
+      tags: [notifications]
+      summary: List notification rules.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: Notification rules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+    post:
+      tags: [notifications]
+      summary: Create a notification rule.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created notification rule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/notification-rules/{id}/enabled:
+    patch:
+      tags: [notifications]
+      summary: Enable or disable a notification rule.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Update marker.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/reports/dashboard:
+    get:
+      tags: [reports]
+      summary: Get dashboard summary.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: Dashboard data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/reports/trends:
+    get:
+      tags: [reports]
+      summary: Get trend series.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Trend series.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/reports/top:
+    get:
+      tags: [reports]
+      summary: Get top-N report.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - name: dimension
+          in: query
+          schema: { type: string, default: asset }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 10 }
+      responses:
+        "200":
+          description: Top-N data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/reports/remediation:
+    get:
+      tags: [reports]
+      summary: Get remediation summary.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: Remediation data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/reports/exports:
+    get:
+      tags: [reports]
+      summary: List report export jobs.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Export jobs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+    post:
+      tags: [reports]
+      summary: Create an async report export.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Export job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/reports/exports/{id}:
+    get:
+      tags: [reports]
+      summary: Get export job detail.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Export job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/reports/exports/{id}/download:
+    get:
+      tags: [reports]
+      summary: Download a completed export file.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Export file stream.
+          content:
+            text/csv: { schema: { type: string, format: binary } }
+            application/json: { schema: { type: string, format: binary } }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    ProjectID:
+      name: project_id
+      in: path
+      required: true
+      schema: { type: integer, format: uint64, minimum: 1 }
+    ProjectIDQuery:
+      name: project_id
+      in: query
+      required: true
+      schema: { type: integer, format: uint64, minimum: 1 }
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: uint64, minimum: 1 }
+    UserID:
+      name: user_id
+      in: path
+      required: true
+      schema: { type: integer, format: uint64, minimum: 1 }
+    PageNumber:
+      name: page_number
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+  responses:
+    Unauthorized:
+      description: Authentication failed or missing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: The principal cannot access the requested tenant or project scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Conflict:
+      description: State conflict.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    GenericEnvelope:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id: { type: string }
+        data: {}
+    ErrorEnvelope:
+      type: object
+      required: [request_id, error]
+      properties:
+        request_id: { type: string }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, maxLength: 128 }
+        password: { type: string, maxLength: 256 }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string, maxLength: 4096 }
+    TokenEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                access_token: { type: string }
+                refresh_token: { type: string }
+    LoginEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [access_token, refresh_token, user]
+              properties:
+                access_token: { type: string }
+                refresh_token: { type: string }
+                user:
+                  type: object
+                  required: [id, username, display_name, role, project_id, permissions, must_change_password]
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+                    username: { type: string }
+                    display_name: { type: string }
+                    role: { type: string }
+                    project_id: { type: integer, format: uint64, minimum: 0 }
+                    permissions: { type: array, uniqueItems: true, items: { type: string } }
+                    must_change_password: { type: boolean }
+    UserEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                id: { type: string }
+                username: { type: string }
+                display_name: { type: string }
+                tenant_id: { type: string }
+                org_id: { type: string }
+                must_change_password: { type: boolean }
+    PasswordChangeRequest:
+      type: object
+      required: [current_password, new_password]
+      additionalProperties: false
+      properties:
+        current_password: { type: string, format: password, maxLength: 72, writeOnly: true }
+        new_password: { type: string, format: password, minLength: 12, maxLength: 72, writeOnly: true }
+    PasswordChangeEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [must_change_password]
+              properties:
+                must_change_password: { type: boolean, enum: [false] }
+    TenantRole:
+      type: string
+      nullable: true
+      enum: [system_admin, security_admin]
+    PlatformUser:
+      type: object
+      required: [id, username, name, email, phone, department, role, project_count, status, must_change_password, created_at, updated_at]
+      properties:
+        id: { type: integer, format: uint64 }
+        username: { type: string, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]{0,127}$" }
+        name: { type: string, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+        phone: { type: string, maxLength: 32 }
+        department: { type: string, maxLength: 128 }
+        role: { $ref: "#/components/schemas/TenantRole" }
+        project_count: { type: integer, format: int64, minimum: 0 }
+        status: { type: string, enum: [active, disabled] }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        must_change_password: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PlatformUserEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/PlatformUser" }
+    PlatformUserPageEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [items, total, page_size, page_number]
+              properties:
+                items: { type: array, items: { $ref: "#/components/schemas/PlatformUser" } }
+                total: { type: integer, format: int64, minimum: 0 }
+                page_size: { type: integer, minimum: 1, maximum: 100 }
+                page_number: { type: integer, minimum: 1 }
+    PlatformUserCreateRequest:
+      type: object
+      required: [username, name, password]
+      properties:
+        username: { type: string, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+        name: { type: string, minLength: 1, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+        phone: { type: string, maxLength: 32 }
+        department: { type: string, maxLength: 128 }
+        role: { $ref: "#/components/schemas/TenantRole" }
+        status: { type: string, enum: [active, disabled], default: active }
+        password: { type: string, format: password, minLength: 12, maxLength: 72, writeOnly: true }
+    PlatformUserUpdateRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+        phone: { type: string, maxLength: 32 }
+        department: { type: string, maxLength: 128 }
+    PlatformUserTransitionRequest:
+      type: object
+      required: [status, reason]
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [active, disabled] }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    PlatformUserPasswordResetRequest:
+      type: object
+      required: [temporary_password]
+      additionalProperties: false
+      properties:
+        temporary_password: { type: string, format: password, minLength: 12, maxLength: 72, writeOnly: true }
+    TenantRoleUpdateRequest:
+      type: object
+      required: [role]
+      additionalProperties: false
+      properties:
+        role: { $ref: "#/components/schemas/TenantRole" }
+    PlatformUserProject:
+      type: object
+      required: [id, project_code, name, role, status, updated_at]
+      properties:
+        id: { type: integer, format: uint64 }
+        project_code: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [project_owner, security_ops, developer, viewer] }
+        status: { type: string }
+        updated_at: { type: string, format: date-time }
+    PlatformUserProjectsEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [items]
+              properties:
+                items: { type: array, items: { $ref: "#/components/schemas/PlatformUserProject" } }
+    AdminRole:
+      type: object
+      required: [value, label, scope, permissions]
+      properties:
+        value: { type: string, enum: [system_admin, security_admin, project_owner, security_ops, developer, viewer] }
+        label: { type: string }
+        scope: { type: string, enum: [tenant, project] }
+        permissions: { type: array, uniqueItems: true, items: { type: string } }
+    AdminRolesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/AdminRole" } }
+    DuplicateEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                duplicate: { type: boolean }
+    Project:
+      type: object
+      required: [id, project_code, name, owner_user_id, criticality, status]
+      properties:
+        id: { type: integer, format: uint64 }
+        project_code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 255 }
+        owner_user_id: { type: string, maxLength: 64 }
+        business_unit: { type: string, maxLength: 128 }
+        criticality: { type: string, enum: [low, medium, high, critical] }
+        status: { type: string, enum: [draft, active, suspended, archived] }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ProjectEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Project" }
+    ProjectPageEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items: { type: array, items: { $ref: "#/components/schemas/Project" } }
+                total: { type: integer }
+                page_size: { type: integer }
+                page_number: { type: integer }
+    WorkspaceProject:
+      type: object
+      required: [id, project_code, name, owner_user_id, business_unit, criticality, status, updated_at]
+      properties:
+        id: { type: integer, format: uint64 }
+        project_code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 255 }
+        owner_user_id: { type: string, maxLength: 64 }
+        business_unit: { type: string, maxLength: 128 }
+        criticality: { type: string, enum: [low, medium, high, critical] }
+        status: { type: string, enum: [draft, active, suspended, archived] }
+        updated_at: { type: string, format: date-time }
+    WorkspaceSummaryEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [projects, assets, risks, tickets, recent_projects]
+              properties:
+                projects:
+                  type: object
+                  required: [total, active, draft, suspended]
+                  properties:
+                    total: { type: integer, format: int64, minimum: 0 }
+                    active: { type: integer, format: int64, minimum: 0 }
+                    draft: { type: integer, format: int64, minimum: 0 }
+                    suspended: { type: integer, format: int64, minimum: 0 }
+                assets:
+                  type: object
+                  required: [total]
+                  properties:
+                    total: { type: integer, format: int64, minimum: 0 }
+                risks:
+                  type: object
+                  required: [open, critical_high, overdue]
+                  properties:
+                    open: { type: integer, format: int64, minimum: 0 }
+                    critical_high: { type: integer, format: int64, minimum: 0 }
+                    overdue: { type: integer, format: int64, minimum: 0 }
+                tickets:
+                  type: object
+                  required: [open, overdue]
+                  properties:
+                    open: { type: integer, format: int64, minimum: 0 }
+                    overdue: { type: integer, format: int64, minimum: 0 }
+                recent_projects:
+                  type: array
+                  items: { $ref: "#/components/schemas/WorkspaceProject" }
+    ProjectCapabilitiesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [role, permissions, can_activate, onboarding_missing]
+              properties:
+                role: { type: string }
+                permissions:
+                  type: array
+                  uniqueItems: true
+                  items: { type: string }
+                can_activate: { type: boolean }
+                onboarding_missing:
+                  type: array
+                  items: { type: string }
+    ProjectCreateRequest:
+      type: object
+      required: [project_code, name]
+      properties:
+        project_code: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,63}$" }
+        name: { type: string, maxLength: 255 }
+        owner_user_id: { type: string, maxLength: 64 }
+        business_unit: { type: string, maxLength: 128 }
+        criticality: { type: string, enum: [low, medium, high, critical], default: medium }
+        description: { type: string, maxLength: 65535 }
+    ProjectUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        owner_user_id: { type: string, maxLength: 64 }
+        business_unit: { type: string, maxLength: 128 }
+        criticality: { type: string, enum: [low, medium, high, critical] }
+        description: { type: string, maxLength: 65535 }
+    ProjectSubjectRequest:
+      type: object
+      required: [subject_name]
+      properties:
+        subject_name: { type: string, maxLength: 255 }
+        subject_type: { type: string, enum: [company, government, institution, individual, other] }
+        registration_code: { type: string, maxLength: 64 }
+        country_code: { type: string, minLength: 2, maxLength: 2 }
+        region: { type: string, maxLength: 128 }
+        is_primary: { type: boolean }
+        verification_status: { type: string, enum: [unverified, verified, mismatch] }
+        source: { type: string, maxLength: 64 }
+        verified_at: { type: string, format: date-time, nullable: true }
+        evidence_summary: { type: string, maxLength: 1024 }
+    ProjectDomainRequest:
+      type: object
+      required: [domain]
+      properties:
+        domain: { type: string, maxLength: 253 }
+        subject_id: { type: integer, format: uint64 }
+        is_primary: { type: boolean }
+        ownership_status: { type: string, enum: [unverified, verified, mismatch] }
+        source: { type: string, maxLength: 64 }
+        evidence_summary: { type: string, maxLength: 1024 }
+    ProjectDomainUpdateRequest:
+      type: object
+      properties:
+        subject_id: { type: integer, format: uint64 }
+        is_primary: { type: boolean }
+        ownership_status: { type: string, enum: [unverified, verified, mismatch] }
+        source: { type: string, maxLength: 64 }
+        evidence_summary: { type: string, maxLength: 1024 }
+    ICPRequest:
+      type: object
+      required: [subject_id, filing_no]
+      properties:
+        subject_id: { type: integer, format: uint64 }
+        filing_no: { type: string, maxLength: 128 }
+        filing_type: { type: string, enum: [filing, license] }
+        website_name: { type: string, maxLength: 255 }
+        status: { type: string, enum: [unverified, valid, invalid, cancelled] }
+        approved_at: { type: string, format: date-time, nullable: true }
+        source: { type: string, maxLength: 64 }
+        verified_at: { type: string, format: date-time, nullable: true }
+        evidence_summary: { type: string, maxLength: 1024 }
+        domain_profile_ids:
+          type: array
+          maxItems: 100
+          items: { type: integer, format: uint64 }
+    Asset:
+      type: object
+      properties:
+        id: { type: integer, format: uint64 }
+        project_id: { type: integer, format: uint64 }
+        asset_type: { type: string }
+        asset_key: { type: string }
+        display_name: { type: string }
+        value: { type: string }
+        source: { type: string }
+        owner: { type: string }
+        business_unit: { type: string }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        miss_count: { type: integer, minimum: 0 }
+        status: { type: string }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        created_by: { type: string }
+        updated_by: { type: string }
+    AssetEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Asset"
+    AssetPageEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Asset"
+                total: { type: integer }
+                page_size: { type: integer }
+                page_number: { type: integer }
+    AssetImportRequest:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            required: [asset_type, value]
+            properties:
+              asset_type: { type: string }
+              value: { type: string }
+              display_name: { type: string }
+              source: { type: string }
+              owner: { type: string }
+              business_unit: { type: string }
+              confidence: { type: integer, minimum: 0, maximum: 100 }
+              status: { type: string }
+    AssetUpdateRequest:
+      type: object
+      properties:
+        display_name: { type: string }
+        source: { type: string }
+        owner: { type: string }
+        business_unit: { type: string }
+        status: { type: string }

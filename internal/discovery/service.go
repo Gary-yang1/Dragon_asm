@@ -1,3 +1,5 @@
+//revive:disable:exported
+
 package discovery
 
 import (
@@ -5,11 +7,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
-	"github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
+	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 )
 
 var (
@@ -17,6 +20,21 @@ var (
 	ErrInvalidTemplateAction = errors.New("discovery: invalid template action")
 	ErrInvalidRunTransition  = errors.New("discovery: invalid task run transition")
 )
+
+// DispatchDeniedError preserves the exact target and scope policy reason for tests
+// and future API error mapping without exposing full task config.
+type DispatchDeniedError struct {
+	Target string
+	Reason ScopeRejectReason
+}
+
+func (e DispatchDeniedError) Error() string {
+	return fmt.Sprintf("%s: target=%s reason=%s", ErrDispatchTargetDenied.Error(), e.Target, e.Reason)
+}
+
+func (e DispatchDeniedError) Unwrap() error {
+	return ErrDispatchTargetDenied
+}
 
 var validRunTransitions = map[string]map[string]bool{
 	TaskRunStatusPending: {
@@ -33,10 +51,12 @@ var validRunTransitions = map[string]map[string]bool{
 
 // Service applies the M2-1/M2-2 discovery scope/task operations and writes audit events.
 type Service struct {
-	repo      Repository
-	db        *sql.DB
-	auditSink auditRecorder
-	nowFn     func() time.Time
+	repo             Repository
+	db               *sql.DB
+	engine           EngineAdapter
+	callbackEnqueuer CallbackEnqueuer
+	auditSink        auditRecorder
+	nowFn            func() time.Time
 }
 
 // auditRecorder is the minimal audit sink used by this service.
@@ -58,6 +78,20 @@ func WithDB(db *sql.DB) ServiceOption {
 func WithAuditSink(sink auditRecorder) ServiceOption {
 	return func(s *Service) {
 		s.auditSink = sink
+	}
+}
+
+// WithEngineAdapter injects the external engine adapter used by M2-4 dispatch.
+func WithEngineAdapter(engine EngineAdapter) ServiceOption {
+	return func(s *Service) {
+		s.engine = engine
+	}
+}
+
+// WithCallbackEnqueuer injects the worker queue producer used by callback ingest.
+func WithCallbackEnqueuer(enqueuer CallbackEnqueuer) ServiceOption {
+	return func(s *Service) {
+		s.callbackEnqueuer = enqueuer
 	}
 }
 
@@ -673,6 +707,317 @@ func (s *Service) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRu
 	return s.repo.ListTaskRuns(ctx, projectID)
 }
 
+// BuildDispatchPlan validates a pending run's targets against its project scope.
+// It does not call the engine or mutate run status; M2-4 owns actual dispatch.
+func (s *Service) BuildDispatchPlan(ctx context.Context, projectID, runID uint64, actorID string) (*DispatchPlan, error) {
+	if projectID == 0 || runID == 0 {
+		return nil, ErrInvalidTaskRunID
+	}
+	if actorID == "" || len(actorID) > maxActorLen {
+		return nil, ErrInvalidActorID
+	}
+
+	run, err := s.repo.GetTaskRun(ctx, projectID, runID)
+	if err != nil {
+		return nil, err
+	}
+	if run.Status != TaskRunStatusPending {
+		return nil, ErrTaskRunNotDispatchable
+	}
+
+	template, err := s.repo.GetTaskTemplate(ctx, projectID, run.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if template.ProjectID != run.ProjectID || template.ID != run.TemplateID || template.ScopeID != run.ScopeID {
+		return nil, ErrInvalidTemplate
+	}
+	if !template.Enabled {
+		return nil, ErrTemplateDisabled
+	}
+
+	config, err := parseDispatchConfig(template.Config)
+	if err != nil {
+		return nil, err
+	}
+	for _, target := range config.Targets {
+		allowed, reason, err := s.IsTargetAllowed(ctx, projectID, run.ScopeID, target.Value)
+		if err != nil && reason == ReasonSystemError {
+			return nil, err
+		}
+		if !allowed {
+			return nil, DispatchDeniedError{Target: target.Value, Reason: reason}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &DispatchPlan{
+		RunID:          run.ID,
+		TemplateID:     run.TemplateID,
+		ProjectID:      run.ProjectID,
+		ScopeID:        run.ScopeID,
+		TaskType:       run.TaskType,
+		Targets:        config.Targets,
+		RateLimit:      run.RateLimit,
+		Concurrency:    run.Concurrency,
+		TimeoutSeconds: run.TimeoutSeconds,
+		RetryLimit:     run.RetryLimit,
+		Options:        config.Options,
+	}, nil
+}
+
+// DispatchTaskRun sends a pending run to the configured engine and records the
+// returned engine_job_id. Callback handling and result ingest are owned by M2-5.
+func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) (*TaskRun, error) {
+	if s.engine == nil {
+		return nil, ErrEngineNotConfigured
+	}
+	plan, err := s.BuildDispatchPlan(ctx, in.ProjectID, in.RunID, in.ActorID)
+	if err != nil {
+		return nil, err
+	}
+
+	job := scanJobFromDispatchPlan(plan, in.CallbackURL)
+	var lastErr error
+	maxAttempts := plan.RetryLimit + 1
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := s.repo.IncrementRunAttempt(ctx, in.ProjectID, in.RunID, in.ActorID, s.nowFn()); err != nil {
+			return nil, err
+		}
+		engineJobID, err := s.engine.Dispatch(ctx, job)
+		if err == nil {
+			run, recordErr := s.recordRunDispatched(ctx, in, engineJobID)
+			if recordErr != nil {
+				_ = s.engine.Cancel(ctx, engineJobID)
+				return nil, recordErr
+			}
+			return run, nil
+		}
+		lastErr = err
+	}
+
+	summary := "engine dispatch failed"
+	if lastErr != nil {
+		summary = lastErr.Error()
+	}
+	run, err := s.recordRunDispatchFailed(ctx, in, summary)
+	if err != nil {
+		return nil, err
+	}
+	return run, lastErr
+}
+
+// CancelDispatchedTaskRun cancels a running engine job and records run cancellation.
+func (s *Service) CancelDispatchedTaskRun(ctx context.Context, in UpdateTaskRunStatusInput) error {
+	if s.engine == nil {
+		return ErrEngineNotConfigured
+	}
+	if in.ProjectID == 0 || in.RunID == 0 {
+		return ErrInvalidTaskRunID
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return ErrInvalidActorID
+	}
+	run, err := s.repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+	if err != nil {
+		return err
+	}
+	if run.Status != TaskRunStatusRunning || strings.TrimSpace(run.EngineJobID) == "" {
+		return ErrInvalidRunTransition
+	}
+	if err := s.engine.Cancel(ctx, run.EngineJobID); err != nil {
+		return err
+	}
+	return s.MarkTaskRunCancelled(ctx, in)
+}
+
+// ReconcileTaskRun pulls the external engine state for one running run and
+// closes terminal engine jobs in the local state machine.
+func (s *Service) ReconcileTaskRun(ctx context.Context, in ReconcileTaskRunInput) (*TaskRun, error) {
+	if s.engine == nil {
+		return nil, ErrEngineNotConfigured
+	}
+	if in.ProjectID == 0 || in.RunID == 0 {
+		return nil, ErrInvalidTaskRunID
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return nil, ErrInvalidActorID
+	}
+	run, err := s.repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+	if err != nil {
+		return nil, err
+	}
+	return s.reconcileRun(ctx, run, in.ActorID, in.Meta, false)
+}
+
+// ReconcileTimedOutRuns recovers running runs whose dispatch deadline has passed.
+func (s *Service) ReconcileTimedOutRuns(ctx context.Context, in ReconcileTimedOutRunsInput) (ReconcileTimedOutRunsResult, error) {
+	if s.engine == nil {
+		return ReconcileTimedOutRunsResult{}, ErrEngineNotConfigured
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return ReconcileTimedOutRunsResult{}, ErrInvalidActorID
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	runs, err := s.repo.ListRunningRunsForReconcile(ctx, limit)
+	if err != nil {
+		return ReconcileTimedOutRunsResult{}, err
+	}
+	now := s.nowFn()
+	result := ReconcileTimedOutRunsResult{}
+	for _, run := range runs {
+		if !runTimedOut(run, now) {
+			continue
+		}
+		result.Checked++
+		after, err := s.reconcileRun(ctx, run, in.ActorID, in.Meta, true)
+		if err != nil {
+			result.Errors = append(result.Errors, err)
+			continue
+		}
+		if after != nil && after.Status != TaskRunStatusRunning {
+			result.Updated++
+			if after.Status == TaskRunStatusFailed && strings.Contains(after.ErrorSummary, "timed out") {
+				result.Cancelled++
+			}
+		}
+	}
+	if len(result.Errors) > 0 {
+		return result, errors.Join(result.Errors...)
+	}
+	return result, nil
+}
+
+func (s *Service) reconcileRun(ctx context.Context, run *TaskRun, actorID string, meta AuditMeta, timeoutMode bool) (*TaskRun, error) {
+	if run.Status != TaskRunStatusRunning || strings.TrimSpace(run.EngineJobID) == "" {
+		return nil, ErrInvalidRunTransition
+	}
+	status, err := s.engine.Status(ctx, run.EngineJobID)
+	if err != nil {
+		return nil, err
+	}
+	switch status.Status {
+	case EngineJobStatusSuccess:
+		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusSuccess, status.ResultCount, status.ErrorSummary, meta)
+	case EngineJobStatusPartialSuccess:
+		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusPartial, status.ResultCount, status.ErrorSummary, meta)
+	case EngineJobStatusFailed:
+		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusFailed, status.ResultCount, status.ErrorSummary, meta)
+	case EngineJobStatusCancelled:
+		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusCancelled, status.ResultCount, status.ErrorSummary, meta)
+	case EngineJobStatusRunning:
+		if timeoutMode {
+			if err := s.engine.Cancel(ctx, run.EngineJobID); err != nil {
+				return nil, err
+			}
+			return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusFailed, run.ResultCount, "task run timed out", meta)
+		}
+		return run, nil
+	default:
+		return nil, ErrEngineStatus
+	}
+}
+
+func (s *Service) recordRunStatus(ctx context.Context, projectID, runID uint64, actorID, status string, resultCount uint64, summary string, meta AuditMeta) (*TaskRun, error) {
+	var after *TaskRun
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		before, err := repo.GetTaskRun(ctx, projectID, runID)
+		if err != nil {
+			return err
+		}
+		in := UpdateTaskRunStatusInput{
+			ProjectID:    projectID,
+			RunID:        runID,
+			ActorID:      actorID,
+			ResultCount:  resultCount,
+			ErrorSummary: summary,
+			Meta:         meta,
+		}
+		if err := changeTaskRunStatusWith(ctx, repo, before, in, status, s.nowFn()); err != nil {
+			return err
+		}
+		after, err = repo.GetTaskRun(ctx, projectID, runID)
+		if err != nil {
+			return err
+		}
+		return s.recordAuditWithSink(ctx, txAudit, ActionRunStatusChange, before, after, actorID, meta)
+	})
+	return after, err
+}
+
+func runTimedOut(run *TaskRun, now time.Time) bool {
+	if run == nil || run.TimeoutSeconds <= 0 || run.DispatchedAt.IsZero() {
+		return false
+	}
+	return !run.DispatchedAt.Add(time.Duration(run.TimeoutSeconds) * time.Second).After(now)
+}
+
+func scanJobFromDispatchPlan(plan *DispatchPlan, callbackURL string) ScanJob {
+	targets := make([]Target, 0, len(plan.Targets))
+	for _, target := range plan.Targets {
+		targets = append(targets, Target(target))
+	}
+	return ScanJob{
+		RunID:       strconv.FormatUint(plan.RunID, 10),
+		JobType:     plan.TaskType,
+		Targets:     targets,
+		RateLimit:   plan.RateLimit,
+		Concurrency: plan.Concurrency,
+		Timeout:     time.Duration(plan.TimeoutSeconds) * time.Second,
+		CallbackURL: callbackURL,
+		Options:     plan.Options,
+	}
+}
+
+func (s *Service) recordRunDispatched(ctx context.Context, in DispatchTaskRunInput, engineJobID string) (*TaskRun, error) {
+	var after *TaskRun
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		before, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return err
+		}
+		if before.Status != TaskRunStatusPending {
+			return ErrInvalidRunTransition
+		}
+		if err := repo.MarkRunDispatched(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, engineJobID, s.nowFn()); err != nil {
+			return err
+		}
+		after, err = repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return err
+		}
+		return s.recordAuditWithSink(ctx, txAudit, ActionRunStatusChange, before, after, in.ActorID, in.Meta)
+	})
+	return after, err
+}
+
+func (s *Service) recordRunDispatchFailed(ctx context.Context, in DispatchTaskRunInput, summary string) (*TaskRun, error) {
+	var after *TaskRun
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		before, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return err
+		}
+		if before.Status != TaskRunStatusPending {
+			return ErrInvalidRunTransition
+		}
+		if err := repo.MarkRunDispatchFailed(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, summary, s.nowFn()); err != nil {
+			return err
+		}
+		after, err = repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return err
+		}
+		return s.recordAuditWithSink(ctx, txAudit, ActionRunStatusChange, before, after, in.ActorID, in.Meta)
+	})
+	return after, err
+}
+
 // MarkTaskRunRunning transitions pending -> running.
 func (s *Service) MarkTaskRunRunning(ctx context.Context, in UpdateTaskRunStatusInput) error {
 	return s.changeTaskRunStatus(ctx, in, ActionRunStatusChange, TaskRunStatusRunning)
@@ -707,6 +1052,7 @@ func (s *Service) IncrementTaskRunAttempt(ctx context.Context, in IncrementTaskR
 		return ErrInvalidActorID
 	}
 	return s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		_ = txAudit
 		if _, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID); err != nil {
 			return err
 		}
@@ -734,32 +1080,8 @@ func (s *Service) changeTaskRunStatus(ctx context.Context, in UpdateTaskRunStatu
 		if err != nil {
 			return err
 		}
-		if !isTaskRunTransitionAllowed(before.Status, targetStatus) {
-			return ErrInvalidRunTransition
-		}
-
-		now := s.nowFn()
-		switch targetStatus {
-		case TaskRunStatusRunning:
-			if err := repo.MarkRunRunning(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, now); err != nil {
-				return err
-			}
-		case TaskRunStatusSuccess:
-			if err := repo.MarkRunSucceeded(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now); err != nil {
-				return err
-			}
-		case TaskRunStatusPartial:
-			if err := repo.MarkRunPartialSuccess(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now); err != nil {
-				return err
-			}
-		case TaskRunStatusFailed:
-			if err := repo.MarkRunFailed(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, in.ResultCount, now); err != nil {
-				return err
-			}
-		case TaskRunStatusCancelled:
-			if err := repo.MarkRunCancelled(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, now); err != nil {
-				return err
-			}
+		if err := changeTaskRunStatusWith(ctx, repo, before, in, targetStatus, s.nowFn()); err != nil {
+			return err
 		}
 
 		after, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
@@ -771,6 +1093,26 @@ func (s *Service) changeTaskRunStatus(ctx context.Context, in UpdateTaskRunStatu
 		}
 		return s.recordAuditWithSink(ctx, txAudit, action, before, after, in.ActorID, in.Meta)
 	})
+}
+
+func changeTaskRunStatusWith(ctx context.Context, repo Repository, before *TaskRun, in UpdateTaskRunStatusInput, targetStatus string, now time.Time) error {
+	if !isTaskRunTransitionAllowed(before.Status, targetStatus) {
+		return ErrInvalidRunTransition
+	}
+	switch targetStatus {
+	case TaskRunStatusRunning:
+		return repo.MarkRunRunning(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, now)
+	case TaskRunStatusSuccess:
+		return repo.MarkRunSucceeded(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now)
+	case TaskRunStatusPartial:
+		return repo.MarkRunPartialSuccess(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now)
+	case TaskRunStatusFailed:
+		return repo.MarkRunFailed(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, in.ResultCount, now)
+	case TaskRunStatusCancelled:
+		return repo.MarkRunCancelled(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, now)
+	default:
+		return ErrInvalidRunTransition
+	}
 }
 
 func isTaskRunTransitionAllowed(from, to string) bool {

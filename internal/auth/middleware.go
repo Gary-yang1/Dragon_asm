@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"net/http"
 	"strings"
 
 	"github.com/casbin/casbin/v2"
@@ -14,7 +16,13 @@ import (
 const (
 	CtxUserID    = "auth.user_id"
 	CtxProjectID = "auth.project_id"
+	// #nosec G101 -- this is a request-context key, not a credential.
+	CtxMustChangePassword = "auth.must_change_password"
 )
+
+type userVersionResolver interface {
+	GetByID(context.Context, uint64) (*User, error)
+}
 
 const bearerScheme = "Bearer "
 
@@ -25,7 +33,12 @@ const bearerScheme = "Bearer "
 // or a token whose user id is empty — yields a 401 via the unified error
 // envelope. The specific reason is not surfaced, to avoid leaking token state
 // to an untrusted caller.
-func RequireAuth(m *JWTManager) gin.HandlerFunc {
+func RequireAuth(m *JWTManager, users ...userVersionResolver) gin.HandlerFunc {
+	var resolver userVersionResolver
+	if len(users) > 0 {
+		resolver = users[0]
+	}
+
 	return func(c *gin.Context) {
 		raw := c.GetHeader("Authorization")
 		if !strings.HasPrefix(raw, bearerScheme) {
@@ -52,7 +65,38 @@ func RequireAuth(m *JWTManager) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+
+		if resolver != nil {
+			uid, err := parseUserID(claims.UserID)
+			if err != nil {
+				httpx.Unauthorized(c)
+				c.Abort()
+				return
+			}
+			u, err := resolver.GetByID(c.Request.Context(), uid)
+			if err != nil || !u.IsActive() || claims.AuthVersion != u.AuthVersion {
+				httpx.Unauthorized(c)
+				c.Abort()
+				return
+			}
+			c.Set(CtxMustChangePassword, u.MustChangePassword)
+		}
 		c.Set(CtxUserID, claims.UserID)
+		c.Next()
+	}
+}
+
+// RequirePasswordChanged blocks business APIs while an account is using an
+// administrator-issued temporary password. Authentication self-service routes
+// are mounted on a separate group without this middleware.
+func RequirePasswordChanged() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		mustChange, _ := c.Get(CtxMustChangePassword)
+		if required, _ := mustChange.(bool); required {
+			httpx.Fail(c, http.StatusForbidden, ErrCodePasswordRequired, "password change required")
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

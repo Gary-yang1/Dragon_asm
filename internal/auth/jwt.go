@@ -36,7 +36,8 @@ var (
 // Claims are the custom JWT claims. UserID is the authenticated principal; the
 // embedded RegisteredClaims carries issued-at / not-before / expiry.
 type Claims struct {
-	UserID string `json:"uid"`
+	UserID      string `json:"uid"`
+	AuthVersion uint32 `json:"av"`
 	jwt.RegisteredClaims
 }
 
@@ -88,13 +89,14 @@ func NewManager(cfg Config) (*JWTManager, error) {
 	}, nil
 }
 
-func (m *JWTManager) issue(secret []byte, ttl time.Duration, userID string) (string, error) {
+func (m *JWTManager) issue(secret []byte, ttl time.Duration, userID string, authVersion uint32) (string, error) {
 	if userID == "" {
 		return "", ErrEmptyUserID
 	}
 	now := time.Now()
 	claims := Claims{
-		UserID: userID,
+		UserID:      userID,
+		AuthVersion: authVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
@@ -106,13 +108,13 @@ func (m *JWTManager) issue(secret []byte, ttl time.Duration, userID string) (str
 }
 
 // IssueAccessToken signs a short-lived access token for the given user.
-func (m *JWTManager) IssueAccessToken(userID string) (string, error) {
-	return m.issue(m.accessSecret, m.accessTTL, userID)
+func (m *JWTManager) IssueAccessToken(userID string, authVersion uint32) (string, error) {
+	return m.issue(m.accessSecret, m.accessTTL, userID, authVersion)
 }
 
 // IssueRefreshToken signs a longer-lived refresh token for the given user.
-func (m *JWTManager) IssueRefreshToken(userID string) (string, error) {
-	return m.issue(m.refreshSecret, m.refreshTTL, userID)
+func (m *JWTManager) IssueRefreshToken(userID string, authVersion uint32) (string, error) {
+	return m.issue(m.refreshSecret, m.refreshTTL, userID, authVersion)
 }
 
 func (m *JWTManager) parse(secret []byte, tokenStr string) (*Claims, error) {

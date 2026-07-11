@@ -39,7 +39,7 @@ func TestNewManagerRejectsShortSecret(t *testing.T) {
 func TestIssueAndParseAccessToken(t *testing.T) {
 	m := testManager(t)
 
-	tok, err := m.IssueAccessToken("alice")
+	tok, err := m.IssueAccessToken("alice", 1)
 	require.NoError(t, err)
 	require.NotEmpty(t, tok)
 
@@ -52,7 +52,7 @@ func TestIssueAndParseAccessToken(t *testing.T) {
 func TestAccessAndRefreshSecretsAreDistinct(t *testing.T) {
 	m := testManager(t)
 
-	refresh, err := m.IssueRefreshToken("alice")
+	refresh, err := m.IssueRefreshToken("alice", 1)
 	require.NoError(t, err)
 
 	// A refresh token (signed with the refresh secret) must not validate as access.
@@ -73,7 +73,7 @@ func TestExpiredTokenRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	tok, err := m.IssueAccessToken("alice")
+	tok, err := m.IssueAccessToken("alice", 1)
 	require.NoError(t, err)
 
 	_, err = m.ParseAccessToken(tok)
@@ -82,7 +82,7 @@ func TestExpiredTokenRejected(t *testing.T) {
 
 func TestTamperedSignatureRejected(t *testing.T) {
 	m := testManager(t)
-	tok, err := m.IssueAccessToken("alice")
+	tok, err := m.IssueAccessToken("alice", 1)
 	require.NoError(t, err)
 
 	// Drop the final signature byte -> HMAC no longer matches.
@@ -99,7 +99,7 @@ func TestWrongSecretRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	tok, err := mA.IssueAccessToken("alice")
+	tok, err := mA.IssueAccessToken("alice", 1)
 	require.NoError(t, err)
 
 	_, err = mB.ParseAccessToken(tok)
@@ -148,9 +148,9 @@ func TestNewManagerRejectsIdenticalSecrets(t *testing.T) {
 func TestIssueRejectsEmptyUserID(t *testing.T) {
 	m := testManager(t)
 
-	_, err := m.IssueAccessToken("")
+	_, err := m.IssueAccessToken("", 1)
 	require.ErrorIs(t, err, auth.ErrEmptyUserID)
 
-	_, err = m.IssueRefreshToken("")
+	_, err = m.IssueRefreshToken("", 1)
 	require.ErrorIs(t, err, auth.ErrEmptyUserID)
 }

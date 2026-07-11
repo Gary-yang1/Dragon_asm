@@ -13,15 +13,22 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hibiken/asynq"
 
 	"github.com/Gary-yang1/Dragon_asm/internal/asset"
 	"github.com/Gary-yang1/Dragon_asm/internal/auth"
+	"github.com/Gary-yang1/Dragon_asm/internal/discovery"
+	"github.com/Gary-yang1/Dragon_asm/internal/exposure"
+	"github.com/Gary-yang1/Dragon_asm/internal/notification"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
 	asmcasbin "github.com/Gary-yang1/Dragon_asm/internal/platform/auth/casbin"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/db"
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/httpx"
 	"github.com/Gary-yang1/Dragon_asm/internal/project"
+	"github.com/Gary-yang1/Dragon_asm/internal/report"
+	"github.com/Gary-yang1/Dragon_asm/internal/risk"
+	"github.com/Gary-yang1/Dragon_asm/internal/ticket"
 )
 
 func main() {
@@ -121,6 +128,9 @@ func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 		return err
 	}
 	queries := dbgen.New(sqlDB)
+	redisAddr := envOr("REDIS_ADDR", "localhost:6379")
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+	asynqClient := asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr, Password: redisPassword})
 
 	// The Casbin policy store is wired in a later milestone; construct an
 	// adapterless enforcer and seed the MVP role→permission matrix in memory so
@@ -143,25 +153,89 @@ func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 	// given the *sql.DB so its mutating operations run the asset write and the
 	// audit event in one transaction (commit together, or roll back together).
 	userRepo := auth.NewUserRepository(queries)
-	authSvc := auth.NewService(userRepo, mgr, enforcer, auditSvc)
-	projectSvc := project.NewService(project.NewRepository(queries), enforcer)
+	authSvc := auth.NewService(userRepo, mgr, enforcer, auditSvc, auth.WithAuthDB(sqlDB))
+	adminUserSvc := auth.NewAdminUserService(
+		auth.NewAdminUserRepository(queries),
+		userRepo,
+		auth.WithAdminUserDB(sqlDB),
+		auth.WithAdminUserAuditSink(auditSvc),
+	)
+	projectSvc := project.NewService(
+		project.NewRepository(queries),
+		enforcer,
+		project.WithDB(sqlDB),
+		project.WithAuditSink(auditSvc),
+		project.WithGlobalRoleResolver(userRepo),
+	)
 	assetSvc := asset.NewService(
 		asset.NewRepository(queries),
 		asset.WithDB(sqlDB),
 		asset.WithRelationRepository(asset.NewRelationRepository(queries)),
 		asset.WithMissThreshold(envIntOr("ASSET_MISS_THRESHOLD", asset.DefaultMissThreshold)),
 	)
+	discoverySvc := discovery.NewService(
+		discovery.NewRepository(queries),
+		discovery.WithDB(sqlDB),
+		discovery.WithAuditSink(auditSvc),
+	)
+	riskSvc := risk.NewService(risk.NewRepository(queries), risk.WithDB(sqlDB))
+	ticketSvc := ticket.NewService(
+		ticket.NewRepository(queries),
+		ticket.WithDB(sqlDB),
+		ticket.WithRiskService(riskSvc),
+		ticket.WithAuditSink(auditSvc),
+	)
+	notificationSvc := notification.NewService(
+		notification.NewRepository(queries),
+		notification.WithDB(sqlDB),
+		notification.WithAuditSink(auditSvc),
+	)
+	exposureSvc := exposure.NewService(
+		exposure.NewRepository(queries),
+		exposure.WithCertificateRiskReporter(riskSvc),
+		exposure.WithNotificationTrigger(notificationSvc),
+	)
+	reportSvc := report.NewService(
+		report.NewRepository(queries),
+		report.WithDB(sqlDB),
+		report.WithAuditSink(auditSvc),
+		report.WithExportDir(envOr("REPORT_EXPORT_DIR", "/tmp/asm-report-exports")),
+		report.WithExportEnqueuer(report.NewAsynqExportEnqueuer(asynqClient, "low")),
+	)
+	callbackSecret := os.Getenv("DISCOVERY_CALLBACK_SECRET")
+	if callbackSecret != "" {
+		discoverySvc = discovery.NewService(
+			discovery.NewRepository(queries),
+			discovery.WithDB(sqlDB),
+			discovery.WithAuditSink(auditSvc),
+			discovery.WithCallbackEnqueuer(discovery.NewAsynqCallbackEnqueuer(asynqClient, "default")),
+		)
+	}
 
 	// Split /api/v1 into public (login, refresh) and protected (everything
 	// else) groups. Business routes added to apiProtected automatically get
 	// RequireAuth — no route can accidentally skip authentication.
 	api := engine.Group("/api/v1")
 	apiPublic := api.Group("")
+	apiAuthenticated := api.Group("")
+	apiAuthenticated.Use(auth.RequireAuth(mgr, userRepo))
 	apiProtected := api.Group("")
-	apiProtected.Use(auth.RequireAuth(mgr))
+	apiProtected.Use(auth.RequireAuth(mgr, userRepo), auth.RequirePasswordChanged())
 
-	auth.NewHandler(authSvc).RegisterRoutes(apiPublic, apiProtected)
+	auth.NewHandler(authSvc).RegisterRoutes(apiPublic, apiAuthenticated)
+	auth.NewAdminUserHandler(adminUserSvc).RegisterRoutes(apiProtected)
+	project.NewHandler(projectSvc, enforcer).RegisterRoutes(apiProtected)
+	if callbackSecret != "" {
+		discovery.NewHandler(discoverySvc, callbackSecret, logger).RegisterPublicRoutes(apiPublic)
+	} else {
+		logger.Warn("discovery callback route not wired; DISCOVERY_CALLBACK_SECRET is unset")
+	}
 	asset.NewHandler(assetSvc, projectSvc, enforcer, logger).RegisterRoutes(apiProtected)
+	exposure.NewHandler(exposureSvc, projectSvc, enforcer).RegisterRoutes(apiProtected)
+	risk.NewHandler(riskSvc, projectSvc, enforcer).RegisterRoutes(apiProtected)
+	ticket.NewHandler(ticketSvc, projectSvc, enforcer).RegisterRoutes(apiProtected)
+	notification.NewHandler(notificationSvc, projectSvc, enforcer).RegisterRoutes(apiProtected)
+	report.NewHandler(reportSvc, projectSvc, enforcer).RegisterRoutes(apiProtected)
 	logger.Info("api routes wired", "group", "/api/v1")
 	return nil
 }

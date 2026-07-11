@@ -21,6 +21,16 @@ WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 LIMIT ? OFFSET ?;
 
+-- name: FindProjectRootDomainAsset :one
+SELECT a.id FROM project_domain_profile pdp
+INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id
+WHERE pdp.project_id = ?
+  AND ? LIKE CONCAT('%.', a.value)
+  AND pdp.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY CHAR_LENGTH(a.value) DESC, a.id
+LIMIT 1;
+
 -- name: UpsertAsset :execresult
 -- Idempotent import: a new normalized asset_key inserts; a repeat within the same
 -- project updates only the discovery-refreshable fields (last_seen, source,

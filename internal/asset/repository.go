@@ -39,6 +39,13 @@ type Repository interface {
 	UpdateLifecycle(ctx context.Context, in UpdateLifecycleParams) error
 }
 
+// RootDomainResolver is implemented by the sqlc repository after the project
+// workspace migration. Import uses it opportunistically to link an imported
+// subdomain to the longest matching project root-domain profile.
+type RootDomainResolver interface {
+	FindRootDomainAssetID(ctx context.Context, projectID uint64, subdomain string) (uint64, error)
+}
+
 // UpdateParams carries the operator-editable fields for Update. The identity
 // fields (asset_type/asset_key/value) are deliberately absent: they are the
 // normalized key and are never edited. Status is restricted to the live
@@ -159,6 +166,17 @@ func (r *sqlcRepository) Count(ctx context.Context, projectID uint64) (int64, er
 		return 0, err
 	}
 	return n, nil
+}
+
+func (r *sqlcRepository) FindRootDomainAssetID(ctx context.Context, projectID uint64, subdomain string) (uint64, error) {
+	id, err := r.q.FindProjectRootDomainAsset(ctx, dbgen.FindProjectRootDomainAssetParams{
+		ProjectID: projectID,
+		Value:     subdomain,
+	})
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return id, nil
 }
 
 // Update applies the editable fields. sqlc's :exec does not surface

@@ -18,6 +18,19 @@ type fakeRepo struct {
 	projects map[uint64]*project.Project
 	members  map[string]bool   // key: "<projectID>:<userID>"
 	roles    map[string]string // key: "<projectID>:<userID>" -> role
+	scopes   map[string]project.ActorScope
+	globals  map[uint64]string
+}
+
+func (f *fakeRepo) ActorScope(_ context.Context, actorID string) (project.ActorScope, error) {
+	if scope, ok := f.scopes[actorID]; ok {
+		return scope, nil
+	}
+	return project.ActorScope{TenantID: "t1", OrgID: "o1"}, nil
+}
+
+func (f *fakeRepo) GetGlobalRole(_ context.Context, userID uint64) (string, error) {
+	return f.globals[userID], nil
 }
 
 func (f *fakeRepo) GetByID(_ context.Context, id uint64) (*project.Project, error) {
@@ -72,7 +85,7 @@ func newEnforcer(t *testing.T) *casbin.Enforcer {
 // Acceptance: a project member is granted access to their own project.
 func TestAuthorizeAllowsMember(t *testing.T) {
 	repo := &fakeRepo{
-		projects: map[uint64]*project.Project{1: {ID: 1, Status: project.StatusActive}},
+		projects: map[uint64]*project.Project{1: {ID: 1, TenantID: "t1", Status: project.StatusActive}},
 		members:  map[string]bool{"1:alice": true},
 	}
 	svc := project.NewService(repo, newEnforcer(t))
@@ -84,8 +97,8 @@ func TestAuthorizeAllowsMember(t *testing.T) {
 func TestAuthorizeDeniesNonMember(t *testing.T) {
 	repo := &fakeRepo{
 		projects: map[uint64]*project.Project{
-			1: {ID: 1, Status: project.StatusActive},
-			2: {ID: 2, Status: project.StatusActive},
+			1: {ID: 1, TenantID: "t1", Status: project.StatusActive},
+			2: {ID: 2, TenantID: "t1", Status: project.StatusActive},
 		},
 		members: map[string]bool{"1:alice": true}, // alice is only a member of p1
 	}
@@ -98,11 +111,41 @@ func TestAuthorizeDeniesNonMember(t *testing.T) {
 // path, even with no project_member row.
 func TestAuthorizeAllowsGlobalRole(t *testing.T) {
 	repo := &fakeRepo{
-		projects: map[uint64]*project.Project{2: {ID: 2, Status: project.StatusActive}},
+		projects: map[uint64]*project.Project{2: {ID: 2, TenantID: "t1", Status: project.StatusActive}},
 		members:  map[string]bool{}, // bob is not a direct member
 	}
 	svc := project.NewService(repo, newEnforcer(t))
 	require.NoError(t, svc.Authorize(context.Background(), "bob", 2))
+}
+
+func TestAccessAllowsBackendResolvedGlobalRoleWithinTenant(t *testing.T) {
+	repo := &fakeRepo{
+		projects: map[uint64]*project.Project{2: {ID: 2, TenantID: "t1", Status: project.StatusActive}},
+		globals:  map[uint64]string{7: asmcasbin.RoleSystemAdmin},
+	}
+	svc := project.NewService(repo, newEnforcer(t), project.WithGlobalRoleResolver(repo))
+
+	_, role, err := svc.Access(context.Background(), "7", 2)
+	require.NoError(t, err)
+	assert.Equal(t, asmcasbin.RoleSystemAdmin, role)
+}
+
+func TestAccessDeniesCrossTenantGlobalRoleAndForgedMembership(t *testing.T) {
+	repo := &fakeRepo{
+		projects: map[uint64]*project.Project{2: {ID: 2, TenantID: "t2", Status: project.StatusActive}},
+		members:  map[string]bool{"2:alice": true},
+		roles:    map[string]string{"2:alice": asmcasbin.RoleProjectOwner},
+		scopes: map[string]project.ActorScope{
+			"bob":   {TenantID: "t1", OrgID: "o1"},
+			"alice": {TenantID: "t1", OrgID: "o1"},
+		},
+	}
+	svc := project.NewService(repo, newEnforcer(t))
+
+	_, _, err := svc.Access(context.Background(), "bob", 2)
+	require.ErrorIs(t, err, project.ErrForbidden)
+	_, _, err = svc.Access(context.Background(), "alice", 2)
+	require.ErrorIs(t, err, project.ErrForbidden)
 }
 
 // A soft-deleted/unknown project is not found (no spurious 403 leak).
@@ -146,8 +189,8 @@ func TestAccessReturnsProjectAndRole(t *testing.T) {
 func TestAccessDenials(t *testing.T) {
 	repo := &fakeRepo{
 		projects: map[uint64]*project.Project{
-			1: {ID: 1, Status: project.StatusActive},
-			2: {ID: 2, Status: project.StatusActive},
+			1: {ID: 1, TenantID: "t1", Status: project.StatusActive},
+			2: {ID: 2, TenantID: "t1", Status: project.StatusActive},
 		},
 		members: map[string]bool{"1:alice": true}, // alice is a member of p1 only
 	}

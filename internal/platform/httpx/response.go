@@ -56,13 +56,16 @@ const (
 
 // ErrCodeProjectNotFound and related constants are business-domain error codes extended by each module.
 const (
-	ErrCodeProjectNotFound   = "PROJECT_NOT_FOUND"
-	ErrCodeAssetNotFound     = "ASSET_NOT_FOUND"
-	ErrCodeRiskNotFound      = "RISK_NOT_FOUND"
-	ErrCodeTicketNotFound    = "TICKET_NOT_FOUND"
-	ErrCodeInvalidTransition = "INVALID_STATE_TRANSITION"
-	ErrCodeScopeExpired      = "SCOPE_EXPIRED"
-	ErrCodeDangerousTarget   = "DANGEROUS_TARGET"
+	ErrCodeProjectNotFound     = "PROJECT_NOT_FOUND"
+	ErrCodeAssetNotFound       = "ASSET_NOT_FOUND"
+	ErrCodeRiskNotFound        = "RISK_NOT_FOUND"
+	ErrCodeTicketNotFound      = "TICKET_NOT_FOUND"
+	ErrCodeInvalidTransition   = "INVALID_STATE_TRANSITION"
+	ErrCodeScopeExpired        = "SCOPE_EXPIRED"
+	ErrCodeDangerousTarget     = "DANGEROUS_TARGET"
+	ErrCodeProjectCodeConflict = "PROJECT_CODE_CONFLICT"
+	ErrCodeProjectNotReady     = "PROJECT_NOT_READY"
+	ErrCodeInvalidRootDomain   = "INVALID_ROOT_DOMAIN"
 )
 
 // ── Response helpers ──────────────────────────────────────────────────────────

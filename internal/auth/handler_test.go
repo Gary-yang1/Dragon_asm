@@ -44,6 +44,18 @@ func postJSON(t *testing.T, engine *gin.Engine, path string, body any) *httptest
 	return w
 }
 
+func postJSONWithAuth(t *testing.T, engine *gin.Engine, path string, body any, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	engine.ServeHTTP(w, req)
+	return w
+}
+
 func getWithAuth(t *testing.T, engine *gin.Engine, path, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	w := httptest.NewRecorder()
@@ -64,13 +76,14 @@ func decodeTokens(t *testing.T, w *httptest.ResponseRecorder) (string, string) {
 			RefreshToken string `json:"refresh_token"`
 		} `json:"data"`
 	}
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	return body.Data.AccessToken, body.Data.RefreshToken
 }
 
 // Acceptance: POST /auth/login with valid credentials returns 200 + tokens.
 func TestHandlerLoginSuccess(t *testing.T) {
-	engine := newAuthEngine(t, newFakeUserRepo(mustUser(t, 1, "admin", "s3cret-pass")))
+	engine := newAuthEngine(t, newFakeUserRepo(mustUser(t, 1, "admin", "s3cret-pass")).
+		withMembership("1", 1, "project_owner"))
 
 	w := postJSON(t, engine, "/api/v1/auth/login", map[string]string{
 		"username": "admin", "password": "s3cret-pass",
@@ -79,6 +92,64 @@ func TestHandlerLoginSuccess(t *testing.T) {
 	access, refresh := decodeTokens(t, w)
 	assert.NotEmpty(t, access)
 	assert.NotEmpty(t, refresh)
+
+	var body struct {
+		Data struct {
+			User struct {
+				ID          string   `json:"id"`
+				Name        string   `json:"name"`
+				Role        string   `json:"role"`
+				ProjectID   uint64   `json:"project_id"`
+				Permissions []string `json:"permissions"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "1", body.Data.User.ID)
+	assert.Equal(t, "admin", body.Data.User.Name)
+	assert.Equal(t, "project_owner", body.Data.User.Role)
+	assert.Equal(t, uint64(1), body.Data.User.ProjectID)
+	assert.Contains(t, body.Data.User.Permissions, "asset:read")
+}
+
+func TestHandlerLoginReturnsPasswordChangeFlag(t *testing.T) {
+	user := mustUser(t, 1, "admin", "Temporary-123")
+	user.MustChangePassword = true
+	engine := newAuthEngine(t, newFakeUserRepo(user))
+
+	w := postJSON(t, engine, "/api/v1/auth/login", map[string]string{
+		"username": "admin", "password": "Temporary-123",
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+	var body struct {
+		Data struct {
+			User struct {
+				MustChangePassword bool `json:"must_change_password"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.True(t, body.Data.User.MustChangePassword)
+}
+
+func TestHandlerChangePassword(t *testing.T) {
+	repo := newFakeUserRepo(mustUser(t, 1, "admin", "Temporary-123"))
+	engine := newAuthEngine(t, repo)
+	login := postJSON(t, engine, "/api/v1/auth/login", map[string]string{
+		"username": "admin", "password": "Temporary-123",
+	})
+	access, _ := decodeTokens(t, login)
+
+	w := postJSONWithAuth(t, engine, "/api/v1/auth/password/change", map[string]string{
+		"current_password": "wrong", "new_password": "Replacement-456",
+	}, access)
+	assertErrorEnvelope(t, w, http.StatusUnprocessableEntity, auth.ErrCodeCurrentPassword)
+
+	w = postJSONWithAuth(t, engine, "/api/v1/auth/password/change", map[string]string{
+		"current_password": "Temporary-123", "new_password": "Replacement-456",
+	}, access)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, auth.CheckPassword(repo.byID[1].PasswordHash, "Replacement-456"))
 }
 
 // Acceptance: wrong password returns 401 with a uniform code and no detail.
@@ -198,6 +269,6 @@ func TestHandlerMeOmitsPasswordHash(t *testing.T) {
 
 	w = getWithAuth(t, engine, "/api/v1/auth/me", access)
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.NotContains(t, w.Body.String(), "password")
+	assert.NotContains(t, w.Body.String(), "password_hash")
 	assert.NotContains(t, w.Body.String(), "$2a$")
 }

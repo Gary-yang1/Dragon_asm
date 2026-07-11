@@ -23,25 +23,36 @@ import (
 // Permission points defined in design §2.3.
 // All downstream enforcement must use these constants — never raw strings.
 const (
-	PermAssetRead     = "asset:read"
-	PermAssetWrite    = "asset:write"
-	PermAssetDelete   = "asset:delete"
-	PermScopeRead     = "scope:read"
-	PermScopeWrite    = "scope:write"
-	PermDiscoveryRead = "discovery:read"
-	PermDiscoveryRun  = "discovery:run"
-	PermRiskRead      = "risk:read"
-	PermRiskWrite     = "risk:write"
-	PermRiskAccept    = "risk:accept"
-	PermRiskSuppress  = "risk:suppress"
-	PermTicketRead    = "ticket:read"
-	PermTicketWrite   = "ticket:write"
-	PermTicketApprove = "ticket:approve"
-	PermReportRead    = "report:read"
-	PermReportExport  = "report:export"
-	PermNotifWrite    = "notification:write"
-	PermAdminManage   = "admin:manage"
-	PermAuditRead     = "audit:read"
+	PermAssetRead          = "asset:read"
+	PermAssetWrite         = "asset:write"
+	PermAssetDelete        = "asset:delete"
+	PermExposureRead       = "exposure:read"
+	PermScopeRead          = "scope:read"
+	PermScopeWrite         = "scope:write"
+	PermDiscoveryRead      = "discovery:read"
+	PermDiscoveryRun       = "discovery:run"
+	PermRiskRead           = "risk:read"
+	PermRiskWrite          = "risk:write"
+	PermRiskAccept         = "risk:accept"
+	PermRiskSuppress       = "risk:suppress"
+	PermTicketRead         = "ticket:read"
+	PermTicketWrite        = "ticket:write"
+	PermTicketApprove      = "ticket:approve"
+	PermReportRead         = "report:read"
+	PermReportExport       = "report:export"
+	PermNotifWrite         = "notification:write"
+	PermAdminManage        = "admin:manage"
+	PermAuditRead          = "audit:read"
+	PermProjectRead        = "project:read"
+	PermProjectCreate      = "project:create"
+	PermProjectWrite       = "project:write"
+	PermProjectArchive     = "project:archive"
+	PermProjectMemberWrite = "project:member:write"
+	PermUserRead           = "user:read"
+	PermUserWrite          = "user:write"
+	// #nosec G101 -- this is an RBAC permission name, not a credential.
+	PermUserCredentialReset = "user:credential:reset"
+	PermUserRoleWrite       = "user:role:write"
 	// PermProjectAccess is the project-boundary permission: a role holding it
 	// reaches a project even without a project_member row (the explicit/global
 	// path in project.Service.Access). Only the cross-project admin roles are
@@ -61,6 +72,16 @@ const (
 	RoleDeveloper     = "developer"
 	RoleViewer        = "viewer"
 )
+
+// AllRoles is the fixed MVP role matrix order used by the read-only role API.
+var AllRoles = []string{
+	RoleSystemAdmin,
+	RoleSecurityAdmin,
+	RoleProjectOwner,
+	RoleSecurityOps,
+	RoleDeveloper,
+	RoleViewer,
+}
 
 // NewEnforcer constructs a casbin enforcer using the embedded model.conf.
 // adapter must implement casbin's persist.Adapter interface.

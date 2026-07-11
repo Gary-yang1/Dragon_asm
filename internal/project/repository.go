@@ -35,7 +35,7 @@ type sqlcRepository struct {
 
 // NewRepository wraps a dbgen.Queries (which holds any dbgen.DBTX, e.g. a
 // *sql.DB or a sqlmock-backed DB in tests).
-func NewRepository(q *dbgen.Queries) Repository {
+func NewRepository(q *dbgen.Queries) *sqlcRepository {
 	return &sqlcRepository{q: q}
 }
 

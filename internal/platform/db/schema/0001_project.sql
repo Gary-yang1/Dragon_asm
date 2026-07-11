@@ -38,5 +38,11 @@ CREATE TABLE project_member (
     UNIQUE KEY uk_project_member (project_id, user_id, deleted_at),
     KEY idx_member_user (user_id),
     CONSTRAINT fk_member_project FOREIGN KEY (project_id) REFERENCES project (id) ON DELETE CASCADE,
-    CONSTRAINT chk_member_role CHECK (role IN ('system_admin', 'security_admin', 'project_owner', 'security_ops', 'developer', 'viewer'))
+    CONSTRAINT chk_member_role CHECK (
+        role IN ('project_owner', 'security_ops', 'developer', 'viewer')
+        OR (
+            role IN ('system_admin', 'security_admin')
+            AND deleted_at <> '1970-01-01 00:00:00.000'
+        )
+    )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -30,6 +30,10 @@ type fakeProjectRepo struct {
 	roles    map[string]string // "<projectID>:<userID>" -> role
 }
 
+func (f *fakeProjectRepo) ActorScope(_ context.Context, _ string) (project.ActorScope, error) {
+	return project.ActorScope{TenantID: "t1", OrgID: "o1"}, nil
+}
+
 func (f *fakeProjectRepo) GetByID(_ context.Context, id uint64) (*project.Project, error) {
 	if p, ok := f.projects[id]; ok {
 		return p, nil

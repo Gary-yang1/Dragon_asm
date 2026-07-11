@@ -2,6 +2,11 @@ package discovery
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -19,6 +24,7 @@ type fakeRepo struct {
 	nextTargetID   uint64
 	templates      map[uint64]map[uint64]*TaskTemplate
 	runs           map[uint64]map[uint64]*TaskRun
+	callbacks      map[uint64]map[uint64]map[uint64]*DiscoveryCallback
 	nextTemplateID uint64
 	nextRunID      uint64
 }
@@ -29,6 +35,7 @@ func newFakeRepo() *fakeRepo {
 		targets:   make(map[uint64]map[uint64][]*ScopeTarget),
 		templates: make(map[uint64]map[uint64]*TaskTemplate),
 		runs:      make(map[uint64]map[uint64]*TaskRun),
+		callbacks: make(map[uint64]map[uint64]map[uint64]*DiscoveryCallback),
 	}
 }
 
@@ -153,6 +160,7 @@ func (r *fakeRepo) ListScopeTargets(ctx context.Context, projectID, scopeID uint
 }
 
 func (r *fakeRepo) ClearScopeTargets(ctx context.Context, projectID, scopeID uint64, actorID string, deletedAt time.Time) error {
+	_ = ctx
 	_ = actorID
 	_ = deletedAt
 	r.clearCount++
@@ -329,7 +337,28 @@ func (r *fakeRepo) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskR
 	return out, nil
 }
 
+func (r *fakeRepo) ListRunningRunsForReconcile(ctx context.Context, limit int32) ([]*TaskRun, error) {
+	_ = ctx
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]*TaskRun, 0)
+	for _, pp := range r.runs {
+		for _, run := range pp {
+			if run.Status == TaskRunStatusRunning && run.EngineJobID != "" && !run.DispatchedAt.IsZero() {
+				cp := *run
+				out = append(out, &cp)
+				if int32(len(out)) >= limit {
+					return out, nil
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 func (r *fakeRepo) MarkRunRunning(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, startedAt time.Time) error {
+	_ = ctx
 	_ = actorID
 	run, ok := r.runs[projectID][runID]
 	if !ok {
@@ -344,7 +373,44 @@ func (r *fakeRepo) MarkRunRunning(ctx context.Context, projectID, runID uint64, 
 	return nil
 }
 
+func (r *fakeRepo) MarkRunDispatched(ctx context.Context, projectID, runID uint64, actorID, fromStatus, engineJobID string, now time.Time) error {
+	_ = ctx
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != fromStatus {
+		return ErrInvalidRunTransition
+	}
+	run.Status = TaskRunStatusRunning
+	run.Progress = 0
+	run.EngineJobID = engineJobID
+	run.DispatchedAt = now
+	run.StartedAt = now
+	run.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) MarkRunDispatchFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus, errorSummary string, now time.Time) error {
+	_ = ctx
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != fromStatus {
+		return ErrInvalidRunTransition
+	}
+	run.Status = TaskRunStatusFailed
+	run.Progress = 0
+	run.ErrorSummary = errorSummary
+	run.FinishedAt = now
+	run.UpdatedBy = actorID
+	return nil
+}
+
 func (r *fakeRepo) MarkRunSucceeded(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error {
+	_ = ctx
+	_ = now
 	_ = actorID
 	run, ok := r.runs[projectID][runID]
 	if !ok {
@@ -363,6 +429,8 @@ func (r *fakeRepo) MarkRunSucceeded(ctx context.Context, projectID, runID uint64
 }
 
 func (r *fakeRepo) MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error {
+	_ = ctx
+	_ = now
 	_ = actorID
 	run, ok := r.runs[projectID][runID]
 	if !ok {
@@ -381,6 +449,7 @@ func (r *fakeRepo) MarkRunPartialSuccess(ctx context.Context, projectID, runID u
 }
 
 func (r *fakeRepo) MarkRunFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, resultCount uint64, now time.Time) error {
+	_ = ctx
 	_ = actorID
 	run, ok := r.runs[projectID][runID]
 	if !ok {
@@ -399,6 +468,7 @@ func (r *fakeRepo) MarkRunFailed(ctx context.Context, projectID, runID uint64, a
 }
 
 func (r *fakeRepo) MarkRunCancelled(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, now time.Time) error {
+	_ = ctx
 	_ = actorID
 	run, ok := r.runs[projectID][runID]
 	if !ok {
@@ -416,6 +486,7 @@ func (r *fakeRepo) MarkRunCancelled(ctx context.Context, projectID, runID uint64
 }
 
 func (r *fakeRepo) IncrementRunAttempt(ctx context.Context, projectID, runID uint64, actorID string, now time.Time) error {
+	_ = ctx
 	_ = now
 	_ = actorID
 	run, ok := r.runs[projectID][runID]
@@ -426,6 +497,47 @@ func (r *fakeRepo) IncrementRunAttempt(ctx context.Context, projectID, runID uin
 	return nil
 }
 
+func (r *fakeRepo) MarkRunCallbackReceived(ctx context.Context, projectID, runID uint64, actorID string, resultCount uint64, now time.Time) error {
+	_ = ctx
+	run, ok := r.runs[projectID][runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != TaskRunStatusRunning {
+		return ErrInvalidRunTransition
+	}
+	run.LastCallbackAt = now
+	run.ResultCount += resultCount
+	run.UpdatedBy = actorID
+	return nil
+}
+
+func (r *fakeRepo) InsertDiscoveryCallback(ctx context.Context, in DiscoveryCallback) (bool, error) {
+	_ = ctx
+	if _, ok := r.callbacks[in.ProjectID]; !ok {
+		r.callbacks[in.ProjectID] = make(map[uint64]map[uint64]*DiscoveryCallback)
+	}
+	if _, ok := r.callbacks[in.ProjectID][in.RunID]; !ok {
+		r.callbacks[in.ProjectID][in.RunID] = make(map[uint64]*DiscoveryCallback)
+	}
+	if _, ok := r.callbacks[in.ProjectID][in.RunID][in.Seq]; ok {
+		return false, nil
+	}
+	cp := in
+	r.callbacks[in.ProjectID][in.RunID][in.Seq] = &cp
+	return true, nil
+}
+
+func (r *fakeRepo) MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error {
+	_ = ctx
+	cb, ok := r.callbacks[projectID][runID][seq]
+	if !ok {
+		return ErrNotFound
+	}
+	cb.ReceivedAt = enqueuedAt
+	return nil
+}
+
 type fakeAudit struct {
 	events []audit.Event
 }
@@ -433,6 +545,69 @@ type fakeAudit struct {
 func (f *fakeAudit) Record(_ context.Context, e audit.Event) error {
 	f.events = append(f.events, e)
 	return nil
+}
+
+type fakeCallbackEnqueuer struct {
+	calls int
+	items []DiscoveryCallback
+	err   error
+}
+
+func (f *fakeCallbackEnqueuer) EnqueueDiscoveryCallback(_ context.Context, cb DiscoveryCallback, _ []byte) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls++
+	f.items = append(f.items, cb)
+	return nil
+}
+
+type fakeEngine struct {
+	dispatchCalls int
+	cancelCalls   int
+	statusCalls   int
+	jobs          []ScanJob
+	ids           []string
+	errs          []error
+	cancelErr     error
+	statuses      []EngineJobStatus
+	statusErr     error
+}
+
+func (f *fakeEngine) Dispatch(_ context.Context, job ScanJob) (string, error) {
+	f.dispatchCalls++
+	f.jobs = append(f.jobs, job)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(f.ids) > 0 {
+		id := f.ids[0]
+		f.ids = f.ids[1:]
+		return id, nil
+	}
+	return "engine-job-1", nil
+}
+
+func (f *fakeEngine) Cancel(_ context.Context, _ string) error {
+	f.cancelCalls++
+	return f.cancelErr
+}
+
+func (f *fakeEngine) Status(_ context.Context, _ string) (EngineJobStatus, error) {
+	f.statusCalls++
+	if f.statusErr != nil {
+		return EngineJobStatus{}, f.statusErr
+	}
+	if len(f.statuses) > 0 {
+		status := f.statuses[0]
+		f.statuses = f.statuses[1:]
+		return status, nil
+	}
+	return EngineJobStatus{Status: EngineJobStatusRunning}, nil
 }
 
 func TestCreateScopeWritesAuditAndNormalizesTargets(t *testing.T) {
@@ -667,6 +842,7 @@ func TestIsTargetAllowedScopeWindowAndCrossProject(t *testing.T) {
 	}))
 
 	ok, reason, err := svc.IsTargetAllowed(context.Background(), 9, scopeID, "example.com")
+	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, ReasonScopeInactive, reason)
 
@@ -688,6 +864,7 @@ func TestIsTargetAllowedScopeWindowAndCrossProject(t *testing.T) {
 		TargetType: TargetTypeDomain, MatchMode: MatchModeInclude, Value: "example.com", ActorID: "alice",
 	}))
 	ok, reason, err = svc.IsTargetAllowed(context.Background(), 9, futureScopeID, "example.com")
+	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, ReasonNotStarted, reason)
 
@@ -709,6 +886,7 @@ func TestIsTargetAllowedScopeWindowAndCrossProject(t *testing.T) {
 		TargetType: TargetTypeDomain, MatchMode: MatchModeInclude, Value: "example.com", ActorID: "alice",
 	}))
 	ok, reason, err = svc.IsTargetAllowed(context.Background(), 9, expiredScopeID, "example.com")
+	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, ReasonScopeExpired, reason)
 
@@ -1174,4 +1352,491 @@ func TestSetAndDeleteTaskTemplateAudit(t *testing.T) {
 	assert.Equal(t, ActionTemplateCreate, auditSink.events[0].Action)
 	assert.Equal(t, ActionTemplateEnable, auditSink.events[1].Action)
 	assert.Equal(t, ActionTemplateDelete, auditSink.events[2].Action)
+}
+
+func TestBuildDispatchPlanSuccess(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, `{
+		"targets":[
+			{"type":"domain","value":" Example.COM. "},
+			{"type":"url","value":"https://example.com:443/path"}
+		],
+		"options":{"profile":"standard"}
+	}`)
+
+	plan, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	require.NoError(t, err)
+	assert.Equal(t, run.ID, plan.RunID)
+	assert.Equal(t, TaskTypeDNS, plan.TaskType)
+	assert.Equal(t, []DispatchTarget{
+		{Type: TargetTypeDomain, Value: "example.com"},
+		{Type: TargetTypeURL, Value: "https://example.com:443"},
+	}, plan.Targets)
+	assert.Equal(t, "standard", plan.Options["profile"])
+	assert.Equal(t, 20, plan.RateLimit)
+	assert.Equal(t, 10, plan.Concurrency)
+}
+
+func TestBuildDispatchPlanRejectsInvalidConfig(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, `{"options":{}}`)
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	assert.ErrorIs(t, err, ErrInvalidTaskConfig)
+}
+
+func TestBuildDispatchPlanRejectsDangerousTarget(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, `{
+		"targets":[{"type":"url","value":"http://localhost"}]
+	}`)
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	assert.ErrorIs(t, err, ErrDangerousTarget)
+}
+
+func TestBuildDispatchPlanRejectsInactiveScope(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusInactive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	var denied DispatchDeniedError
+	require.ErrorAs(t, err, &denied)
+	assert.ErrorIs(t, err, ErrDispatchTargetDenied)
+	assert.Equal(t, ReasonScopeInactive, denied.Reason)
+}
+
+func TestBuildDispatchPlanRejectsExpiredScope(t *testing.T) {
+	repo := newFakeRepo()
+	now := time.Now().UTC()
+	scopeID, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       StatusActive,
+		AuthorizedBy: "alice",
+		ValidFrom:    now.Add(-2 * time.Hour),
+		ValidUntil:   now.Add(-time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+	require.NoError(t, repo.InsertScopeTarget(context.Background(), InsertScopeTargetParams{
+		TenantID:   "t1",
+		OrgID:      "o1",
+		ProjectID:  1,
+		ScopeID:    scopeID,
+		TargetType: TargetTypeDomain,
+		MatchMode:  MatchModeInclude,
+		Value:      "example.com",
+		ActorID:    "alice",
+	}))
+	svc := NewService(repo, WithNow(func() time.Time { return now }))
+	template, run := createTemplateAndRun(t, svc, scopeID, true, dispatchConfigFor("example.com"))
+
+	_, err = svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	var denied DispatchDeniedError
+	require.ErrorAs(t, err, &denied)
+	assert.Equal(t, template.ID, run.TemplateID)
+	assert.Equal(t, ReasonScopeExpired, denied.Reason)
+}
+
+func TestBuildDispatchPlanRejectsExcludedTarget(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("blocked.example.com"))
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	var denied DispatchDeniedError
+	require.ErrorAs(t, err, &denied)
+	assert.Equal(t, ReasonExcluded, denied.Reason)
+}
+
+func TestBuildDispatchPlanRejectsNoMatch(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("other.example.com"))
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	var denied DispatchDeniedError
+	require.ErrorAs(t, err, &denied)
+	assert.Equal(t, ReasonNoMatch, denied.Reason)
+}
+
+func TestBuildDispatchPlanRejectsNonPendingRun(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	require.NoError(t, svc.MarkTaskRunRunning(context.Background(), UpdateTaskRunStatusInput{
+		RunID:     run.ID,
+		ProjectID: 1,
+		ActorID:   "alice",
+	}))
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	assert.ErrorIs(t, err, ErrTaskRunNotDispatchable)
+}
+
+func TestBuildDispatchPlanRejectsDisabledTemplate(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, false, TaskRunStatusPending, dispatchConfigFor("example.com"))
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	assert.ErrorIs(t, err, ErrTemplateDisabled)
+}
+
+func TestBuildDispatchPlanProjectScoped(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+
+	_, err := svc.BuildDispatchPlan(context.Background(), 2, run.ID, "alice")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func newDispatchPlanFixture(t *testing.T, scopeStatus string, templateEnabled bool, runStatus string, config string) (*Service, *TaskTemplate, *TaskRun) {
+	t.Helper()
+	repo := newFakeRepo()
+	now := time.Now().UTC()
+	scopeID, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		Name:         "scope",
+		Status:       scopeStatus,
+		AuthorizedBy: "alice",
+		ValidFrom:    now.Add(-time.Minute),
+		ValidUntil:   now.Add(time.Hour),
+		ActorID:      "alice",
+	})
+	require.NoError(t, err)
+	for _, target := range []ScopeTargetInput{
+		{TargetType: TargetTypeDomain, MatchMode: MatchModeInclude, Value: "example.com"},
+		{TargetType: TargetTypeURL, MatchMode: MatchModeInclude, Value: "https://example.com:443"},
+		{TargetType: TargetTypeDomain, MatchMode: MatchModeInclude, Value: "blocked.example.com"},
+		{TargetType: TargetTypeDomain, MatchMode: MatchModeExclude, Value: "blocked.example.com"},
+	} {
+		normalized, nerr := normalizeScopeTarget(target, "alice")
+		require.NoError(t, nerr)
+		require.NoError(t, repo.InsertScopeTarget(context.Background(), InsertScopeTargetParams{
+			TenantID:   "t1",
+			OrgID:      "o1",
+			ProjectID:  1,
+			ScopeID:    scopeID,
+			TargetType: normalized.TargetType,
+			MatchMode:  normalized.MatchMode,
+			Value:      normalized.Value,
+			ActorID:    "alice",
+		}))
+	}
+
+	svc := NewService(repo, WithNow(func() time.Time { return now }))
+	template, run := createTemplateAndRun(t, svc, scopeID, templateEnabled, config)
+	if runStatus != TaskRunStatusPending {
+		stored := repo.runs[1][run.ID]
+		stored.Status = runStatus
+		run.Status = runStatus
+	}
+	return svc, template, run
+}
+
+func createTemplateAndRun(t *testing.T, svc *Service, scopeID uint64, templateEnabled bool, config string) (*TaskTemplate, *TaskRun) {
+	t.Helper()
+	template, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID:       "t1",
+		OrgID:          "o1",
+		ProjectID:      1,
+		ScopeID:        scopeID,
+		Name:           "template",
+		TaskType:       TaskTypeDNS,
+		Config:         config,
+		Enabled:        templateEnabled,
+		TimeoutSeconds: 30,
+		RateLimit:      20,
+		Concurrency:    10,
+		RetryLimit:     3,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+	runID, err := svc.repo.CreateTaskRun(context.Background(), CreateTaskRunParams{
+		TenantID:       template.TenantID,
+		OrgID:          template.OrgID,
+		ProjectID:      template.ProjectID,
+		TemplateID:     template.ID,
+		ScopeID:        template.ScopeID,
+		TaskType:       template.TaskType,
+		Status:         TaskRunStatusPending,
+		Progress:       0,
+		TimeoutSeconds: template.TimeoutSeconds,
+		RateLimit:      template.RateLimit,
+		Concurrency:    template.Concurrency,
+		RetryLimit:     template.RetryLimit,
+		ActorID:        "alice",
+	})
+	require.NoError(t, err)
+	run, err := svc.repo.GetTaskRun(context.Background(), template.ProjectID, runID)
+	require.NoError(t, err)
+	return template, run
+}
+
+func dispatchConfigFor(target string) string {
+	return `{"targets":[{"type":"domain","value":"` + target + `"}]}`
+}
+
+func TestDispatchTaskRunSuccessRecordsEngineJobAndRunning(t *testing.T) {
+	engine := &fakeEngine{ids: []string{"job-123"}}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+
+	out, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID:   1,
+		RunID:       run.ID,
+		ActorID:     "alice",
+		CallbackURL: "https://asm.example.com/callback",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, TaskRunStatusRunning, out.Status)
+	assert.Equal(t, "job-123", out.EngineJobID)
+	assert.Equal(t, 1, out.Attempt)
+	require.Len(t, engine.jobs, 1)
+	assert.Equal(t, "1", engine.jobs[0].RunID)
+	assert.Equal(t, TaskTypeDNS, engine.jobs[0].JobType)
+	assert.Equal(t, "https://asm.example.com/callback", engine.jobs[0].CallbackURL)
+	assert.Equal(t, 30*time.Second, engine.jobs[0].Timeout)
+}
+
+func TestDispatchTaskRunRetriesThenSucceeds(t *testing.T) {
+	engine := &fakeEngine{
+		errs: []error{ErrEngineDispatch, nil},
+		ids:  []string{"job-456"},
+	}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+
+	out, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, TaskRunStatusRunning, out.Status)
+	assert.Equal(t, "job-456", out.EngineJobID)
+	assert.Equal(t, 2, out.Attempt)
+	assert.Equal(t, 2, engine.dispatchCalls)
+}
+
+func TestDispatchTaskRunFailureMarksRunFailedAfterRetryLimit(t *testing.T) {
+	dispatchErr := errors.New("engine unavailable")
+	engine := &fakeEngine{errs: []error{dispatchErr, dispatchErr, dispatchErr, dispatchErr}}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+
+	out, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	assert.ErrorIs(t, err, dispatchErr)
+	require.NotNil(t, out)
+	assert.Equal(t, TaskRunStatusFailed, out.Status)
+	assert.Contains(t, out.ErrorSummary, "engine unavailable")
+	assert.Equal(t, 4, out.Attempt)
+	assert.Equal(t, 4, engine.dispatchCalls)
+}
+
+func TestDispatchTaskRunRequiresEngineAdapter(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+
+	_, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	assert.ErrorIs(t, err, ErrEngineNotConfigured)
+}
+
+func TestCancelDispatchedTaskRunCallsEngineAndMarksCancelled(t *testing.T) {
+	engine := &fakeEngine{ids: []string{"job-cancel"}}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+	dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	require.NoError(t, err)
+
+	err = svc.CancelDispatchedTaskRun(context.Background(), UpdateTaskRunStatusInput{
+		RunID:        dispatched.ID,
+		ProjectID:    1,
+		ActorID:      "alice",
+		ErrorSummary: "operator cancelled",
+	})
+	require.NoError(t, err)
+	cancelled, err := svc.GetTaskRun(context.Background(), 1, dispatched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, engine.cancelCalls)
+	assert.Equal(t, TaskRunStatusCancelled, cancelled.Status)
+	assert.Equal(t, "operator cancelled", cancelled.ErrorSummary)
+}
+
+func TestCancelDispatchedTaskRunRejectsPendingRun(t *testing.T) {
+	engine := &fakeEngine{}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+
+	err := svc.CancelDispatchedTaskRun(context.Background(), UpdateTaskRunStatusInput{
+		RunID:     run.ID,
+		ProjectID: 1,
+		ActorID:   "alice",
+	})
+	assert.ErrorIs(t, err, ErrInvalidRunTransition)
+	assert.Equal(t, 0, engine.cancelCalls)
+}
+
+func TestReconcileTaskRunMarksEngineSuccess(t *testing.T) {
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	engine := &fakeEngine{ids: []string{"job-reconcile"}, statuses: []EngineJobStatus{{Status: EngineJobStatusSuccess, ResultCount: 9}}}
+	svc.engine = engine
+	dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	require.NoError(t, err)
+
+	updated, err := svc.ReconcileTaskRun(context.Background(), ReconcileTaskRunInput{
+		ProjectID: 1,
+		RunID:     dispatched.ID,
+		ActorID:   "system",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, engine.statusCalls)
+	assert.Equal(t, TaskRunStatusSuccess, updated.Status)
+	assert.Equal(t, uint64(9), updated.ResultCount)
+}
+
+func TestReconcileTimedOutRunsCancelsStillRunningEngineJob(t *testing.T) {
+	now := time.Now().UTC()
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	engine := &fakeEngine{ids: []string{"job-timeout"}, statuses: []EngineJobStatus{{Status: EngineJobStatusRunning}}}
+	svc.engine = engine
+	svc.nowFn = func() time.Time { return now }
+	dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	require.NoError(t, err)
+	stored := svc.repo.(*fakeRepo).runs[1][dispatched.ID]
+	stored.DispatchedAt = now.Add(-time.Duration(stored.TimeoutSeconds+1) * time.Second)
+	svc.nowFn = func() time.Time { return now }
+
+	result, err := svc.ReconcileTimedOutRuns(context.Background(), ReconcileTimedOutRunsInput{
+		ActorID: "system",
+		Limit:   10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Checked)
+	assert.Equal(t, 1, result.Updated)
+	assert.Equal(t, 1, result.Cancelled)
+	assert.Equal(t, 1, engine.statusCalls)
+	assert.Equal(t, 1, engine.cancelCalls)
+	updated, err := svc.GetTaskRun(context.Background(), 1, dispatched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, TaskRunStatusFailed, updated.Status)
+	assert.Equal(t, "task run timed out", updated.ErrorSummary)
+}
+
+func TestHandleCallbackAcceptsNewRunningRunCallback(t *testing.T) {
+	now := time.Now().UTC()
+	enqueuer := &fakeCallbackEnqueuer{}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.nowFn = func() time.Time { return now }
+	svc.callbackEnqueuer = enqueuer
+	engine := &fakeEngine{ids: []string{"job-callback"}}
+	svc.engine = engine
+	dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	require.NoError(t, err)
+
+	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running","result_count":3}`)
+	input := signedCallbackInput(1, dispatched.ID, 1, now, "callback-secret", raw)
+	result, err := svc.HandleCallback(context.Background(), input)
+	require.NoError(t, err)
+	assert.False(t, result.Duplicate)
+	assert.Equal(t, 1, enqueuer.calls)
+	assert.Equal(t, uint64(3), enqueuer.items[0].ResultCount)
+	updated, err := svc.GetTaskRun(context.Background(), 1, dispatched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), updated.ResultCount)
+	assert.Equal(t, now, updated.LastCallbackAt)
+}
+
+func TestHandleCallbackDuplicateSeqDoesNotEnqueueAgain(t *testing.T) {
+	now := time.Now().UTC()
+	enqueuer := &fakeCallbackEnqueuer{}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.nowFn = func() time.Time { return now }
+	svc.callbackEnqueuer = enqueuer
+	svc.engine = &fakeEngine{ids: []string{"job-callback"}}
+	dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1,
+		RunID:     run.ID,
+		ActorID:   "alice",
+	})
+	require.NoError(t, err)
+	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running","result_count":3}`)
+	input := signedCallbackInput(1, dispatched.ID, 1, now, "callback-secret", raw)
+	_, err = svc.HandleCallback(context.Background(), input)
+	require.NoError(t, err)
+
+	result, err := svc.HandleCallback(context.Background(), input)
+	require.NoError(t, err)
+	assert.True(t, result.Duplicate)
+	assert.Equal(t, 1, enqueuer.calls)
+}
+
+func TestHandleCallbackRejectsInvalidSignatureAndReplay(t *testing.T) {
+	now := time.Now().UTC()
+	audits := &fakeAudit{}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.nowFn = func() time.Time { return now }
+	svc.auditSink = audits
+	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running"}`)
+	input := signedCallbackInput(1, run.ID, 1, now, "callback-secret", raw)
+	input.Signature = "bad"
+	_, err := svc.HandleCallback(context.Background(), input)
+	assert.ErrorIs(t, err, ErrInvalidCallbackSignature)
+	require.Len(t, audits.events, 1)
+	assert.Equal(t, ActionCallbackReject, audits.events[0].Action)
+	assert.Equal(t, "INVALID_CALLBACK_SIGNATURE", audits.events[0].ErrorCode)
+
+	old := signedCallbackInput(1, run.ID, 1, now.Add(-10*time.Minute), "callback-secret", raw)
+	_, err = svc.HandleCallback(context.Background(), old)
+	assert.ErrorIs(t, err, ErrCallbackReplay)
+	require.Len(t, audits.events, 2)
+	assert.Equal(t, "CALLBACK_REPLAY", audits.events[1].ErrorCode)
+}
+
+func TestHandleCallbackRejectsNonRunningRun(t *testing.T) {
+	now := time.Now().UTC()
+	audits := &fakeAudit{}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.nowFn = func() time.Time { return now }
+	svc.auditSink = audits
+	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running"}`)
+	input := signedCallbackInput(1, run.ID, 1, now, "callback-secret", raw)
+
+	_, err := svc.HandleCallback(context.Background(), input)
+	assert.ErrorIs(t, err, ErrCallbackRunNotRunning)
+	require.Len(t, audits.events, 1)
+	assert.Equal(t, ActionCallbackReject, audits.events[0].Action)
+	assert.Equal(t, "CALLBACK_RUN_NOT_RUNNING", audits.events[0].ErrorCode)
+}
+
+func signedCallbackInput(projectID, runID, seq uint64, ts time.Time, secret string, raw []byte) HandleCallbackInput {
+	timestamp := strconv.FormatInt(ts.Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write(raw)
+	return HandleCallbackInput{
+		ProjectID: projectID,
+		RunID:     runID,
+		Seq:       seq,
+		Timestamp: timestamp,
+		Signature: hex.EncodeToString(mac.Sum(nil)),
+		RawBody:   raw,
+		Secret:    secret,
+	}
 }

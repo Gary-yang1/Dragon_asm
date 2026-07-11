@@ -8,6 +8,16 @@ import (
 	"syscall"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/Gary-yang1/Dragon_asm/internal/asset"
+	"github.com/Gary-yang1/Dragon_asm/internal/discovery"
+	"github.com/Gary-yang1/Dragon_asm/internal/exposure"
+	"github.com/Gary-yang1/Dragon_asm/internal/notification"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/db"
+	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
+	"github.com/Gary-yang1/Dragon_asm/internal/report"
+	"github.com/Gary-yang1/Dragon_asm/internal/risk"
 )
 
 func main() {
@@ -38,9 +48,47 @@ func main() {
 		},
 	)
 
+	sqlDB, err := db.Open(db.LoadConfigFromEnv())
+	if err != nil {
+		logger.Error("database unavailable", "error", err)
+		os.Exit(1)
+	}
+	queries := dbgen.New(sqlDB)
+	auditSvc := audit.NewService(audit.NewRepository(queries))
+	assetSvc := asset.NewService(asset.NewRepository(queries), asset.WithDB(sqlDB))
+	riskSvc := risk.NewService(risk.NewRepository(queries), risk.WithDB(sqlDB))
+	notificationSvc := notification.NewService(
+		notification.NewRepository(queries),
+		notification.WithDB(sqlDB),
+		notification.WithAuditSink(auditSvc),
+	)
+	exposureSvc := exposure.NewService(
+		exposure.NewRepository(queries),
+		exposure.WithCertificateRiskReporter(riskSvc),
+		exposure.WithNotificationTrigger(notificationSvc),
+	)
+	reportSvc := report.NewService(
+		report.NewRepository(queries),
+		report.WithAuditSink(auditSvc),
+		report.WithExportDir(envOr("REPORT_EXPORT_DIR", "/tmp/asm-report-exports")),
+	)
+	discoveryOpts := []discovery.ServiceOption{discovery.WithDB(sqlDB), discovery.WithAuditSink(auditSvc)}
+	if engineURL := os.Getenv("DISCOVERY_ENGINE_BASE_URL"); engineURL != "" {
+		engine, err := discovery.NewHTTPEngineAdapter(engineURL, os.Getenv("DISCOVERY_ENGINE_TOKEN"), nil)
+		if err != nil {
+			logger.Error("invalid discovery engine config", "error", err)
+			os.Exit(1)
+		}
+		discoveryOpts = append(discoveryOpts, discovery.WithEngineAdapter(engine))
+	} else {
+		logger.Warn("discovery engine not configured; timeout reconcile tasks will fail", "env", "DISCOVERY_ENGINE_BASE_URL")
+	}
+	discoverySvc := discovery.NewService(discovery.NewRepository(queries), discoveryOpts...)
+
 	mux := asynq.NewServeMux()
-	// Task handlers are registered here as modules are implemented (M2+).
-	// Example: mux.HandleFunc("ingest_scan_result", discovery.HandleIngestScanResult)
+	discovery.NewIngestHandler(assetSvc, logger).WithExposureIngester(exposureSvc).Register(mux)
+	discovery.NewReconcileHandler(discoverySvc, logger).Register(mux)
+	report.NewExportHandler(reportSvc, logger).Register(mux)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

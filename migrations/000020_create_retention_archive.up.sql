@@ -1,0 +1,74 @@
+-- M4 retention archive tables. Archive tables keep cold copies before the
+-- retention job prunes hot append-only/high-growth tables.
+
+CREATE TABLE audit_log_archive (
+    id            BIGINT UNSIGNED NOT NULL,
+    tenant_id     VARCHAR(64)  NOT NULL DEFAULT '',
+    org_id        VARCHAR(64)  NOT NULL DEFAULT '',
+    project_id    BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    actor_id      VARCHAR(64)  NOT NULL DEFAULT '',
+    actor_type    VARCHAR(32)  NOT NULL DEFAULT 'user',
+    action        VARCHAR(128) NOT NULL,
+    resource_type VARCHAR(64)  NOT NULL DEFAULT '',
+    resource_id   VARCHAR(64)  NOT NULL DEFAULT '',
+    result        VARCHAR(16)  NOT NULL DEFAULT 'success',
+    ip            VARCHAR(64)  NOT NULL DEFAULT '',
+    user_agent    VARCHAR(512) NOT NULL DEFAULT '',
+    request_id    VARCHAR(64)  NOT NULL DEFAULT '',
+    before_json   TEXT         NULL,
+    after_json    TEXT         NULL,
+    metadata_json TEXT         NULL,
+    error_code    VARCHAR(64)  NOT NULL DEFAULT '',
+    error_message VARCHAR(512) NOT NULL DEFAULT '',
+    created_at    DATETIME(3)  NOT NULL,
+    archived_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    KEY idx_audit_log_archive_created (created_at),
+    KEY idx_audit_log_archive_project (project_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE change_event_archive (
+    id             BIGINT UNSIGNED NOT NULL,
+    tenant_id      VARCHAR(64)   NOT NULL DEFAULT '',
+    org_id         VARCHAR(64)   NOT NULL DEFAULT '',
+    project_id     BIGINT UNSIGNED NOT NULL,
+    entity_type    VARCHAR(32)   NOT NULL,
+    entity_id      BIGINT UNSIGNED NOT NULL,
+    change_type    VARCHAR(32)   NOT NULL,
+    severity       VARCHAR(32)   NOT NULL DEFAULT 'info',
+    title          VARCHAR(255)  NOT NULL DEFAULT '',
+    summary        VARCHAR(1024) NOT NULL DEFAULT '',
+    source         VARCHAR(64)   NOT NULL DEFAULT '',
+    before_json    JSON          NULL,
+    after_json     JSON          NULL,
+    detected_at    DATETIME(3)   NOT NULL,
+    created_at     DATETIME(3)   NOT NULL,
+    archived_at    DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id, detected_at),
+    KEY idx_change_event_archive_detected (detected_at),
+    KEY idx_change_event_archive_project (project_id, detected_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE discovery_callback_archive (
+    id             BIGINT UNSIGNED NOT NULL,
+    tenant_id      VARCHAR(64)   NOT NULL DEFAULT '',
+    org_id         VARCHAR(64)   NOT NULL DEFAULT '',
+    project_id     BIGINT UNSIGNED NOT NULL,
+    run_id         BIGINT UNSIGNED NOT NULL,
+    seq            BIGINT UNSIGNED NOT NULL,
+    phase          VARCHAR(32)   NOT NULL DEFAULT '',
+    status         VARCHAR(32)   NOT NULL DEFAULT '',
+    payload_hash   CHAR(64)      NOT NULL DEFAULT '',
+    result_count   BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    error_summary  VARCHAR(1024) NOT NULL DEFAULT '',
+    received_at    DATETIME(3)   NOT NULL,
+    enqueued_at    DATETIME(3)   NOT NULL DEFAULT '1970-01-01 00:00:00.000',
+    created_at     DATETIME(3)   NOT NULL,
+    updated_at     DATETIME(3)   NOT NULL,
+    deleted_at     DATETIME(3)   NOT NULL DEFAULT '1970-01-01 00:00:00.000',
+    archived_at    DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_discovery_callback_archive_run_seq (project_id, run_id, seq, deleted_at),
+    KEY idx_discovery_callback_archive_received (received_at),
+    KEY idx_discovery_callback_archive_project (project_id, received_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

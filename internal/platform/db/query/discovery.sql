@@ -136,11 +136,39 @@ SELECT * FROM task_run
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id;
 
+-- name: ListRunningTaskRunsForReconcile :many
+SELECT * FROM task_run
+WHERE status = 'running'
+  AND engine_job_id <> ''
+  AND dispatched_at <> '1970-01-01 00:00:00.000'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY dispatched_at, id
+LIMIT ?;
+
 -- name: MarkTaskRunRunning :execresult
 UPDATE task_run
 SET status = ?,
     progress = 0,
     started_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: MarkTaskRunDispatched :execresult
+UPDATE task_run
+SET status = ?,
+    progress = 0,
+    engine_job_id = ?,
+    dispatched_at = ?,
+    started_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: MarkTaskRunDispatchFailed :execresult
+UPDATE task_run
+SET status = ?,
+    progress = 0,
+    error_summary = ?,
+    finished_at = ?,
     updated_by = ?
 WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
@@ -189,3 +217,27 @@ SET attempt = attempt + ?,
     updated_by = ?,
     updated_at = ?
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: MarkTaskRunCallbackReceived :execresult
+UPDATE task_run
+SET last_callback_at = ?,
+    result_count = result_count + ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- Discovery callback queries.
+-- name: InsertDiscoveryCallback :execresult
+INSERT IGNORE INTO discovery_callback (
+    tenant_id, org_id, project_id, run_id, seq,
+    phase, status, payload_hash, result_count, error_summary,
+    received_at
+) VALUES (
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    ?
+);
+
+-- name: MarkDiscoveryCallbackEnqueued :exec
+UPDATE discovery_callback
+SET enqueued_at = ?
+WHERE project_id = ? AND run_id = ? AND seq = ? AND deleted_at = '1970-01-01 00:00:00.000';

@@ -323,6 +323,49 @@ func (q *Queries) IncrementTaskRunAttempt(ctx context.Context, arg IncrementTask
 	return err
 }
 
+const insertDiscoveryCallback = `-- name: InsertDiscoveryCallback :execresult
+INSERT IGNORE INTO discovery_callback (
+    tenant_id, org_id, project_id, run_id, seq,
+    phase, status, payload_hash, result_count, error_summary,
+    received_at
+) VALUES (
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    ?
+)
+`
+
+type InsertDiscoveryCallbackParams struct {
+	TenantID     string    `db:"tenant_id" json:"tenant_id"`
+	OrgID        string    `db:"org_id" json:"org_id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	RunID        uint64    `db:"run_id" json:"run_id"`
+	Seq          uint64    `db:"seq" json:"seq"`
+	Phase        string    `db:"phase" json:"phase"`
+	Status       string    `db:"status" json:"status"`
+	PayloadHash  string    `db:"payload_hash" json:"payload_hash"`
+	ResultCount  uint64    `db:"result_count" json:"result_count"`
+	ErrorSummary string    `db:"error_summary" json:"error_summary"`
+	ReceivedAt   time.Time `db:"received_at" json:"received_at"`
+}
+
+// Discovery callback queries.
+func (q *Queries) InsertDiscoveryCallback(ctx context.Context, arg InsertDiscoveryCallbackParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertDiscoveryCallback,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.RunID,
+		arg.Seq,
+		arg.Phase,
+		arg.Status,
+		arg.PayloadHash,
+		arg.ResultCount,
+		arg.ErrorSummary,
+		arg.ReceivedAt,
+	)
+}
+
 const insertScopeTarget = `-- name: InsertScopeTarget :exec
 INSERT INTO scope_target (
     tenant_id, org_id, project_id,
@@ -360,6 +403,67 @@ func (q *Queries) InsertScopeTarget(ctx context.Context, arg InsertScopeTargetPa
 		arg.UpdatedBy,
 	)
 	return err
+}
+
+const listRunningTaskRunsForReconcile = `-- name: ListRunningTaskRunsForReconcile :many
+SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run
+WHERE status = 'running'
+  AND engine_job_id <> ''
+  AND dispatched_at <> '1970-01-01 00:00:00.000'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY dispatched_at, id
+LIMIT ?
+`
+
+func (q *Queries) ListRunningTaskRunsForReconcile(ctx context.Context, limit int32) ([]TaskRun, error) {
+	rows, err := q.db.QueryContext(ctx, listRunningTaskRunsForReconcile, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TaskRun{}
+	for rows.Next() {
+		var i TaskRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.TemplateID,
+			&i.ScopeID,
+			&i.TaskType,
+			&i.Status,
+			&i.Progress,
+			&i.TimeoutSeconds,
+			&i.RateLimit,
+			&i.Concurrency,
+			&i.RetryLimit,
+			&i.Attempt,
+			&i.EngineJobID,
+			&i.DispatchedAt,
+			&i.LastCallbackAt,
+			&i.ResultCount,
+			&i.CallbackSecretRef,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ErrorSummary,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listScopeTargetsByScope = `-- name: ListScopeTargetsByScope :many
@@ -560,6 +664,57 @@ func (q *Queries) ListTaskTemplatesByProject(ctx context.Context, projectID uint
 	return items, nil
 }
 
+const markDiscoveryCallbackEnqueued = `-- name: MarkDiscoveryCallbackEnqueued :exec
+UPDATE discovery_callback
+SET enqueued_at = ?
+WHERE project_id = ? AND run_id = ? AND seq = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkDiscoveryCallbackEnqueuedParams struct {
+	EnqueuedAt time.Time `db:"enqueued_at" json:"enqueued_at"`
+	ProjectID  uint64    `db:"project_id" json:"project_id"`
+	RunID      uint64    `db:"run_id" json:"run_id"`
+	Seq        uint64    `db:"seq" json:"seq"`
+}
+
+func (q *Queries) MarkDiscoveryCallbackEnqueued(ctx context.Context, arg MarkDiscoveryCallbackEnqueuedParams) error {
+	_, err := q.db.ExecContext(ctx, markDiscoveryCallbackEnqueued,
+		arg.EnqueuedAt,
+		arg.ProjectID,
+		arg.RunID,
+		arg.Seq,
+	)
+	return err
+}
+
+const markTaskRunCallbackReceived = `-- name: MarkTaskRunCallbackReceived :execresult
+UPDATE task_run
+SET last_callback_at = ?,
+    result_count = result_count + ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunCallbackReceivedParams struct {
+	LastCallbackAt time.Time `db:"last_callback_at" json:"last_callback_at"`
+	ResultCount    uint64    `db:"result_count" json:"result_count"`
+	UpdatedBy      string    `db:"updated_by" json:"updated_by"`
+	ID             uint64    `db:"id" json:"id"`
+	ProjectID      uint64    `db:"project_id" json:"project_id"`
+	Status         string    `db:"status" json:"status"`
+}
+
+func (q *Queries) MarkTaskRunCallbackReceived(ctx context.Context, arg MarkTaskRunCallbackReceivedParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunCallbackReceived,
+		arg.LastCallbackAt,
+		arg.ResultCount,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status,
+	)
+}
+
 const markTaskRunCancelled = `-- name: MarkTaskRunCancelled :execresult
 UPDATE task_run
 SET status = ?,
@@ -587,6 +742,73 @@ func (q *Queries) MarkTaskRunCancelled(ctx context.Context, arg MarkTaskRunCance
 		arg.Progress,
 		arg.ErrorSummary,
 		arg.FinishedAt,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status_2,
+	)
+}
+
+const markTaskRunDispatchFailed = `-- name: MarkTaskRunDispatchFailed :execresult
+UPDATE task_run
+SET status = ?,
+    progress = 0,
+    error_summary = ?,
+    finished_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunDispatchFailedParams struct {
+	Status       string    `db:"status" json:"status"`
+	ErrorSummary string    `db:"error_summary" json:"error_summary"`
+	FinishedAt   time.Time `db:"finished_at" json:"finished_at"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	ID           uint64    `db:"id" json:"id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	Status_2     string    `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) MarkTaskRunDispatchFailed(ctx context.Context, arg MarkTaskRunDispatchFailedParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunDispatchFailed,
+		arg.Status,
+		arg.ErrorSummary,
+		arg.FinishedAt,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+		arg.Status_2,
+	)
+}
+
+const markTaskRunDispatched = `-- name: MarkTaskRunDispatched :execresult
+UPDATE task_run
+SET status = ?,
+    progress = 0,
+    engine_job_id = ?,
+    dispatched_at = ?,
+    started_at = ?,
+    updated_by = ?
+WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkTaskRunDispatchedParams struct {
+	Status       string    `db:"status" json:"status"`
+	EngineJobID  string    `db:"engine_job_id" json:"engine_job_id"`
+	DispatchedAt time.Time `db:"dispatched_at" json:"dispatched_at"`
+	StartedAt    time.Time `db:"started_at" json:"started_at"`
+	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
+	ID           uint64    `db:"id" json:"id"`
+	ProjectID    uint64    `db:"project_id" json:"project_id"`
+	Status_2     string    `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) MarkTaskRunDispatched(ctx context.Context, arg MarkTaskRunDispatchedParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markTaskRunDispatched,
+		arg.Status,
+		arg.EngineJobID,
+		arg.DispatchedAt,
+		arg.StartedAt,
 		arg.UpdatedBy,
 		arg.ID,
 		arg.ProjectID,

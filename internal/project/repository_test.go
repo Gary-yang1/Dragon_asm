@@ -94,3 +94,27 @@ func TestRepoIsMember(t *testing.T) {
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestWorkspaceRepoMemberListBindsActorTenant(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("AND p.tenant_id = ?")).
+		WithArgs("7", "tenant-a", int32(20), int32(0)).
+		WillReturnRows(sqlmock.NewRows(projectCols).
+			AddRow(uint64(1), "tenant-a", "org-a", "alpha", "Alpha", "7", "security", "high",
+				"active", nil, now, now, "7", "7", time.Time{}))
+	mock.ExpectQuery(regexp.QuoteMeta("AND p.tenant_id = ?")).
+		WithArgs("7", "tenant-a").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(1)))
+
+	repo := project.NewRepository(dbgen.New(sqlDB))
+	items, total, err := repo.ListForMember(context.Background(), "tenant-a", "7", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, "tenant-a", items[0].TenantID)
+	assert.Equal(t, int64(1), total)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

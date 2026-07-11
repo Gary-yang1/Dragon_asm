@@ -1,3 +1,5 @@
+//revive:disable:exported
+
 package discovery
 
 import (
@@ -12,30 +14,32 @@ import (
 )
 
 var (
-	ErrInvalidProjectID    = errors.New("discovery: invalid project id")
-	ErrInvalidName         = errors.New("discovery: invalid name")
-	ErrInvalidActorID      = errors.New("discovery: invalid actor id")
-	ErrInvalidAuthorizedBy = errors.New("discovery: invalid authorized_by")
-	ErrInvalidStatus       = errors.New("discovery: invalid status")
-	ErrInvalidTaskType     = errors.New("discovery: invalid task type")
-	ErrInvalidTaskStatus   = errors.New("discovery: invalid task status")
-	ErrInvalidTemplate     = errors.New("discovery: invalid task template")
-	ErrInvalidTaskSchedule = errors.New("discovery: invalid task schedule")
-	ErrInvalidTaskLimits   = errors.New("discovery: invalid task limits")
-	ErrInvalidTaskConfig   = errors.New("discovery: invalid task config")
-	ErrInvalidTemplateID   = errors.New("discovery: invalid template id")
-	ErrInvalidTaskRunID    = errors.New("discovery: invalid run id")
-	ErrTemplateDisabled    = errors.New("discovery: template disabled")
-	ErrInvalidTargetType   = errors.New("discovery: invalid target type")
-	ErrInvalidMatchMode    = errors.New("discovery: invalid match mode")
-	ErrInvalidScopeID      = errors.New("discovery: invalid scope id")
-	ErrInvalidTarget       = errors.New("discovery: invalid target")
-	ErrTargetTooLong       = errors.New("discovery: target too long")
-	ErrMetadataTooLong     = errors.New("discovery: metadata field too long")
-	ErrInvalidTimeRange    = errors.New("discovery: invalid scope window")
-	ErrDangerousTarget     = errors.New("discovery: dangerous target")
-	ErrDuplicateTargets    = errors.New("discovery: duplicate target")
-	ErrInvalidHost         = errors.New("discovery: invalid host")
+	ErrInvalidProjectID       = errors.New("discovery: invalid project id")
+	ErrInvalidName            = errors.New("discovery: invalid name")
+	ErrInvalidActorID         = errors.New("discovery: invalid actor id")
+	ErrInvalidAuthorizedBy    = errors.New("discovery: invalid authorized_by")
+	ErrInvalidStatus          = errors.New("discovery: invalid status")
+	ErrInvalidTaskType        = errors.New("discovery: invalid task type")
+	ErrInvalidTaskStatus      = errors.New("discovery: invalid task status")
+	ErrInvalidTemplate        = errors.New("discovery: invalid task template")
+	ErrInvalidTaskSchedule    = errors.New("discovery: invalid task schedule")
+	ErrInvalidTaskLimits      = errors.New("discovery: invalid task limits")
+	ErrInvalidTaskConfig      = errors.New("discovery: invalid task config")
+	ErrInvalidTemplateID      = errors.New("discovery: invalid template id")
+	ErrInvalidTaskRunID       = errors.New("discovery: invalid run id")
+	ErrTemplateDisabled       = errors.New("discovery: template disabled")
+	ErrTaskRunNotDispatchable = errors.New("discovery: task run not dispatchable")
+	ErrDispatchTargetDenied   = errors.New("discovery: dispatch target denied")
+	ErrInvalidTargetType      = errors.New("discovery: invalid target type")
+	ErrInvalidMatchMode       = errors.New("discovery: invalid match mode")
+	ErrInvalidScopeID         = errors.New("discovery: invalid scope id")
+	ErrInvalidTarget          = errors.New("discovery: invalid target")
+	ErrTargetTooLong          = errors.New("discovery: target too long")
+	ErrMetadataTooLong        = errors.New("discovery: metadata field too long")
+	ErrInvalidTimeRange       = errors.New("discovery: invalid scope window")
+	ErrDangerousTarget        = errors.New("discovery: dangerous target")
+	ErrDuplicateTargets       = errors.New("discovery: duplicate target")
+	ErrInvalidHost            = errors.New("discovery: invalid host")
 )
 
 const (
@@ -177,6 +181,65 @@ func normalizeTemplateConfig(raw string) (string, error) {
 func validateTemplateConfig(raw string) error {
 	_, err := normalizeTemplateConfig(raw)
 	return err
+}
+
+type dispatchConfig struct {
+	Targets []DispatchTarget
+	Options map[string]any
+}
+
+type rawDispatchConfig struct {
+	Targets []struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	} `json:"targets"`
+	Options map[string]any `json:"options"`
+}
+
+func parseDispatchConfig(raw string) (dispatchConfig, error) {
+	config, err := normalizeTemplateConfig(raw)
+	if err != nil {
+		return dispatchConfig{}, err
+	}
+
+	var parsed rawDispatchConfig
+	if err := json.Unmarshal([]byte(config), &parsed); err != nil {
+		return dispatchConfig{}, ErrInvalidTaskConfig
+	}
+	if len(parsed.Targets) == 0 {
+		return dispatchConfig{}, ErrInvalidTaskConfig
+	}
+
+	out := dispatchConfig{
+		Targets: make([]DispatchTarget, 0, len(parsed.Targets)),
+		Options: parsed.Options,
+	}
+	for _, target := range parsed.Targets {
+		targetType, err := validateTargetType(target.Type)
+		if err != nil {
+			return dispatchConfig{}, err
+		}
+		value, err := normalizeTargetValue(targetType, target.Value)
+		if err != nil {
+			return dispatchConfig{}, err
+		}
+		out.Targets = append(out.Targets, DispatchTarget{
+			Type:  targetType,
+			Value: value,
+		})
+	}
+	if out.Options == nil {
+		out.Options = map[string]any{}
+	}
+	return out, nil
+}
+
+func validateTargetType(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if !validTargetTypes[v] {
+		return "", ErrInvalidTargetType
+	}
+	return v, nil
 }
 
 func validateTemplateSchedule(raw string) error {

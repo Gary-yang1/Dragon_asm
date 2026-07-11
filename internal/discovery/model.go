@@ -1,3 +1,5 @@
+//revive:disable:exported
+
 package discovery
 
 import "time"
@@ -51,10 +53,33 @@ const (
 	ActionRunCreate          = "discovery.run.create"
 	ActionRunStatusChange    = "discovery.run.status_change"
 	ActionRunCancel          = "discovery.run.cancel"
+	ActionCallbackReject     = "discovery.callback.reject"
 	ResourceTypeScope        = "scope"
 	ResourceTypeTaskTemplate = "task_template"
 	ResourceTypeTaskRun      = "task_run"
+	ResourceTypeCallback     = "discovery_callback"
 )
+
+// DispatchTarget is a normalized target that has passed local format checks.
+type DispatchTarget struct {
+	Type  string
+	Value string
+}
+
+// DispatchPlan is the safe, pre-authorized plan consumed by the future engine adapter.
+type DispatchPlan struct {
+	RunID          uint64
+	TemplateID     uint64
+	ProjectID      uint64
+	ScopeID        uint64
+	TaskType       string
+	Targets        []DispatchTarget
+	RateLimit      int
+	Concurrency    int
+	TimeoutSeconds int
+	RetryLimit     int
+	Options        map[string]any
+}
 
 // Scope contains the authorization window for discovery operations.
 type Scope struct {
@@ -290,6 +315,45 @@ type IncrementTaskRunAttemptInput struct {
 	ProjectID uint64
 	ActorID   string
 	Meta      AuditMeta
+}
+
+// Engine callback phases accepted by the callback receiver.
+const (
+	CallbackPhaseStarted   = "started"
+	CallbackPhaseProgress  = "progress"
+	CallbackPhaseCompleted = "completed"
+	CallbackPhaseFailed    = "failed"
+)
+
+// DiscoveryCallback records one idempotent callback batch from the engine.
+type DiscoveryCallback struct {
+	TenantID     string
+	OrgID        string
+	ProjectID    uint64
+	RunID        uint64
+	Seq          uint64
+	Phase        string
+	Status       string
+	PayloadHash  string
+	ResultCount  uint64
+	ErrorSummary string
+	ReceivedAt   time.Time
+}
+
+// HandleCallbackInput is the verified callback processing input.
+type HandleCallbackInput struct {
+	ProjectID uint64
+	RunID     uint64
+	Seq       uint64
+	Timestamp string
+	Signature string
+	RawBody   []byte
+	Secret    string
+}
+
+// HandleCallbackResult reports whether the callback was new or already seen.
+type HandleCallbackResult struct {
+	Duplicate bool
 }
 
 // AuditMeta carries request-scope metadata for audit payloads.

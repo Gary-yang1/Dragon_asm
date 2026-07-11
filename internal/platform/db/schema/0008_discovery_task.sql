@@ -61,6 +61,7 @@ CREATE TABLE task_run (
     updated_by         VARCHAR(64)   NOT NULL DEFAULT '',
     deleted_at         DATETIME(3)   NOT NULL DEFAULT '1970-01-01 00:00:00.000',
     PRIMARY KEY (id),
+    UNIQUE KEY uk_task_run_project_id (project_id, id),
     KEY idx_task_run_project (project_id, status, deleted_at),
     KEY idx_task_run_scope (project_id, scope_id),
     CONSTRAINT fk_task_run_template_project FOREIGN KEY (project_id, template_id) REFERENCES task_template (project_id, id) ON DELETE CASCADE,

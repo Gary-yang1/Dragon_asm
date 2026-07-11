@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -54,6 +55,18 @@ func newEnforcer(t *testing.T) *casbin.Enforcer {
 	return e
 }
 
+type authRepoResolver struct {
+	byID map[uint64]*auth.User
+}
+
+func (r *authRepoResolver) GetByID(_ context.Context, id uint64) (*auth.User, error) {
+	user, ok := r.byID[id]
+	if !ok {
+		return nil, auth.ErrUserNotFound
+	}
+	return user, nil
+}
+
 // newEngine wires a public /healthz and a protected asset route that requires
 // asset:read, mirroring how a real handler chain composes the middleware.
 func newEngine(t *testing.T, m *auth.JWTManager, e *casbin.Enforcer) *gin.Engine {
@@ -76,6 +89,44 @@ func newEngine(t *testing.T, m *auth.JWTManager, e *casbin.Enforcer) *gin.Engine
 		},
 	)
 	return engine
+}
+
+func newEngineWithResolver(t *testing.T, m *auth.JWTManager, e *casbin.Enforcer, resolver *authRepoResolver) *gin.Engine {
+	t.Helper()
+	engine := httpx.NewEngine(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
+	engine.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	engine.GET("/api/v1/projects/:project_id/assets",
+		auth.RequireAuth(m, resolver),
+		auth.RequirePasswordChanged(),
+		auth.ProjectIDFromParam("project_id"),
+		auth.RequirePermission(e, asmcasbin.PermAssetRead),
+		func(c *gin.Context) {
+			httpx.OK(c, gin.H{
+				"user_id":    c.GetString(auth.CtxUserID),
+				"project_id": c.GetString(auth.CtxProjectID),
+			})
+		},
+	)
+	return engine
+}
+
+func TestProtectedRouteRejectsTemporaryPasswordSession(t *testing.T) {
+	m := testManager(t)
+	resolver := &authRepoResolver{
+		byID: map[uint64]*auth.User{
+			1: {ID: 1, Status: auth.UserStatusActive, AuthVersion: 1, MustChangePassword: true},
+		},
+	}
+	engine := newEngineWithResolver(t, m, newEnforcer(t), resolver)
+	token, err := m.IssueAccessToken("1", 1)
+	require.NoError(t, err)
+
+	w := doRequest(t, engine, "/api/v1/projects/p1/assets", "Bearer "+token)
+	assertErrorEnvelope(t, w, http.StatusForbidden, auth.ErrCodePasswordRequired)
 }
 
 func doRequest(t *testing.T, engine *gin.Engine, target, authHeader string) *httptest.ResponseRecorder {
@@ -144,7 +195,7 @@ func TestProtectedExpiredToken(t *testing.T) {
 		AccessTTL:     -1 * time.Second,
 	})
 	require.NoError(t, err)
-	tok, err := expiring.IssueAccessToken("alice")
+	tok, err := expiring.IssueAccessToken("alice", 1)
 	require.NoError(t, err)
 
 	// Engine uses a manager with the same access secret, so the signature is
@@ -158,7 +209,7 @@ func TestProtectedExpiredToken(t *testing.T) {
 func TestProtectedValidButNoPermission(t *testing.T) {
 	m := testManager(t)
 	engine := newEngine(t, m, newEnforcer(t))
-	tok, err := m.IssueAccessToken("carol") // carol has no role at all
+	tok, err := m.IssueAccessToken("carol", 1) // carol has no role at all
 	require.NoError(t, err)
 
 	w := doRequest(t, engine, "/api/v1/projects/p1/assets", "Bearer "+tok)
@@ -169,7 +220,7 @@ func TestProtectedValidButNoPermission(t *testing.T) {
 func TestProtectedValidWithPermission(t *testing.T) {
 	m := testManager(t)
 	engine := newEngine(t, m, newEnforcer(t))
-	tok, err := m.IssueAccessToken("alice") // alice has asset:read in p1
+	tok, err := m.IssueAccessToken("alice", 1) // alice has asset:read in p1
 	require.NoError(t, err)
 
 	w := doRequest(t, engine, "/api/v1/projects/p1/assets", "Bearer "+tok)
@@ -193,7 +244,7 @@ func TestProtectedValidWithPermission(t *testing.T) {
 func TestProjectIsolationThroughMiddleware(t *testing.T) {
 	m := testManager(t)
 	engine := newEngine(t, m, newEnforcer(t))
-	tok, err := m.IssueAccessToken("alice") // asset:read in p1 ONLY
+	tok, err := m.IssueAccessToken("alice", 1) // asset:read in p1 ONLY
 	require.NoError(t, err)
 
 	w := doRequest(t, engine, "/api/v1/projects/p1/assets", "Bearer "+tok)
@@ -207,7 +258,7 @@ func TestProjectIsolationThroughMiddleware(t *testing.T) {
 func TestGlobalRoleCrossesProjects(t *testing.T) {
 	m := testManager(t)
 	engine := newEngine(t, m, newEnforcer(t))
-	tok, err := m.IssueAccessToken("bob") // global system_admin
+	tok, err := m.IssueAccessToken("bob", 1) // global system_admin
 	require.NoError(t, err)
 
 	w := doRequest(t, engine, "/api/v1/projects/p2/assets", "Bearer "+tok)
@@ -235,5 +286,27 @@ func TestProtectedTokenWithEmptyUserIDRejected(t *testing.T) {
 
 	engine := newEngine(t, m, newEnforcer(t))
 	w := doRequest(t, engine, "/api/v1/projects/p1/assets", "Bearer "+tok)
+	assertErrorEnvelope(t, w, http.StatusUnauthorized, httpx.ErrCodeUnauthorized)
+}
+
+// Acceptance: stale auth_version in a token fails fast before permission checks when
+// a user resolver is wired in.
+func TestProtectedTokenWithAuthVersionMismatchRejected(t *testing.T) {
+	m := testManager(t)
+	resolver := &authRepoResolver{
+		byID: map[uint64]*auth.User{
+			1: {
+				ID:          1,
+				Status:      auth.UserStatusActive,
+				AuthVersion: 1,
+			},
+		},
+	}
+	engine := newEngineWithResolver(t, m, newEnforcer(t), resolver)
+
+	stale, err := m.IssueAccessToken("1", 2)
+	require.NoError(t, err)
+
+	w := doRequest(t, engine, "/api/v1/projects/p1/assets", "Bearer "+stale)
 	assertErrorEnvelope(t, w, http.StatusUnauthorized, httpx.ErrCodeUnauthorized)
 }

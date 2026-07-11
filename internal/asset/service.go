@@ -465,7 +465,7 @@ func (s *Service) ImportBatch(ctx context.Context, in ImportBatchInput, meta Aud
 	}
 
 	report := ImportBatchReport{Total: int64(len(in.Rows)), Rows: make([]ImportRowResult, 0, len(in.Rows))}
-	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, _ RelationRepository, sink auditRecorder) error {
+	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, relRepo RelationRepository, sink auditRecorder) error {
 		for i, row := range in.Rows {
 			row.ProjectID = in.ProjectID
 			row.TenantID = in.TenantID
@@ -481,6 +481,23 @@ func (s *Service) ImportBatch(ctx context.Context, in ImportBatchInput, meta Aud
 					Error:  err.Error(),
 				})
 				continue
+			}
+			if a.AssetType == TypeSubdomain && relRepo != nil {
+				if resolver, ok := repo.(RootDomainResolver); ok {
+					rootID, resolveErr := resolver.FindRootDomainAssetID(ctx, in.ProjectID, a.Value)
+					switch {
+					case resolveErr == nil:
+						if err := relRepo.Upsert(ctx, UpsertRelationParams{
+							TenantID: in.TenantID, OrgID: in.OrgID, ProjectID: in.ProjectID,
+							FromAssetID: rootID, ToAssetID: a.ID, RelationType: RelationContains,
+							Source: "project_profile", Confidence: MaxRelationConfidence, ActorID: in.ActorID,
+						}); err != nil {
+							return err
+						}
+					case !errors.Is(resolveErr, ErrNotFound):
+						return resolveErr
+					}
+				}
 			}
 			report.Success++
 			report.Rows = append(report.Rows, ImportRowResult{

@@ -17,6 +17,7 @@ package casbin
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/casbin/casbin/v2"
 )
@@ -45,8 +46,11 @@ import (
 // not by the matrix.
 var mvpRolePerms = map[string][]string{
 	RoleSystemAdmin: {
+		PermUserRead, PermUserWrite, PermUserCredentialReset, PermUserRoleWrite,
 		PermProjectAccess,
+		PermProjectRead, PermProjectCreate, PermProjectWrite, PermProjectArchive, PermProjectMemberWrite,
 		PermAssetRead, PermAssetWrite, PermAssetDelete,
+		PermExposureRead,
 		PermScopeRead, PermScopeWrite,
 		PermDiscoveryRead, PermDiscoveryRun,
 		PermRiskRead, PermRiskWrite, PermRiskAccept, PermRiskSuppress,
@@ -56,7 +60,9 @@ var mvpRolePerms = map[string][]string{
 	},
 	RoleSecurityAdmin: {
 		PermProjectAccess,
+		PermProjectRead, PermProjectCreate, PermProjectWrite, PermProjectArchive, PermProjectMemberWrite,
 		PermAssetRead, PermAssetWrite, PermAssetDelete,
+		PermExposureRead,
 		PermScopeRead, PermScopeWrite,
 		PermDiscoveryRead, PermDiscoveryRun,
 		PermRiskRead, PermRiskWrite, PermRiskAccept, PermRiskSuppress,
@@ -65,7 +71,9 @@ var mvpRolePerms = map[string][]string{
 		PermNotifWrite, PermAuditRead,
 	},
 	RoleProjectOwner: {
+		PermProjectRead, PermProjectWrite, PermProjectMemberWrite,
 		PermAssetRead, PermAssetWrite, PermAssetDelete,
+		PermExposureRead,
 		PermScopeRead, PermScopeWrite,
 		PermDiscoveryRead, PermDiscoveryRun,
 		PermRiskRead, PermRiskWrite, PermRiskAccept,
@@ -73,7 +81,9 @@ var mvpRolePerms = map[string][]string{
 		PermReportRead,
 	},
 	RoleSecurityOps: {
+		PermProjectRead,
 		PermAssetRead, PermAssetWrite,
+		PermExposureRead,
 		PermScopeRead,
 		PermDiscoveryRead, PermDiscoveryRun,
 		PermRiskRead, PermRiskWrite,
@@ -81,14 +91,18 @@ var mvpRolePerms = map[string][]string{
 		PermReportRead,
 	},
 	RoleDeveloper: {
+		PermProjectRead,
 		PermAssetRead,
+		PermExposureRead,
 		PermDiscoveryRead,
 		PermRiskRead,
 		PermTicketRead, PermTicketWrite,
 		PermReportRead,
 	},
 	RoleViewer: {
+		PermProjectRead,
 		PermAssetRead,
+		PermExposureRead,
 		PermDiscoveryRead,
 		PermRiskRead,
 		PermTicketRead,
@@ -136,4 +150,11 @@ func RoleHasPerm(role, perm string) bool {
 		}
 	}
 	return false
+}
+
+// PermissionsForRole returns a sorted copy of the fixed MVP permissions for role.
+func PermissionsForRole(role string) []string {
+	perms := append([]string(nil), mvpRolePerms[role]...)
+	sort.Strings(perms)
+	return perms
 }

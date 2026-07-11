@@ -7,7 +7,362 @@ package dbgen
 
 import (
 	"context"
+	"database/sql"
+	"time"
 )
+
+const clearICPFilingDomains = `-- name: ClearICPFilingDomains :exec
+UPDATE icp_filing_domain
+SET deleted_at = CURRENT_TIMESTAMP(3), updated_by = ?
+WHERE project_id = ? AND filing_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type ClearICPFilingDomainsParams struct {
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	FilingID  uint64 `db:"filing_id" json:"filing_id"`
+}
+
+func (q *Queries) ClearICPFilingDomains(ctx context.Context, arg ClearICPFilingDomainsParams) error {
+	_, err := q.db.ExecContext(ctx, clearICPFilingDomains, arg.UpdatedBy, arg.ProjectID, arg.FilingID)
+	return err
+}
+
+const clearPrimaryProjectDomains = `-- name: ClearPrimaryProjectDomains :exec
+UPDATE project_domain_profile SET is_primary = FALSE, updated_by = ?
+WHERE project_id = ? AND is_primary = TRUE AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type ClearPrimaryProjectDomainsParams struct {
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) ClearPrimaryProjectDomains(ctx context.Context, arg ClearPrimaryProjectDomainsParams) error {
+	_, err := q.db.ExecContext(ctx, clearPrimaryProjectDomains, arg.UpdatedBy, arg.ProjectID)
+	return err
+}
+
+const clearPrimaryProjectSubjects = `-- name: ClearPrimaryProjectSubjects :exec
+UPDATE project_subject SET is_primary = FALSE, updated_by = ?
+WHERE project_id = ? AND is_primary = TRUE AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type ClearPrimaryProjectSubjectsParams struct {
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) ClearPrimaryProjectSubjects(ctx context.Context, arg ClearPrimaryProjectSubjectsParams) error {
+	_, err := q.db.ExecContext(ctx, clearPrimaryProjectSubjects, arg.UpdatedBy, arg.ProjectID)
+	return err
+}
+
+const countProjectsByTenant = `-- name: CountProjectsByTenant :one
+SELECT COUNT(*) FROM project
+WHERE tenant_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+func (q *Queries) CountProjectsByTenant(ctx context.Context, tenantID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countProjectsByTenant, tenantID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countProjectsForMember = `-- name: CountProjectsForMember :one
+SELECT COUNT(*) FROM project p
+INNER JOIN project_member pm ON pm.project_id = p.id
+WHERE pm.user_id = ?
+  AND p.tenant_id = ?
+  AND pm.deleted_at = '1970-01-01 00:00:00.000'
+  AND p.deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type CountProjectsForMemberParams struct {
+	UserID   string `db:"user_id" json:"user_id"`
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+}
+
+func (q *Queries) CountProjectsForMember(ctx context.Context, arg CountProjectsForMemberParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countProjectsForMember, arg.UserID, arg.TenantID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createICPFilingDomain = `-- name: CreateICPFilingDomain :execresult
+INSERT INTO icp_filing_domain (
+    tenant_id, org_id, project_id, filing_id, domain_profile_id, created_by, updated_by
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+`
+
+type CreateICPFilingDomainParams struct {
+	TenantID        string `db:"tenant_id" json:"tenant_id"`
+	OrgID           string `db:"org_id" json:"org_id"`
+	ProjectID       uint64 `db:"project_id" json:"project_id"`
+	FilingID        uint64 `db:"filing_id" json:"filing_id"`
+	DomainProfileID uint64 `db:"domain_profile_id" json:"domain_profile_id"`
+	CreatedBy       string `db:"created_by" json:"created_by"`
+	UpdatedBy       string `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) CreateICPFilingDomain(ctx context.Context, arg CreateICPFilingDomainParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createICPFilingDomain,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.FilingID,
+		arg.DomainProfileID,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
+const createICPFilings = `-- name: CreateICPFilings :execresult
+INSERT INTO icp_filing (
+    tenant_id, org_id, project_id, subject_id, filing_no, filing_type,
+    website_name, status, approved_at, source, verified_at, evidence_summary,
+    created_by, updated_by
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type CreateICPFilingsParams struct {
+	TenantID        string       `db:"tenant_id" json:"tenant_id"`
+	OrgID           string       `db:"org_id" json:"org_id"`
+	ProjectID       uint64       `db:"project_id" json:"project_id"`
+	SubjectID       uint64       `db:"subject_id" json:"subject_id"`
+	FilingNo        string       `db:"filing_no" json:"filing_no"`
+	FilingType      string       `db:"filing_type" json:"filing_type"`
+	WebsiteName     string       `db:"website_name" json:"website_name"`
+	Status          string       `db:"status" json:"status"`
+	ApprovedAt      sql.NullTime `db:"approved_at" json:"approved_at"`
+	Source          string       `db:"source" json:"source"`
+	VerifiedAt      sql.NullTime `db:"verified_at" json:"verified_at"`
+	EvidenceSummary string       `db:"evidence_summary" json:"evidence_summary"`
+	CreatedBy       string       `db:"created_by" json:"created_by"`
+	UpdatedBy       string       `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) CreateICPFilings(ctx context.Context, arg CreateICPFilingsParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createICPFilings,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.SubjectID,
+		arg.FilingNo,
+		arg.FilingType,
+		arg.WebsiteName,
+		arg.Status,
+		arg.ApprovedAt,
+		arg.Source,
+		arg.VerifiedAt,
+		arg.EvidenceSummary,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
+const createProject = `-- name: CreateProject :execresult
+INSERT INTO project (
+    tenant_id, org_id, project_code, name, owner, business_unit,
+    criticality, status, description, created_by, updated_by
+) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+`
+
+type CreateProjectParams struct {
+	TenantID     string         `db:"tenant_id" json:"tenant_id"`
+	OrgID        string         `db:"org_id" json:"org_id"`
+	ProjectCode  string         `db:"project_code" json:"project_code"`
+	Name         string         `db:"name" json:"name"`
+	Owner        string         `db:"owner" json:"owner"`
+	BusinessUnit string         `db:"business_unit" json:"business_unit"`
+	Criticality  string         `db:"criticality" json:"criticality"`
+	Description  sql.NullString `db:"description" json:"description"`
+	CreatedBy    string         `db:"created_by" json:"created_by"`
+	UpdatedBy    string         `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createProject,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectCode,
+		arg.Name,
+		arg.Owner,
+		arg.BusinessUnit,
+		arg.Criticality,
+		arg.Description,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
+const createProjectDomainProfile = `-- name: CreateProjectDomainProfile :execresult
+INSERT INTO project_domain_profile (
+    tenant_id, org_id, project_id, asset_id, subject_id, is_primary,
+    ownership_status, source, evidence_summary, created_by, updated_by
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+    subject_id = VALUES(subject_id), is_primary = VALUES(is_primary),
+    ownership_status = VALUES(ownership_status), source = VALUES(source),
+    evidence_summary = VALUES(evidence_summary), updated_by = VALUES(updated_by)
+`
+
+type CreateProjectDomainProfileParams struct {
+	TenantID        string        `db:"tenant_id" json:"tenant_id"`
+	OrgID           string        `db:"org_id" json:"org_id"`
+	ProjectID       uint64        `db:"project_id" json:"project_id"`
+	AssetID         uint64        `db:"asset_id" json:"asset_id"`
+	SubjectID       sql.NullInt64 `db:"subject_id" json:"subject_id"`
+	IsPrimary       bool          `db:"is_primary" json:"is_primary"`
+	OwnershipStatus string        `db:"ownership_status" json:"ownership_status"`
+	Source          string        `db:"source" json:"source"`
+	EvidenceSummary string        `db:"evidence_summary" json:"evidence_summary"`
+	CreatedBy       string        `db:"created_by" json:"created_by"`
+	UpdatedBy       string        `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) CreateProjectDomainProfile(ctx context.Context, arg CreateProjectDomainProfileParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createProjectDomainProfile,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.AssetID,
+		arg.SubjectID,
+		arg.IsPrimary,
+		arg.OwnershipStatus,
+		arg.Source,
+		arg.EvidenceSummary,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
+const createProjectMember = `-- name: CreateProjectMember :execresult
+INSERT INTO project_member (project_id, user_id, role, created_by, updated_by)
+VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE role = VALUES(role), updated_by = VALUES(updated_by)
+`
+
+type CreateProjectMemberParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	UserID    string `db:"user_id" json:"user_id"`
+	Role      string `db:"role" json:"role"`
+	CreatedBy string `db:"created_by" json:"created_by"`
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) CreateProjectMember(ctx context.Context, arg CreateProjectMemberParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createProjectMember,
+		arg.ProjectID,
+		arg.UserID,
+		arg.Role,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
+const createProjectSubject = `-- name: CreateProjectSubject :execresult
+INSERT INTO project_subject (
+    tenant_id, org_id, project_id, subject_key, subject_name, subject_type,
+    registration_code, country_code, region, is_primary, verification_status,
+    source, verified_at, evidence_summary, created_by, updated_by
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type CreateProjectSubjectParams struct {
+	TenantID           string       `db:"tenant_id" json:"tenant_id"`
+	OrgID              string       `db:"org_id" json:"org_id"`
+	ProjectID          uint64       `db:"project_id" json:"project_id"`
+	SubjectKey         string       `db:"subject_key" json:"subject_key"`
+	SubjectName        string       `db:"subject_name" json:"subject_name"`
+	SubjectType        string       `db:"subject_type" json:"subject_type"`
+	RegistrationCode   string       `db:"registration_code" json:"registration_code"`
+	CountryCode        string       `db:"country_code" json:"country_code"`
+	Region             string       `db:"region" json:"region"`
+	IsPrimary          bool         `db:"is_primary" json:"is_primary"`
+	VerificationStatus string       `db:"verification_status" json:"verification_status"`
+	Source             string       `db:"source" json:"source"`
+	VerifiedAt         sql.NullTime `db:"verified_at" json:"verified_at"`
+	EvidenceSummary    string       `db:"evidence_summary" json:"evidence_summary"`
+	CreatedBy          string       `db:"created_by" json:"created_by"`
+	UpdatedBy          string       `db:"updated_by" json:"updated_by"`
+}
+
+func (q *Queries) CreateProjectSubject(ctx context.Context, arg CreateProjectSubjectParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, createProjectSubject,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.SubjectKey,
+		arg.SubjectName,
+		arg.SubjectType,
+		arg.RegistrationCode,
+		arg.CountryCode,
+		arg.Region,
+		arg.IsPrimary,
+		arg.VerificationStatus,
+		arg.Source,
+		arg.VerifiedAt,
+		arg.EvidenceSummary,
+		arg.CreatedBy,
+		arg.UpdatedBy,
+	)
+}
+
+const getICPFiling = `-- name: GetICPFiling :one
+SELECT id, tenant_id, org_id, project_id, subject_id, filing_no, filing_type, website_name, status, approved_at, source, verified_at, evidence_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM icp_filing
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetICPFilingParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) GetICPFiling(ctx context.Context, arg GetICPFilingParams) (IcpFiling, error) {
+	row := q.db.QueryRowContext(ctx, getICPFiling, arg.ID, arg.ProjectID)
+	var i IcpFiling
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.SubjectID,
+		&i.FilingNo,
+		&i.FilingType,
+		&i.WebsiteName,
+		&i.Status,
+		&i.ApprovedAt,
+		&i.Source,
+		&i.VerifiedAt,
+		&i.EvidenceSummary,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedBy,
+		&i.UpdatedBy,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getProjectActorScope = `-- name: GetProjectActorScope :one
+SELECT tenant_id, org_id FROM app_user
+WHERE id = ? AND status = 'active' AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetProjectActorScopeRow struct {
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+	OrgID    string `db:"org_id" json:"org_id"`
+}
+
+func (q *Queries) GetProjectActorScope(ctx context.Context, id uint64) (GetProjectActorScopeRow, error) {
+	row := q.db.QueryRowContext(ctx, getProjectActorScope, id)
+	var i GetProjectActorScopeRow
+	err := row.Scan(&i.TenantID, &i.OrgID)
+	return i, err
+}
 
 const getProjectByCode = `-- name: GetProjectByCode :one
 SELECT id, tenant_id, org_id, project_code, name, owner, business_unit, criticality, status, description, created_at, updated_at, created_by, updated_by, deleted_at FROM project
@@ -74,6 +429,122 @@ func (q *Queries) GetProjectByID(ctx context.Context, id uint64) (Project, error
 	return i, err
 }
 
+const getProjectDomainProfile = `-- name: GetProjectDomainProfile :one
+SELECT pdp.id, pdp.tenant_id, pdp.org_id, pdp.project_id, pdp.asset_id, pdp.subject_id, pdp.is_primary, pdp.ownership_status, pdp.source, pdp.evidence_summary, pdp.created_at, pdp.updated_at, pdp.created_by, pdp.updated_by, pdp.deleted_at, pdp.primary_slot, a.value AS domain FROM project_domain_profile pdp
+INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id
+WHERE pdp.id = ? AND pdp.project_id = ?
+  AND pdp.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetProjectDomainProfileParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+type GetProjectDomainProfileRow struct {
+	ID              uint64        `db:"id" json:"id"`
+	TenantID        string        `db:"tenant_id" json:"tenant_id"`
+	OrgID           string        `db:"org_id" json:"org_id"`
+	ProjectID       uint64        `db:"project_id" json:"project_id"`
+	AssetID         uint64        `db:"asset_id" json:"asset_id"`
+	SubjectID       sql.NullInt64 `db:"subject_id" json:"subject_id"`
+	IsPrimary       bool          `db:"is_primary" json:"is_primary"`
+	OwnershipStatus string        `db:"ownership_status" json:"ownership_status"`
+	Source          string        `db:"source" json:"source"`
+	EvidenceSummary string        `db:"evidence_summary" json:"evidence_summary"`
+	CreatedAt       time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time     `db:"updated_at" json:"updated_at"`
+	CreatedBy       string        `db:"created_by" json:"created_by"`
+	UpdatedBy       string        `db:"updated_by" json:"updated_by"`
+	DeletedAt       time.Time     `db:"deleted_at" json:"deleted_at"`
+	PrimarySlot     sql.NullInt16 `db:"primary_slot" json:"primary_slot"`
+	Domain          string        `db:"domain" json:"domain"`
+}
+
+func (q *Queries) GetProjectDomainProfile(ctx context.Context, arg GetProjectDomainProfileParams) (GetProjectDomainProfileRow, error) {
+	row := q.db.QueryRowContext(ctx, getProjectDomainProfile, arg.ID, arg.ProjectID)
+	var i GetProjectDomainProfileRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.AssetID,
+		&i.SubjectID,
+		&i.IsPrimary,
+		&i.OwnershipStatus,
+		&i.Source,
+		&i.EvidenceSummary,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedBy,
+		&i.UpdatedBy,
+		&i.DeletedAt,
+		&i.PrimarySlot,
+		&i.Domain,
+	)
+	return i, err
+}
+
+const getProjectDomainProfileByAsset = `-- name: GetProjectDomainProfileByAsset :one
+SELECT pdp.id, pdp.tenant_id, pdp.org_id, pdp.project_id, pdp.asset_id, pdp.subject_id, pdp.is_primary, pdp.ownership_status, pdp.source, pdp.evidence_summary, pdp.created_at, pdp.updated_at, pdp.created_by, pdp.updated_by, pdp.deleted_at, pdp.primary_slot, a.value AS domain FROM project_domain_profile pdp
+INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id
+WHERE pdp.project_id = ? AND pdp.asset_id = ?
+  AND pdp.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetProjectDomainProfileByAssetParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	AssetID   uint64 `db:"asset_id" json:"asset_id"`
+}
+
+type GetProjectDomainProfileByAssetRow struct {
+	ID              uint64        `db:"id" json:"id"`
+	TenantID        string        `db:"tenant_id" json:"tenant_id"`
+	OrgID           string        `db:"org_id" json:"org_id"`
+	ProjectID       uint64        `db:"project_id" json:"project_id"`
+	AssetID         uint64        `db:"asset_id" json:"asset_id"`
+	SubjectID       sql.NullInt64 `db:"subject_id" json:"subject_id"`
+	IsPrimary       bool          `db:"is_primary" json:"is_primary"`
+	OwnershipStatus string        `db:"ownership_status" json:"ownership_status"`
+	Source          string        `db:"source" json:"source"`
+	EvidenceSummary string        `db:"evidence_summary" json:"evidence_summary"`
+	CreatedAt       time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time     `db:"updated_at" json:"updated_at"`
+	CreatedBy       string        `db:"created_by" json:"created_by"`
+	UpdatedBy       string        `db:"updated_by" json:"updated_by"`
+	DeletedAt       time.Time     `db:"deleted_at" json:"deleted_at"`
+	PrimarySlot     sql.NullInt16 `db:"primary_slot" json:"primary_slot"`
+	Domain          string        `db:"domain" json:"domain"`
+}
+
+func (q *Queries) GetProjectDomainProfileByAsset(ctx context.Context, arg GetProjectDomainProfileByAssetParams) (GetProjectDomainProfileByAssetRow, error) {
+	row := q.db.QueryRowContext(ctx, getProjectDomainProfileByAsset, arg.ProjectID, arg.AssetID)
+	var i GetProjectDomainProfileByAssetRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.AssetID,
+		&i.SubjectID,
+		&i.IsPrimary,
+		&i.OwnershipStatus,
+		&i.Source,
+		&i.EvidenceSummary,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedBy,
+		&i.UpdatedBy,
+		&i.DeletedAt,
+		&i.PrimarySlot,
+		&i.Domain,
+	)
+	return i, err
+}
+
 const getProjectMemberRole = `-- name: GetProjectMemberRole :one
 SELECT role FROM project_member
 WHERE project_id = ? AND user_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
@@ -90,4 +561,842 @@ func (q *Queries) GetProjectMemberRole(ctx context.Context, arg GetProjectMember
 	var role string
 	err := row.Scan(&role)
 	return role, err
+}
+
+const getProjectOnboardingCounts = `-- name: GetProjectOnboardingCounts :one
+SELECT
+    (SELECT COUNT(*) FROM project_member pm
+      WHERE pm.project_id = ? AND pm.role = 'project_owner'
+        AND pm.deleted_at = '1970-01-01 00:00:00.000') AS owner_count,
+    (SELECT COUNT(*) FROM project_subject ps
+      WHERE ps.project_id = ? AND ps.is_primary = TRUE
+        AND ps.deleted_at = '1970-01-01 00:00:00.000') AS primary_subject_count,
+    (SELECT COUNT(*) FROM project_domain_profile pdp
+      WHERE pdp.project_id = ? AND pdp.is_primary = TRUE
+        AND pdp.deleted_at = '1970-01-01 00:00:00.000') AS primary_domain_count,
+    (SELECT COUNT(*) FROM scope s
+      WHERE s.project_id = ? AND s.status = 'active'
+        AND s.valid_from <= CURRENT_TIMESTAMP(3) AND s.valid_until > CURRENT_TIMESTAMP(3)
+        AND s.deleted_at = '1970-01-01 00:00:00.000'
+        AND EXISTS (SELECT 1 FROM scope_target st WHERE st.project_id = s.project_id
+            AND st.scope_id = s.id AND st.match_mode = 'include'
+            AND st.deleted_at = '1970-01-01 00:00:00.000')) AS valid_scope_count
+`
+
+type GetProjectOnboardingCountsParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+type GetProjectOnboardingCountsRow struct {
+	OwnerCount          int64 `db:"owner_count" json:"owner_count"`
+	PrimarySubjectCount int64 `db:"primary_subject_count" json:"primary_subject_count"`
+	PrimaryDomainCount  int64 `db:"primary_domain_count" json:"primary_domain_count"`
+	ValidScopeCount     int64 `db:"valid_scope_count" json:"valid_scope_count"`
+}
+
+func (q *Queries) GetProjectOnboardingCounts(ctx context.Context, arg GetProjectOnboardingCountsParams) (GetProjectOnboardingCountsRow, error) {
+	row := q.db.QueryRowContext(ctx, getProjectOnboardingCounts,
+		arg.ProjectID,
+		arg.ProjectID,
+		arg.ProjectID,
+		arg.ProjectID,
+	)
+	var i GetProjectOnboardingCountsRow
+	err := row.Scan(
+		&i.OwnerCount,
+		&i.PrimarySubjectCount,
+		&i.PrimaryDomainCount,
+		&i.ValidScopeCount,
+	)
+	return i, err
+}
+
+const getProjectSubject = `-- name: GetProjectSubject :one
+SELECT id, tenant_id, org_id, project_id, subject_key, subject_name, subject_type, registration_code, country_code, region, is_primary, verification_status, source, verified_at, evidence_summary, created_at, updated_at, created_by, updated_by, deleted_at, primary_slot FROM project_subject
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetProjectSubjectParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) GetProjectSubject(ctx context.Context, arg GetProjectSubjectParams) (ProjectSubject, error) {
+	row := q.db.QueryRowContext(ctx, getProjectSubject, arg.ID, arg.ProjectID)
+	var i ProjectSubject
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.SubjectKey,
+		&i.SubjectName,
+		&i.SubjectType,
+		&i.RegistrationCode,
+		&i.CountryCode,
+		&i.Region,
+		&i.IsPrimary,
+		&i.VerificationStatus,
+		&i.Source,
+		&i.VerifiedAt,
+		&i.EvidenceSummary,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedBy,
+		&i.UpdatedBy,
+		&i.DeletedAt,
+		&i.PrimarySlot,
+	)
+	return i, err
+}
+
+const getWorkspaceSummaryByTenant = `-- name: GetWorkspaceSummaryByTenant :one
+WITH visible_projects AS (
+    SELECT p.id, p.status
+    FROM project p
+    WHERE p.tenant_id = ?
+      AND p.deleted_at = '1970-01-01 00:00:00.000'
+)
+SELECT
+    (SELECT COUNT(*) FROM visible_projects) AS project_total,
+    (SELECT COUNT(*) FROM visible_projects WHERE status = 'active') AS project_active,
+    (SELECT COUNT(*) FROM visible_projects WHERE status = 'draft') AS project_draft,
+    (SELECT COUNT(*) FROM visible_projects WHERE status = 'suspended') AS project_suspended,
+    (SELECT COUNT(*) FROM asset a
+        INNER JOIN visible_projects vp ON vp.id = a.project_id
+        WHERE a.deleted_at = '1970-01-01 00:00:00.000') AS asset_total,
+    (SELECT COUNT(*) FROM risk r
+        INNER JOIN visible_projects vp ON vp.id = r.project_id
+        WHERE r.status NOT IN ('risk_accepted', 'false_positive', 'fixed')
+          AND r.deleted_at = '1970-01-01 00:00:00.000') AS risk_open,
+    (SELECT COUNT(*) FROM risk r
+        INNER JOIN visible_projects vp ON vp.id = r.project_id
+        WHERE r.status NOT IN ('risk_accepted', 'false_positive', 'fixed')
+          AND r.severity IN ('critical', 'high')
+          AND r.deleted_at = '1970-01-01 00:00:00.000') AS risk_critical_high,
+    (SELECT COUNT(*) FROM risk r
+        INNER JOIN visible_projects vp ON vp.id = r.project_id
+        WHERE r.status NOT IN ('risk_accepted', 'false_positive', 'fixed')
+          AND r.sla_due_at <> '1970-01-01 00:00:00.000'
+          AND r.sla_due_at < CURRENT_TIMESTAMP(3)
+          AND r.deleted_at = '1970-01-01 00:00:00.000') AS risk_overdue,
+    (SELECT COUNT(*) FROM ticket t
+        INNER JOIN visible_projects vp ON vp.id = t.project_id
+        WHERE t.status NOT IN ('closed', 'cancelled')
+          AND t.deleted_at = '1970-01-01 00:00:00.000') AS ticket_open,
+    (SELECT COUNT(*) FROM ticket t
+        INNER JOIN visible_projects vp ON vp.id = t.project_id
+        WHERE t.status NOT IN ('closed', 'cancelled')
+          AND t.due_at <> '1970-01-01 00:00:00.000'
+          AND t.due_at < CURRENT_TIMESTAMP(3)
+          AND t.deleted_at = '1970-01-01 00:00:00.000') AS ticket_overdue
+`
+
+type GetWorkspaceSummaryByTenantRow struct {
+	ProjectTotal     int64 `db:"project_total" json:"project_total"`
+	ProjectActive    int64 `db:"project_active" json:"project_active"`
+	ProjectDraft     int64 `db:"project_draft" json:"project_draft"`
+	ProjectSuspended int64 `db:"project_suspended" json:"project_suspended"`
+	AssetTotal       int64 `db:"asset_total" json:"asset_total"`
+	RiskOpen         int64 `db:"risk_open" json:"risk_open"`
+	RiskCriticalHigh int64 `db:"risk_critical_high" json:"risk_critical_high"`
+	RiskOverdue      int64 `db:"risk_overdue" json:"risk_overdue"`
+	TicketOpen       int64 `db:"ticket_open" json:"ticket_open"`
+	TicketOverdue    int64 `db:"ticket_overdue" json:"ticket_overdue"`
+}
+
+func (q *Queries) GetWorkspaceSummaryByTenant(ctx context.Context, tenantID string) (GetWorkspaceSummaryByTenantRow, error) {
+	row := q.db.QueryRowContext(ctx, getWorkspaceSummaryByTenant, tenantID)
+	var i GetWorkspaceSummaryByTenantRow
+	err := row.Scan(
+		&i.ProjectTotal,
+		&i.ProjectActive,
+		&i.ProjectDraft,
+		&i.ProjectSuspended,
+		&i.AssetTotal,
+		&i.RiskOpen,
+		&i.RiskCriticalHigh,
+		&i.RiskOverdue,
+		&i.TicketOpen,
+		&i.TicketOverdue,
+	)
+	return i, err
+}
+
+const getWorkspaceSummaryForMember = `-- name: GetWorkspaceSummaryForMember :one
+WITH visible_projects AS (
+    SELECT p.id, p.status
+    FROM project p
+    WHERE p.tenant_id = ?
+      AND p.deleted_at = '1970-01-01 00:00:00.000'
+      AND EXISTS (
+          SELECT 1
+          FROM project_member pm
+          WHERE pm.project_id = p.id
+            AND pm.user_id = ?
+            AND pm.deleted_at = '1970-01-01 00:00:00.000'
+      )
+)
+SELECT
+    (SELECT COUNT(*) FROM visible_projects) AS project_total,
+    (SELECT COUNT(*) FROM visible_projects WHERE status = 'active') AS project_active,
+    (SELECT COUNT(*) FROM visible_projects WHERE status = 'draft') AS project_draft,
+    (SELECT COUNT(*) FROM visible_projects WHERE status = 'suspended') AS project_suspended,
+    (SELECT COUNT(*) FROM asset a
+        INNER JOIN visible_projects vp ON vp.id = a.project_id
+        WHERE a.deleted_at = '1970-01-01 00:00:00.000') AS asset_total,
+    (SELECT COUNT(*) FROM risk r
+        INNER JOIN visible_projects vp ON vp.id = r.project_id
+        WHERE r.status NOT IN ('risk_accepted', 'false_positive', 'fixed')
+          AND r.deleted_at = '1970-01-01 00:00:00.000') AS risk_open,
+    (SELECT COUNT(*) FROM risk r
+        INNER JOIN visible_projects vp ON vp.id = r.project_id
+        WHERE r.status NOT IN ('risk_accepted', 'false_positive', 'fixed')
+          AND r.severity IN ('critical', 'high')
+          AND r.deleted_at = '1970-01-01 00:00:00.000') AS risk_critical_high,
+    (SELECT COUNT(*) FROM risk r
+        INNER JOIN visible_projects vp ON vp.id = r.project_id
+        WHERE r.status NOT IN ('risk_accepted', 'false_positive', 'fixed')
+          AND r.sla_due_at <> '1970-01-01 00:00:00.000'
+          AND r.sla_due_at < CURRENT_TIMESTAMP(3)
+          AND r.deleted_at = '1970-01-01 00:00:00.000') AS risk_overdue,
+    (SELECT COUNT(*) FROM ticket t
+        INNER JOIN visible_projects vp ON vp.id = t.project_id
+        WHERE t.status NOT IN ('closed', 'cancelled')
+          AND t.deleted_at = '1970-01-01 00:00:00.000') AS ticket_open,
+    (SELECT COUNT(*) FROM ticket t
+        INNER JOIN visible_projects vp ON vp.id = t.project_id
+        WHERE t.status NOT IN ('closed', 'cancelled')
+          AND t.due_at <> '1970-01-01 00:00:00.000'
+          AND t.due_at < CURRENT_TIMESTAMP(3)
+          AND t.deleted_at = '1970-01-01 00:00:00.000') AS ticket_overdue
+`
+
+type GetWorkspaceSummaryForMemberParams struct {
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+	UserID   string `db:"user_id" json:"user_id"`
+}
+
+type GetWorkspaceSummaryForMemberRow struct {
+	ProjectTotal     int64 `db:"project_total" json:"project_total"`
+	ProjectActive    int64 `db:"project_active" json:"project_active"`
+	ProjectDraft     int64 `db:"project_draft" json:"project_draft"`
+	ProjectSuspended int64 `db:"project_suspended" json:"project_suspended"`
+	AssetTotal       int64 `db:"asset_total" json:"asset_total"`
+	RiskOpen         int64 `db:"risk_open" json:"risk_open"`
+	RiskCriticalHigh int64 `db:"risk_critical_high" json:"risk_critical_high"`
+	RiskOverdue      int64 `db:"risk_overdue" json:"risk_overdue"`
+	TicketOpen       int64 `db:"ticket_open" json:"ticket_open"`
+	TicketOverdue    int64 `db:"ticket_overdue" json:"ticket_overdue"`
+}
+
+func (q *Queries) GetWorkspaceSummaryForMember(ctx context.Context, arg GetWorkspaceSummaryForMemberParams) (GetWorkspaceSummaryForMemberRow, error) {
+	row := q.db.QueryRowContext(ctx, getWorkspaceSummaryForMember, arg.TenantID, arg.UserID)
+	var i GetWorkspaceSummaryForMemberRow
+	err := row.Scan(
+		&i.ProjectTotal,
+		&i.ProjectActive,
+		&i.ProjectDraft,
+		&i.ProjectSuspended,
+		&i.AssetTotal,
+		&i.RiskOpen,
+		&i.RiskCriticalHigh,
+		&i.RiskOverdue,
+		&i.TicketOpen,
+		&i.TicketOverdue,
+	)
+	return i, err
+}
+
+const listICPFilingDomainIDs = `-- name: ListICPFilingDomainIDs :many
+SELECT domain_profile_id FROM icp_filing_domain
+WHERE project_id = ? AND filing_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY domain_profile_id
+`
+
+type ListICPFilingDomainIDsParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	FilingID  uint64 `db:"filing_id" json:"filing_id"`
+}
+
+func (q *Queries) ListICPFilingDomainIDs(ctx context.Context, arg ListICPFilingDomainIDsParams) ([]uint64, error) {
+	rows, err := q.db.QueryContext(ctx, listICPFilingDomainIDs, arg.ProjectID, arg.FilingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uint64{}
+	for rows.Next() {
+		var domain_profile_id uint64
+		if err := rows.Scan(&domain_profile_id); err != nil {
+			return nil, err
+		}
+		items = append(items, domain_profile_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listICPFilings = `-- name: ListICPFilings :many
+SELECT id, tenant_id, org_id, project_id, subject_id, filing_no, filing_type, website_name, status, approved_at, source, verified_at, evidence_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM icp_filing
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id
+`
+
+func (q *Queries) ListICPFilings(ctx context.Context, projectID uint64) ([]IcpFiling, error) {
+	rows, err := q.db.QueryContext(ctx, listICPFilings, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IcpFiling{}
+	for rows.Next() {
+		var i IcpFiling
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.SubjectID,
+			&i.FilingNo,
+			&i.FilingType,
+			&i.WebsiteName,
+			&i.Status,
+			&i.ApprovedAt,
+			&i.Source,
+			&i.VerifiedAt,
+			&i.EvidenceSummary,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectDomainProfiles = `-- name: ListProjectDomainProfiles :many
+SELECT pdp.id, pdp.tenant_id, pdp.org_id, pdp.project_id, pdp.asset_id, pdp.subject_id, pdp.is_primary, pdp.ownership_status, pdp.source, pdp.evidence_summary, pdp.created_at, pdp.updated_at, pdp.created_by, pdp.updated_by, pdp.deleted_at, pdp.primary_slot, a.value AS domain FROM project_domain_profile pdp
+INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id
+WHERE pdp.project_id = ?
+  AND pdp.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY pdp.is_primary DESC, pdp.id
+`
+
+type ListProjectDomainProfilesRow struct {
+	ID              uint64        `db:"id" json:"id"`
+	TenantID        string        `db:"tenant_id" json:"tenant_id"`
+	OrgID           string        `db:"org_id" json:"org_id"`
+	ProjectID       uint64        `db:"project_id" json:"project_id"`
+	AssetID         uint64        `db:"asset_id" json:"asset_id"`
+	SubjectID       sql.NullInt64 `db:"subject_id" json:"subject_id"`
+	IsPrimary       bool          `db:"is_primary" json:"is_primary"`
+	OwnershipStatus string        `db:"ownership_status" json:"ownership_status"`
+	Source          string        `db:"source" json:"source"`
+	EvidenceSummary string        `db:"evidence_summary" json:"evidence_summary"`
+	CreatedAt       time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time     `db:"updated_at" json:"updated_at"`
+	CreatedBy       string        `db:"created_by" json:"created_by"`
+	UpdatedBy       string        `db:"updated_by" json:"updated_by"`
+	DeletedAt       time.Time     `db:"deleted_at" json:"deleted_at"`
+	PrimarySlot     sql.NullInt16 `db:"primary_slot" json:"primary_slot"`
+	Domain          string        `db:"domain" json:"domain"`
+}
+
+func (q *Queries) ListProjectDomainProfiles(ctx context.Context, projectID uint64) ([]ListProjectDomainProfilesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectDomainProfiles, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProjectDomainProfilesRow{}
+	for rows.Next() {
+		var i ListProjectDomainProfilesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.AssetID,
+			&i.SubjectID,
+			&i.IsPrimary,
+			&i.OwnershipStatus,
+			&i.Source,
+			&i.EvidenceSummary,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+			&i.PrimarySlot,
+			&i.Domain,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectSubjects = `-- name: ListProjectSubjects :many
+SELECT id, tenant_id, org_id, project_id, subject_key, subject_name, subject_type, registration_code, country_code, region, is_primary, verification_status, source, verified_at, evidence_summary, created_at, updated_at, created_by, updated_by, deleted_at, primary_slot FROM project_subject
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY is_primary DESC, id
+`
+
+func (q *Queries) ListProjectSubjects(ctx context.Context, projectID uint64) ([]ProjectSubject, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectSubjects, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProjectSubject{}
+	for rows.Next() {
+		var i ProjectSubject
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.SubjectKey,
+			&i.SubjectName,
+			&i.SubjectType,
+			&i.RegistrationCode,
+			&i.CountryCode,
+			&i.Region,
+			&i.IsPrimary,
+			&i.VerificationStatus,
+			&i.Source,
+			&i.VerifiedAt,
+			&i.EvidenceSummary,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+			&i.PrimarySlot,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectsByTenant = `-- name: ListProjectsByTenant :many
+SELECT id, tenant_id, org_id, project_code, name, owner, business_unit, criticality, status, description, created_at, updated_at, created_by, updated_by, deleted_at FROM project
+WHERE tenant_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY updated_at DESC, id DESC
+LIMIT ? OFFSET ?
+`
+
+type ListProjectsByTenantParams struct {
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+	Limit    int32  `db:"limit" json:"limit"`
+	Offset   int32  `db:"offset" json:"offset"`
+}
+
+func (q *Queries) ListProjectsByTenant(ctx context.Context, arg ListProjectsByTenantParams) ([]Project, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectsByTenant, arg.TenantID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Project{}
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectCode,
+			&i.Name,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.Criticality,
+			&i.Status,
+			&i.Description,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectsForMember = `-- name: ListProjectsForMember :many
+SELECT p.id, p.tenant_id, p.org_id, p.project_code, p.name, p.owner, p.business_unit, p.criticality, p.status, p.description, p.created_at, p.updated_at, p.created_by, p.updated_by, p.deleted_at FROM project p
+INNER JOIN project_member pm ON pm.project_id = p.id
+WHERE pm.user_id = ?
+  AND p.tenant_id = ?
+  AND pm.deleted_at = '1970-01-01 00:00:00.000'
+  AND p.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY p.updated_at DESC, p.id DESC
+LIMIT ? OFFSET ?
+`
+
+type ListProjectsForMemberParams struct {
+	UserID   string `db:"user_id" json:"user_id"`
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+	Limit    int32  `db:"limit" json:"limit"`
+	Offset   int32  `db:"offset" json:"offset"`
+}
+
+func (q *Queries) ListProjectsForMember(ctx context.Context, arg ListProjectsForMemberParams) ([]Project, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectsForMember,
+		arg.UserID,
+		arg.TenantID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Project{}
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectCode,
+			&i.Name,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.Criticality,
+			&i.Status,
+			&i.Description,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecentWorkspaceProjectsByTenant = `-- name: ListRecentWorkspaceProjectsByTenant :many
+SELECT id, tenant_id, org_id, project_code, name, owner, business_unit, criticality, status, description, created_at, updated_at, created_by, updated_by, deleted_at
+FROM project
+WHERE tenant_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY updated_at DESC, id DESC
+LIMIT 5
+`
+
+func (q *Queries) ListRecentWorkspaceProjectsByTenant(ctx context.Context, tenantID string) ([]Project, error) {
+	rows, err := q.db.QueryContext(ctx, listRecentWorkspaceProjectsByTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Project{}
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectCode,
+			&i.Name,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.Criticality,
+			&i.Status,
+			&i.Description,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecentWorkspaceProjectsForMember = `-- name: ListRecentWorkspaceProjectsForMember :many
+SELECT p.id, p.tenant_id, p.org_id, p.project_code, p.name, p.owner, p.business_unit, p.criticality, p.status, p.description, p.created_at, p.updated_at, p.created_by, p.updated_by, p.deleted_at
+FROM project p
+WHERE p.tenant_id = ?
+  AND p.deleted_at = '1970-01-01 00:00:00.000'
+  AND EXISTS (
+      SELECT 1
+      FROM project_member pm
+      WHERE pm.project_id = p.id
+        AND pm.user_id = ?
+        AND pm.deleted_at = '1970-01-01 00:00:00.000'
+  )
+ORDER BY p.updated_at DESC, p.id DESC
+LIMIT 5
+`
+
+type ListRecentWorkspaceProjectsForMemberParams struct {
+	TenantID string `db:"tenant_id" json:"tenant_id"`
+	UserID   string `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) ListRecentWorkspaceProjectsForMember(ctx context.Context, arg ListRecentWorkspaceProjectsForMemberParams) ([]Project, error) {
+	rows, err := q.db.QueryContext(ctx, listRecentWorkspaceProjectsForMember, arg.TenantID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Project{}
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectCode,
+			&i.Name,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.Criticality,
+			&i.Status,
+			&i.Description,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const transitionProjectStatus = `-- name: TransitionProjectStatus :execresult
+UPDATE project
+SET status = ?, updated_by = ?
+WHERE id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type TransitionProjectStatusParams struct {
+	Status    string `db:"status" json:"status"`
+	UpdatedBy string `db:"updated_by" json:"updated_by"`
+	ID        uint64 `db:"id" json:"id"`
+	Status_2  string `db:"status_2" json:"status_2"`
+}
+
+func (q *Queries) TransitionProjectStatus(ctx context.Context, arg TransitionProjectStatusParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, transitionProjectStatus,
+		arg.Status,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.Status_2,
+	)
+}
+
+const updateICPFiling = `-- name: UpdateICPFiling :exec
+UPDATE icp_filing
+SET subject_id = ?, filing_no = ?, filing_type = ?, website_name = ?, status = ?,
+    approved_at = ?, source = ?, verified_at = ?, evidence_summary = ?, updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdateICPFilingParams struct {
+	SubjectID       uint64       `db:"subject_id" json:"subject_id"`
+	FilingNo        string       `db:"filing_no" json:"filing_no"`
+	FilingType      string       `db:"filing_type" json:"filing_type"`
+	WebsiteName     string       `db:"website_name" json:"website_name"`
+	Status          string       `db:"status" json:"status"`
+	ApprovedAt      sql.NullTime `db:"approved_at" json:"approved_at"`
+	Source          string       `db:"source" json:"source"`
+	VerifiedAt      sql.NullTime `db:"verified_at" json:"verified_at"`
+	EvidenceSummary string       `db:"evidence_summary" json:"evidence_summary"`
+	UpdatedBy       string       `db:"updated_by" json:"updated_by"`
+	ID              uint64       `db:"id" json:"id"`
+	ProjectID       uint64       `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) UpdateICPFiling(ctx context.Context, arg UpdateICPFilingParams) error {
+	_, err := q.db.ExecContext(ctx, updateICPFiling,
+		arg.SubjectID,
+		arg.FilingNo,
+		arg.FilingType,
+		arg.WebsiteName,
+		arg.Status,
+		arg.ApprovedAt,
+		arg.Source,
+		arg.VerifiedAt,
+		arg.EvidenceSummary,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
+}
+
+const updateProject = `-- name: UpdateProject :exec
+UPDATE project
+SET name = ?, owner = ?, business_unit = ?, criticality = ?, description = ?, updated_by = ?
+WHERE id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdateProjectParams struct {
+	Name         string         `db:"name" json:"name"`
+	Owner        string         `db:"owner" json:"owner"`
+	BusinessUnit string         `db:"business_unit" json:"business_unit"`
+	Criticality  string         `db:"criticality" json:"criticality"`
+	Description  sql.NullString `db:"description" json:"description"`
+	UpdatedBy    string         `db:"updated_by" json:"updated_by"`
+	ID           uint64         `db:"id" json:"id"`
+}
+
+func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) error {
+	_, err := q.db.ExecContext(ctx, updateProject,
+		arg.Name,
+		arg.Owner,
+		arg.BusinessUnit,
+		arg.Criticality,
+		arg.Description,
+		arg.UpdatedBy,
+		arg.ID,
+	)
+	return err
+}
+
+const updateProjectDomainProfile = `-- name: UpdateProjectDomainProfile :exec
+UPDATE project_domain_profile
+SET subject_id = ?, is_primary = ?, ownership_status = ?, source = ?,
+    evidence_summary = ?, updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdateProjectDomainProfileParams struct {
+	SubjectID       sql.NullInt64 `db:"subject_id" json:"subject_id"`
+	IsPrimary       bool          `db:"is_primary" json:"is_primary"`
+	OwnershipStatus string        `db:"ownership_status" json:"ownership_status"`
+	Source          string        `db:"source" json:"source"`
+	EvidenceSummary string        `db:"evidence_summary" json:"evidence_summary"`
+	UpdatedBy       string        `db:"updated_by" json:"updated_by"`
+	ID              uint64        `db:"id" json:"id"`
+	ProjectID       uint64        `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) UpdateProjectDomainProfile(ctx context.Context, arg UpdateProjectDomainProfileParams) error {
+	_, err := q.db.ExecContext(ctx, updateProjectDomainProfile,
+		arg.SubjectID,
+		arg.IsPrimary,
+		arg.OwnershipStatus,
+		arg.Source,
+		arg.EvidenceSummary,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
+}
+
+const updateProjectSubject = `-- name: UpdateProjectSubject :exec
+UPDATE project_subject
+SET subject_key = ?, subject_name = ?, subject_type = ?, registration_code = ?,
+    country_code = ?, region = ?, is_primary = ?, verification_status = ?,
+    source = ?, verified_at = ?, evidence_summary = ?, updated_by = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type UpdateProjectSubjectParams struct {
+	SubjectKey         string       `db:"subject_key" json:"subject_key"`
+	SubjectName        string       `db:"subject_name" json:"subject_name"`
+	SubjectType        string       `db:"subject_type" json:"subject_type"`
+	RegistrationCode   string       `db:"registration_code" json:"registration_code"`
+	CountryCode        string       `db:"country_code" json:"country_code"`
+	Region             string       `db:"region" json:"region"`
+	IsPrimary          bool         `db:"is_primary" json:"is_primary"`
+	VerificationStatus string       `db:"verification_status" json:"verification_status"`
+	Source             string       `db:"source" json:"source"`
+	VerifiedAt         sql.NullTime `db:"verified_at" json:"verified_at"`
+	EvidenceSummary    string       `db:"evidence_summary" json:"evidence_summary"`
+	UpdatedBy          string       `db:"updated_by" json:"updated_by"`
+	ID                 uint64       `db:"id" json:"id"`
+	ProjectID          uint64       `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) UpdateProjectSubject(ctx context.Context, arg UpdateProjectSubjectParams) error {
+	_, err := q.db.ExecContext(ctx, updateProjectSubject,
+		arg.SubjectKey,
+		arg.SubjectName,
+		arg.SubjectType,
+		arg.RegistrationCode,
+		arg.CountryCode,
+		arg.Region,
+		arg.IsPrimary,
+		arg.VerificationStatus,
+		arg.Source,
+		arg.VerifiedAt,
+		arg.EvidenceSummary,
+		arg.UpdatedBy,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
 }

@@ -10,65 +10,197 @@ import (
 )
 
 type Querier interface {
+	ChangeCurrentUserPassword(ctx context.Context, arg ChangeCurrentUserPasswordParams) (sql.Result, error)
+	ClaimPendingReportExport(ctx context.Context) (ReportExport, error)
+	ClearICPFilingDomains(ctx context.Context, arg ClearICPFilingDomainsParams) error
+	ClearPrimaryProjectDomains(ctx context.Context, arg ClearPrimaryProjectDomainsParams) error
+	ClearPrimaryProjectSubjects(ctx context.Context, arg ClearPrimaryProjectSubjectsParams) error
 	CountAssetsByProject(ctx context.Context, projectID uint64) (int64, error)
+	CountExposuresByProject(ctx context.Context, projectID uint64) (int64, error)
+	CountOverdueRisks(ctx context.Context, arg CountOverdueRisksParams) (int64, error)
+	CountPlatformUsers(ctx context.Context, arg CountPlatformUsersParams) (int64, error)
+	CountProjectsByTenant(ctx context.Context, tenantID string) (int64, error)
+	CountProjectsForMember(ctx context.Context, arg CountProjectsForMemberParams) (int64, error)
 	CountRelationsByAsset(ctx context.Context, arg CountRelationsByAssetParams) (int64, error)
+	CountReportExports(ctx context.Context, projectID uint64) (int64, error)
+	CountRisksByProject(ctx context.Context, projectID uint64) (int64, error)
+	CountTicketsByProject(ctx context.Context, projectID uint64) (int64, error)
+	CreateICPFilingDomain(ctx context.Context, arg CreateICPFilingDomainParams) (sql.Result, error)
+	CreateICPFilings(ctx context.Context, arg CreateICPFilingsParams) (sql.Result, error)
+	// sqlc queries for notification rules and delivery ledger.
+	CreateNotificationRule(ctx context.Context, arg CreateNotificationRuleParams) (sql.Result, error)
+	CreatePlatformUser(ctx context.Context, arg CreatePlatformUserParams) (sql.Result, error)
+	CreateProject(ctx context.Context, arg CreateProjectParams) (sql.Result, error)
+	CreateProjectDomainProfile(ctx context.Context, arg CreateProjectDomainProfileParams) (sql.Result, error)
+	CreateProjectMember(ctx context.Context, arg CreateProjectMemberParams) (sql.Result, error)
+	CreateProjectSubject(ctx context.Context, arg CreateProjectSubjectParams) (sql.Result, error)
+	CreateReportExport(ctx context.Context, arg CreateReportExportParams) (sql.Result, error)
+	CreateRisk(ctx context.Context, arg CreateRiskParams) (sql.Result, error)
+	CreateRiskRule(ctx context.Context, arg CreateRiskRuleParams) (sql.Result, error)
 	// sqlc queries for the discovery scope domain.
 	// All reads are scoped by project_id and soft-delete sentinel so cross-project
 	// reads/writes cannot leak through missing repository checks.
 	CreateScope(ctx context.Context, arg CreateScopeParams) (sql.Result, error)
+	CreateSuppressionRule(ctx context.Context, arg CreateSuppressionRuleParams) (sql.Result, error)
 	// Task run queries.
 	CreateTaskRun(ctx context.Context, arg CreateTaskRunParams) (sql.Result, error)
 	// Task template queries.
 	CreateTaskTemplate(ctx context.Context, arg CreateTaskTemplateParams) (sql.Result, error)
+	// sqlc queries for remediation tickets.
+	CreateTicket(ctx context.Context, arg CreateTicketParams) (sql.Result, error)
 	// Provisioning helper (used by seeding/tests; no public registration endpoint in M0-6).
 	CreateUser(ctx context.Context, arg CreateUserParams) (sql.Result, error)
+	// sqlc queries for vulnerability definitions and risk instances.
+	CreateVulnerabilityDefinition(ctx context.Context, arg CreateVulnerabilityDefinitionParams) (sql.Result, error)
+	FindProjectRootDomainAsset(ctx context.Context, arg FindProjectRootDomainAssetParams) (uint64, error)
 	// sqlc queries for the asset domain.
 	// Every read is scoped by project_id AND filters on the soft-delete sentinel, so
 	// soft-deleted rows and cross-project rows are excluded by default; callers never
 	// need to remember to add either filter.
 	GetAssetByID(ctx context.Context, arg GetAssetByIDParams) (Asset, error)
 	GetAssetByKey(ctx context.Context, arg GetAssetByKeyParams) (Asset, error)
+	// Returns the user's first live project membership, used by the web shell as
+	// the default project context after login.
+	GetDefaultProjectMembershipByUserID(ctx context.Context, userID string) (GetDefaultProjectMembershipByUserIDRow, error)
+	GetExposureByID(ctx context.Context, arg GetExposureByIDParams) (Exposure, error)
+	// sqlc queries for exposure snapshots and change_event writes.
+	GetExposureByKey(ctx context.Context, arg GetExposureByKeyParams) (Exposure, error)
+	// Legacy compatibility path: global role is temporarily cached in project_member
+	// during migration. This query remains for backward compatibility and should
+	// be removed after migration cut-over.
+	GetGlobalRoleByUserID(ctx context.Context, userID uint64) (string, error)
+	// Authoritative role source after platform-user migration.
+	GetGlobalRoleByUserIDFromTenantRole(ctx context.Context, userID uint64) (string, error)
+	GetICPFiling(ctx context.Context, arg GetICPFilingParams) (IcpFiling, error)
+	GetNotificationRuleByID(ctx context.Context, arg GetNotificationRuleByIDParams) (NotificationRule, error)
+	GetPlatformUserByTenantID(ctx context.Context, arg GetPlatformUserByTenantIDParams) (GetPlatformUserByTenantIDRow, error)
+	GetProjectActorScope(ctx context.Context, id uint64) (GetProjectActorScopeRow, error)
 	GetProjectByCode(ctx context.Context, arg GetProjectByCodeParams) (Project, error)
 	// sqlc queries for the project domain.
 	// Every read filters on the soft-delete sentinel so soft-deleted rows are
 	// excluded by default; callers never need to remember to add the filter.
 	GetProjectByID(ctx context.Context, id uint64) (Project, error)
+	GetProjectDomainProfile(ctx context.Context, arg GetProjectDomainProfileParams) (GetProjectDomainProfileRow, error)
+	GetProjectDomainProfileByAsset(ctx context.Context, arg GetProjectDomainProfileByAssetParams) (GetProjectDomainProfileByAssetRow, error)
 	// Returns the member's role, or sql.ErrNoRows when the user is not a member.
 	GetProjectMemberRole(ctx context.Context, arg GetProjectMemberRoleParams) (string, error)
+	GetProjectOnboardingCounts(ctx context.Context, arg GetProjectOnboardingCountsParams) (GetProjectOnboardingCountsRow, error)
+	GetProjectSubject(ctx context.Context, arg GetProjectSubjectParams) (ProjectSubject, error)
 	// Fetch the live edge for a (project, from, to, type) tuple. Used to return the
 	// upserted row; excludes soft-deleted rows.
 	GetRelationByEndpoints(ctx context.Context, arg GetRelationByEndpointsParams) (AssetRelation, error)
+	GetReportExportByID(ctx context.Context, arg GetReportExportByIDParams) (ReportExport, error)
+	GetRiskByID(ctx context.Context, arg GetRiskByIDParams) (Risk, error)
+	GetRiskByIDForUpdate(ctx context.Context, arg GetRiskByIDForUpdateParams) (Risk, error)
+	GetRiskByKey(ctx context.Context, arg GetRiskByKeyParams) (Risk, error)
+	GetRiskRuleByID(ctx context.Context, arg GetRiskRuleByIDParams) (RiskRule, error)
+	GetRiskRuleByRuleID(ctx context.Context, arg GetRiskRuleByRuleIDParams) (RiskRule, error)
+	GetSLAPolicy(ctx context.Context, arg GetSLAPolicyParams) (SlaPolicy, error)
 	GetScopeByID(ctx context.Context, arg GetScopeByIDParams) (Scope, error)
+	GetSuppressionRuleByID(ctx context.Context, arg GetSuppressionRuleByIDParams) (SuppressionRule, error)
 	GetTaskRunByID(ctx context.Context, arg GetTaskRunByIDParams) (TaskRun, error)
 	GetTaskTemplateByID(ctx context.Context, arg GetTaskTemplateByIDParams) (TaskTemplate, error)
+	GetTicketByID(ctx context.Context, arg GetTicketByIDParams) (Ticket, error)
 	GetUserByID(ctx context.Context, id uint64) (AppUser, error)
 	// sqlc queries for the auth (app_user) domain.
 	// Every read filters on the soft-delete sentinel so soft-deleted rows are
 	// excluded by default; callers never need to remember to add the filter.
 	// Login lookup. username is globally unique, so this returns at most one live row.
 	GetUserByUsername(ctx context.Context, username string) (AppUser, error)
+	GetVulnerabilityDefinitionByID(ctx context.Context, arg GetVulnerabilityDefinitionByIDParams) (VulnerabilityDefinition, error)
+	GetVulnerabilityDefinitionByRuleID(ctx context.Context, arg GetVulnerabilityDefinitionByRuleIDParams) (VulnerabilityDefinition, error)
+	GetWorkspaceSummaryByTenant(ctx context.Context, tenantID string) (GetWorkspaceSummaryByTenantRow, error)
+	GetWorkspaceSummaryForMember(ctx context.Context, arg GetWorkspaceSummaryForMemberParams) (GetWorkspaceSummaryForMemberRow, error)
+	IncrementPlatformUserAuthVersion(ctx context.Context, arg IncrementPlatformUserAuthVersionParams) (sql.Result, error)
 	IncrementTaskRunAttempt(ctx context.Context, arg IncrementTaskRunAttemptParams) error
 	// sqlc queries for the audit_log domain.
 	// audit_log is append-only: INSERT only, no UPDATE, no DELETE.
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
+	InsertChangeEvent(ctx context.Context, arg InsertChangeEventParams) (sql.Result, error)
+	// Discovery callback queries.
+	InsertDiscoveryCallback(ctx context.Context, arg InsertDiscoveryCallbackParams) (sql.Result, error)
+	InsertNotificationDelivery(ctx context.Context, arg InsertNotificationDeliveryParams) (sql.Result, error)
+	InsertRiskChangeEvent(ctx context.Context, arg InsertRiskChangeEventParams) (sql.Result, error)
+	InsertRiskDecision(ctx context.Context, arg InsertRiskDecisionParams) (sql.Result, error)
+	InsertRiskScoreHistory(ctx context.Context, arg InsertRiskScoreHistoryParams) (sql.Result, error)
+	InsertRiskStatusHistory(ctx context.Context, arg InsertRiskStatusHistoryParams) (sql.Result, error)
 	InsertScopeTarget(ctx context.Context, arg InsertScopeTargetParams) error
+	LinkTicketRisk(ctx context.Context, arg LinkTicketRiskParams) (sql.Result, error)
+	ListActiveSuppressionRules(ctx context.Context, arg ListActiveSuppressionRulesParams) ([]SuppressionRule, error)
+	// Lock the active system-admin rows so concurrent disable/downgrade operations
+	// cannot both pass the "last administrator" guard.
+	ListActiveSystemAdminIDsForUpdate(ctx context.Context, tenantID string) ([]uint64, error)
 	ListAssetsByProject(ctx context.Context, arg ListAssetsByProjectParams) ([]Asset, error)
+	ListEnabledNotificationRulesByTrigger(ctx context.Context, arg ListEnabledNotificationRulesByTriggerParams) ([]NotificationRule, error)
+	ListEnabledRiskRules(ctx context.Context, projectID uint64) ([]RiskRule, error)
+	ListExpiredRiskDecisions(ctx context.Context, arg ListExpiredRiskDecisionsParams) ([]RiskDecision, error)
+	ListExposureExportRows(ctx context.Context, arg ListExposureExportRowsParams) ([]ListExposureExportRowsRow, error)
+	ListExposuresByProject(ctx context.Context, arg ListExposuresByProjectParams) ([]Exposure, error)
+	ListICPFilingDomainIDs(ctx context.Context, arg ListICPFilingDomainIDsParams) ([]uint64, error)
+	ListICPFilings(ctx context.Context, projectID uint64) ([]IcpFiling, error)
+	ListNotificationRulesByProject(ctx context.Context, projectID uint64) ([]NotificationRule, error)
+	ListOpenRisksForSLARecalc(ctx context.Context, arg ListOpenRisksForSLARecalcParams) ([]Risk, error)
+	ListPlatformUserProjects(ctx context.Context, arg ListPlatformUserProjectsParams) ([]ListPlatformUserProjectsRow, error)
+	ListPlatformUsers(ctx context.Context, arg ListPlatformUsersParams) ([]ListPlatformUsersRow, error)
+	ListProjectDomainProfiles(ctx context.Context, projectID uint64) ([]ListProjectDomainProfilesRow, error)
+	ListProjectSubjects(ctx context.Context, projectID uint64) ([]ProjectSubject, error)
+	ListProjectsByTenant(ctx context.Context, arg ListProjectsByTenantParams) ([]Project, error)
+	ListProjectsForMember(ctx context.Context, arg ListProjectsForMemberParams) ([]Project, error)
+	ListRecentWorkspaceProjectsByTenant(ctx context.Context, tenantID string) ([]Project, error)
+	ListRecentWorkspaceProjectsForMember(ctx context.Context, arg ListRecentWorkspaceProjectsForMemberParams) ([]Project, error)
 	// Both directions for one asset (out-edges where from_asset_id = ? and in-edges
 	// where to_asset_id = ?), project-scoped and live. The service tags each row's
 	// direction based on which endpoint equals the requested asset id.
 	ListRelationsByAsset(ctx context.Context, arg ListRelationsByAssetParams) ([]AssetRelation, error)
+	ListReportExports(ctx context.Context, arg ListReportExportsParams) ([]ReportExport, error)
+	ListRiskDecisions(ctx context.Context, arg ListRiskDecisionsParams) ([]RiskDecision, error)
+	ListRiskExportRows(ctx context.Context, arg ListRiskExportRowsParams) ([]ListRiskExportRowsRow, error)
+	ListRiskScoreHistory(ctx context.Context, arg ListRiskScoreHistoryParams) ([]RiskScoreHistory, error)
+	ListRiskStatusHistory(ctx context.Context, arg ListRiskStatusHistoryParams) ([]RiskStatusHistory, error)
+	ListRisksByProject(ctx context.Context, arg ListRisksByProjectParams) ([]Risk, error)
+	ListRunningTaskRunsForReconcile(ctx context.Context, limit int32) ([]TaskRun, error)
+	ListSLAPoliciesByProject(ctx context.Context, projectID uint64) ([]SlaPolicy, error)
 	ListScopeTargetsByScope(ctx context.Context, arg ListScopeTargetsByScopeParams) ([]ScopeTarget, error)
 	ListScopesByProject(ctx context.Context, projectID uint64) ([]Scope, error)
 	ListTaskRunsByProject(ctx context.Context, projectID uint64) ([]TaskRun, error)
 	ListTaskTemplatesByProject(ctx context.Context, projectID uint64) ([]TaskTemplate, error)
+	ListTicketExportRows(ctx context.Context, arg ListTicketExportRowsParams) ([]ListTicketExportRowsRow, error)
+	ListTicketRisks(ctx context.Context, arg ListTicketRisksParams) ([]TicketRisk, error)
+	ListTicketsByProject(ctx context.Context, arg ListTicketsByProjectParams) ([]Ticket, error)
+	ListVulnerabilityDefinitionsByProject(ctx context.Context, projectID uint64) ([]VulnerabilityDefinition, error)
+	MarkDiscoveryCallbackEnqueued(ctx context.Context, arg MarkDiscoveryCallbackEnqueuedParams) error
+	MarkReportExportFailed(ctx context.Context, arg MarkReportExportFailedParams) (sql.Result, error)
+	MarkReportExportRunning(ctx context.Context, arg MarkReportExportRunningParams) (sql.Result, error)
+	MarkReportExportSucceeded(ctx context.Context, arg MarkReportExportSucceededParams) (sql.Result, error)
+	MarkTaskRunCallbackReceived(ctx context.Context, arg MarkTaskRunCallbackReceivedParams) (sql.Result, error)
 	MarkTaskRunCancelled(ctx context.Context, arg MarkTaskRunCancelledParams) (sql.Result, error)
+	MarkTaskRunDispatchFailed(ctx context.Context, arg MarkTaskRunDispatchFailedParams) (sql.Result, error)
+	MarkTaskRunDispatched(ctx context.Context, arg MarkTaskRunDispatchedParams) (sql.Result, error)
 	MarkTaskRunFailed(ctx context.Context, arg MarkTaskRunFailedParams) (sql.Result, error)
 	MarkTaskRunPartialSuccess(ctx context.Context, arg MarkTaskRunPartialSuccessParams) (sql.Result, error)
 	MarkTaskRunRunning(ctx context.Context, arg MarkTaskRunRunningParams) (sql.Result, error)
 	MarkTaskRunSucceeded(ctx context.Context, arg MarkTaskRunSucceededParams) (sql.Result, error)
+	RefreshRisk(ctx context.Context, arg RefreshRiskParams) (sql.Result, error)
+	ReopenRisk(ctx context.Context, arg ReopenRiskParams) (sql.Result, error)
+	ReportExposureDashboard(ctx context.Context, arg ReportExposureDashboardParams) (ReportExposureDashboardRow, error)
+	ReportFixedRiskTrend(ctx context.Context, arg ReportFixedRiskTrendParams) ([]ReportFixedRiskTrendRow, error)
+	ReportRemediationStats(ctx context.Context, arg ReportRemediationStatsParams) (ReportRemediationStatsRow, error)
+	// sqlc queries for report dashboard statistics and asynchronous exports.
+	ReportRiskDashboard(ctx context.Context, arg ReportRiskDashboardParams) (ReportRiskDashboardRow, error)
+	ReportRiskTrend(ctx context.Context, arg ReportRiskTrendParams) ([]ReportRiskTrendRow, error)
+	ReportTicketDashboard(ctx context.Context, arg ReportTicketDashboardParams) (ReportTicketDashboardRow, error)
+	ReportTopAssetsByRisk(ctx context.Context, arg ReportTopAssetsByRiskParams) ([]ReportTopAssetsByRiskRow, error)
+	ReportTopBusinessUnitsByRisk(ctx context.Context, arg ReportTopBusinessUnitsByRiskParams) ([]ReportTopBusinessUnitsByRiskRow, error)
+	ResetPlatformUserPassword(ctx context.Context, arg ResetPlatformUserPasswordParams) (sql.Result, error)
+	SetNotificationRuleEnabled(ctx context.Context, arg SetNotificationRuleEnabledParams) (sql.Result, error)
+	SetRiskRuleEnabled(ctx context.Context, arg SetRiskRuleEnabledParams) (sql.Result, error)
+	SetSuppressionRuleEnabled(ctx context.Context, arg SetSuppressionRuleEnabledParams) (sql.Result, error)
 	SetTaskTemplateEnabled(ctx context.Context, arg SetTaskTemplateEnabledParams) error
 	SoftDeleteScopeTargets(ctx context.Context, arg SoftDeleteScopeTargetsParams) error
 	SoftDeleteTaskTemplate(ctx context.Context, arg SoftDeleteTaskTemplateParams) error
+	SoftDeleteTenantUserRole(ctx context.Context, arg SoftDeleteTenantUserRoleParams) error
+	TransitionPlatformUserStatus(ctx context.Context, arg TransitionPlatformUserStatusParams) (sql.Result, error)
+	TransitionProjectStatus(ctx context.Context, arg TransitionProjectStatusParams) (sql.Result, error)
 	// Operator edit of the non-key metadata fields. asset_type/asset_key/value are
 	// the normalized identity and are never touched here; status is restricted to
 	// the live statuses (deleted is reserved for the soft-delete operation). The
@@ -82,15 +214,25 @@ type Querier interface {
 	// WHERE clause carries project_id + the soft-delete filter so a cross-project or
 	// tombstoned asset cannot be transitioned.
 	UpdateAssetLifecycle(ctx context.Context, arg UpdateAssetLifecycleParams) error
+	UpdateICPFiling(ctx context.Context, arg UpdateICPFilingParams) error
+	UpdatePlatformUserProfile(ctx context.Context, arg UpdatePlatformUserProfileParams) (sql.Result, error)
+	UpdateProject(ctx context.Context, arg UpdateProjectParams) error
+	UpdateProjectDomainProfile(ctx context.Context, arg UpdateProjectDomainProfileParams) error
+	UpdateProjectSubject(ctx context.Context, arg UpdateProjectSubjectParams) error
+	UpdateRiskScore(ctx context.Context, arg UpdateRiskScoreParams) (sql.Result, error)
+	UpdateRiskStatus(ctx context.Context, arg UpdateRiskStatusParams) (sql.Result, error)
 	UpdateScope(ctx context.Context, arg UpdateScopeParams) error
 	UpdateScopeStatus(ctx context.Context, arg UpdateScopeStatusParams) error
 	UpdateTaskTemplate(ctx context.Context, arg UpdateTaskTemplateParams) error
+	UpdateTicketStatus(ctx context.Context, arg UpdateTicketStatusParams) (sql.Result, error)
+	UpdateUserLastLoginAt(ctx context.Context, id uint64) error
 	// Idempotent import: a new normalized asset_key inserts; a repeat within the same
 	// project updates only the discovery-refreshable fields (last_seen, source,
 	// confidence, display_name, value, updated_by). first_seen, owner, business_unit
 	// and status are preserved so a re-import never resets ownership or un-ignores an
 	// asset an operator deliberately set to 'ignored'/'inactive'.
 	UpsertAsset(ctx context.Context, arg UpsertAssetParams) (sql.Result, error)
+	UpsertExposure(ctx context.Context, arg UpsertExposureParams) (sql.Result, error)
 	// sqlc queries for the asset_relation domain.
 	// Every read is scoped by project_id AND filters on the soft-delete sentinel, so
 	// soft-deleted rows and cross-project rows are excluded by default.
@@ -99,6 +241,8 @@ type Querier interface {
 	// confidence, updated_by). first_seen and created_by are preserved so a re-import
 	// never resets the edge's origin.
 	UpsertRelation(ctx context.Context, arg UpsertRelationParams) (sql.Result, error)
+	UpsertSLAPolicy(ctx context.Context, arg UpsertSLAPolicyParams) (sql.Result, error)
+	UpsertTenantUserRole(ctx context.Context, arg UpsertTenantUserRoleParams) error
 }
 
 var _ Querier = (*Queries)(nil)

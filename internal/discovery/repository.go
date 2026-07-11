@@ -1,12 +1,16 @@
+//revive:disable:exported
+
 package discovery
 
 import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"math"
 	"time"
 
-	"github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
+	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 )
 
 var ErrNotFound = errors.New("discovery: scope not found")
@@ -32,12 +36,18 @@ type Repository interface {
 	CreateTaskRun(ctx context.Context, in CreateTaskRunParams) (uint64, error)
 	GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error)
 	ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error)
+	ListRunningRunsForReconcile(ctx context.Context, limit int32) ([]*TaskRun, error)
 	MarkRunRunning(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, startedAt time.Time) error
+	MarkRunDispatched(ctx context.Context, projectID, runID uint64, actorID, fromStatus, engineJobID string, now time.Time) error
+	MarkRunDispatchFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus, errorSummary string, now time.Time) error
 	MarkRunSucceeded(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error
 	MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error
 	MarkRunFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, resultCount uint64, now time.Time) error
 	MarkRunCancelled(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, now time.Time) error
 	IncrementRunAttempt(ctx context.Context, projectID, runID uint64, actorID string, now time.Time) error
+	MarkRunCallbackReceived(ctx context.Context, projectID, runID uint64, actorID string, resultCount uint64, now time.Time) error
+	InsertDiscoveryCallback(ctx context.Context, in DiscoveryCallback) (bool, error)
+	MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error
 }
 
 type CreateScopeParams struct {
@@ -158,11 +168,7 @@ func (r *sqlcRepository) CreateScope(ctx context.Context, in CreateScopeParams) 
 	if err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return uint64(id), nil
+	return resultID(res)
 }
 
 func (r *sqlcRepository) GetScope(ctx context.Context, projectID, scopeID uint64) (*Scope, error) {
@@ -277,21 +283,17 @@ func (r *sqlcRepository) CreateTaskTemplate(ctx context.Context, in CreateTaskTe
 		Config:         []byte(in.Config),
 		Schedule:       in.Schedule,
 		Enabled:        in.Enabled,
-		TimeoutSeconds: int32(in.TimeoutSeconds),
-		RateLimit:      int32(in.RateLimit),
-		Concurrency:    int32(in.Concurrency),
-		RetryLimit:     int32(in.RetryLimit),
+		TimeoutSeconds: int32Bounded(in.TimeoutSeconds),
+		RateLimit:      int32Bounded(in.RateLimit),
+		Concurrency:    int32Bounded(in.Concurrency),
+		RetryLimit:     int32Bounded(in.RetryLimit),
 		CreatedBy:      in.ActorID,
 		UpdatedBy:      in.ActorID,
 	})
 	if err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return uint64(id), nil
+	return resultID(res)
 }
 
 func (r *sqlcRepository) GetTaskTemplate(ctx context.Context, projectID, templateID uint64) (*TaskTemplate, error) {
@@ -323,10 +325,10 @@ func (r *sqlcRepository) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTe
 		TaskType:       in.TaskType,
 		Config:         []byte(in.Config),
 		Schedule:       in.Schedule,
-		TimeoutSeconds: int32(in.TimeoutSeconds),
-		RateLimit:      int32(in.RateLimit),
-		Concurrency:    int32(in.Concurrency),
-		RetryLimit:     int32(in.RetryLimit),
+		TimeoutSeconds: int32Bounded(in.TimeoutSeconds),
+		RateLimit:      int32Bounded(in.RateLimit),
+		Concurrency:    int32Bounded(in.Concurrency),
+		RetryLimit:     int32Bounded(in.RetryLimit),
 		UpdatedBy:      in.ActorID,
 		ID:             in.TemplateID,
 		ProjectID:      in.ProjectID,
@@ -360,12 +362,12 @@ func (r *sqlcRepository) CreateTaskRun(ctx context.Context, in CreateTaskRunPara
 		ScopeID:           in.ScopeID,
 		TaskType:          in.TaskType,
 		Status:            in.Status,
-		Progress:          int32(in.Progress),
-		TimeoutSeconds:    int32(in.TimeoutSeconds),
-		RateLimit:         int32(in.RateLimit),
-		Concurrency:       int32(in.Concurrency),
-		RetryLimit:        int32(in.RetryLimit),
-		Attempt:           int32(in.Attempt),
+		Progress:          int32Bounded(in.Progress),
+		TimeoutSeconds:    int32Bounded(in.TimeoutSeconds),
+		RateLimit:         int32Bounded(in.RateLimit),
+		Concurrency:       int32Bounded(in.Concurrency),
+		RetryLimit:        int32Bounded(in.RetryLimit),
+		Attempt:           int32Bounded(in.Attempt),
 		EngineJobID:       in.EngineJobID,
 		DispatchedAt:      in.DispatchedAt,
 		LastCallbackAt:    in.LastCallbackAt,
@@ -380,11 +382,7 @@ func (r *sqlcRepository) CreateTaskRun(ctx context.Context, in CreateTaskRunPara
 	if err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return uint64(id), nil
+	return resultID(res)
 }
 
 func (r *sqlcRepository) GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
@@ -410,6 +408,21 @@ func (r *sqlcRepository) ListTaskRuns(ctx context.Context, projectID uint64) ([]
 	return out, nil
 }
 
+func (r *sqlcRepository) ListRunningRunsForReconcile(ctx context.Context, limit int32) ([]*TaskRun, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.q.ListRunningTaskRunsForReconcile(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*TaskRun, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toDomainTaskRun(row))
+	}
+	return out, nil
+}
+
 func (r *sqlcRepository) MarkRunRunning(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, startedAt time.Time) error {
 	res, err := r.q.MarkTaskRunRunning(ctx, dbgen.MarkTaskRunRunningParams{
 		UpdatedBy: actorID,
@@ -418,6 +431,33 @@ func (r *sqlcRepository) MarkRunRunning(ctx context.Context, projectID, runID ui
 		ID:        runID,
 		ProjectID: projectID,
 		Status_2:  fromStatus,
+	})
+	return markRunUpdateResultError(res, err)
+}
+
+func (r *sqlcRepository) MarkRunDispatched(ctx context.Context, projectID, runID uint64, actorID, fromStatus, engineJobID string, now time.Time) error {
+	res, err := r.q.MarkTaskRunDispatched(ctx, dbgen.MarkTaskRunDispatchedParams{
+		Status:       TaskRunStatusRunning,
+		EngineJobID:  engineJobID,
+		DispatchedAt: now.UTC(),
+		StartedAt:    now.UTC(),
+		UpdatedBy:    actorID,
+		ID:           runID,
+		ProjectID:    projectID,
+		Status_2:     fromStatus,
+	})
+	return markRunUpdateResultError(res, err)
+}
+
+func (r *sqlcRepository) MarkRunDispatchFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus, errorSummary string, now time.Time) error {
+	res, err := r.q.MarkTaskRunDispatchFailed(ctx, dbgen.MarkTaskRunDispatchFailedParams{
+		Status:       TaskRunStatusFailed,
+		ErrorSummary: errorSummary,
+		FinishedAt:   now.UTC(),
+		UpdatedBy:    actorID,
+		ID:           runID,
+		ProjectID:    projectID,
+		Status_2:     fromStatus,
 	})
 	return markRunUpdateResultError(res, err)
 }
@@ -508,6 +548,51 @@ func (r *sqlcRepository) IncrementRunAttempt(ctx context.Context, projectID, run
 	})
 }
 
+func (r *sqlcRepository) MarkRunCallbackReceived(ctx context.Context, projectID, runID uint64, actorID string, resultCount uint64, now time.Time) error {
+	res, err := r.q.MarkTaskRunCallbackReceived(ctx, dbgen.MarkTaskRunCallbackReceivedParams{
+		LastCallbackAt: now.UTC(),
+		ResultCount:    resultCount,
+		UpdatedBy:      actorID,
+		ID:             runID,
+		ProjectID:      projectID,
+		Status:         TaskRunStatusRunning,
+	})
+	return markRunUpdateResultError(res, err)
+}
+
+func (r *sqlcRepository) InsertDiscoveryCallback(ctx context.Context, in DiscoveryCallback) (bool, error) {
+	res, err := r.q.InsertDiscoveryCallback(ctx, dbgen.InsertDiscoveryCallbackParams{
+		TenantID:     in.TenantID,
+		OrgID:        in.OrgID,
+		ProjectID:    in.ProjectID,
+		RunID:        in.RunID,
+		Seq:          in.Seq,
+		Phase:        in.Phase,
+		Status:       in.Status,
+		PayloadHash:  in.PayloadHash,
+		ResultCount:  in.ResultCount,
+		ErrorSummary: in.ErrorSummary,
+		ReceivedAt:   in.ReceivedAt.UTC(),
+	})
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+func (r *sqlcRepository) MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error {
+	return r.q.MarkDiscoveryCallbackEnqueued(ctx, dbgen.MarkDiscoveryCallbackEnqueuedParams{
+		EnqueuedAt: enqueuedAt.UTC(),
+		ProjectID:  projectID,
+		RunID:      runID,
+		Seq:        seq,
+	})
+}
+
 func mapErr(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
@@ -586,4 +671,22 @@ func toDomainTaskRun(row dbgen.TaskRun) *TaskRun {
 		UpdatedBy:         row.UpdatedBy,
 		DeletedAt:         row.DeletedAt,
 	}
+}
+
+func resultID(res sql.Result) (uint64, error) {
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if id < 0 {
+		return 0, fmt.Errorf("discovery: negative insert id %d", id)
+	}
+	return uint64(id), nil
+}
+
+func int32Bounded(v int) int32 {
+	if v > math.MaxInt32 || v < math.MinInt32 {
+		return 0
+	}
+	return int32(v)
 }

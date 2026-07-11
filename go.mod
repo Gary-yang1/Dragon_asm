@@ -12,6 +12,7 @@ require (
 	github.com/hibiken/asynq v0.24.1
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/crypto v0.17.0
+	golang.org/x/net v0.18.0
 )
 
 require (
@@ -43,7 +44,6 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/net v0.18.0 // indirect
 	golang.org/x/sys v0.15.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.3.0 // indirect

@@ -446,6 +446,55 @@ func TestRepoMarkTaskRunRunningRejectedWhenTransitionNotMatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestRepoMarkTaskRunDispatchedScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_run")).
+		WithArgs(
+			TaskRunStatusRunning,
+			"engine-1",
+			now,
+			now,
+			"u1",
+			uint64(77),
+			uint64(6),
+			TaskRunStatusPending,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	err = repo.MarkRunDispatched(context.Background(), 6, 77, "u1", TaskRunStatusPending, "engine-1", now)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoMarkTaskRunDispatchFailedScoped(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_run")).
+		WithArgs(
+			TaskRunStatusFailed,
+			"engine unavailable",
+			now,
+			"u1",
+			uint64(77),
+			uint64(6),
+			TaskRunStatusPending,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	err = repo.MarkRunDispatchFailed(context.Background(), 6, 77, "u1", TaskRunStatusPending, "engine unavailable", now)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestRepoMarkTaskRunTerminalTransitionChecksFromStatus(t *testing.T) {
 	sqlDB, mock, err := sqlmock.New()
 	require.NoError(t, err)
@@ -468,6 +517,85 @@ func TestRepoMarkTaskRunTerminalTransitionChecksFromStatus(t *testing.T) {
 
 	repo := NewRepository(dbgen.New(sqlDB))
 	err = repo.MarkRunFailed(context.Background(), 6, 77, "u1", TaskRunStatusRunning, "timeout", 2, now)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoListRunningRunsForReconcile(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run")).
+		WithArgs(int32(20)).
+		WillReturnRows(sqlmock.NewRows(taskRunCols).AddRow(
+			uint64(77), "t1", "o1", uint64(6), uint64(5), uint64(4), TaskTypeDNS,
+			TaskRunStatusRunning, int32(0), int32(60), int32(10), int32(2), int32(1),
+			int32(1), "engine-1", now.Add(-time.Minute), time.Time{}, uint64(0), "",
+			now.Add(-time.Minute), time.Time{}, "", now, now, "u1", "u1", time.Time{},
+		))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	runs, err := repo.ListRunningRunsForReconcile(context.Background(), 20)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, uint64(77), runs[0].ID)
+	assert.Equal(t, "engine-1", runs[0].EngineJobID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoInsertDiscoveryCallbackReportsDuplicate(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO discovery_callback")).
+		WithArgs(
+			"t1", "o1", uint64(6), uint64(77), uint64(3),
+			CallbackPhaseProgress, TaskRunStatusRunning, "abc123", uint64(2), "",
+			now,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	inserted, err := repo.InsertDiscoveryCallback(context.Background(), DiscoveryCallback{
+		TenantID:    "t1",
+		OrgID:       "o1",
+		ProjectID:   6,
+		RunID:       77,
+		Seq:         3,
+		Phase:       CallbackPhaseProgress,
+		Status:      TaskRunStatusRunning,
+		PayloadHash: "abc123",
+		ResultCount: 2,
+		ReceivedAt:  now,
+	})
+	require.NoError(t, err)
+	assert.False(t, inserted)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRepoMarkTaskRunCallbackReceivedRequiresRunning(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_run")).
+		WithArgs(
+			now,
+			uint64(2),
+			"engine",
+			uint64(77),
+			uint64(6),
+			TaskRunStatusRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	repo := NewRepository(dbgen.New(sqlDB))
+	err = repo.MarkRunCallbackReceived(context.Background(), 6, 77, "engine", 2, now)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

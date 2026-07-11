@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS change_event;
+DROP TABLE IF EXISTS exposure;
