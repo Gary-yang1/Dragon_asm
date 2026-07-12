@@ -1,9 +1,10 @@
-import { Alert, Button, Form, Input, Typography } from 'antd';
-import { Lock, ShieldCheck, UserRound } from 'lucide-react';
+import { Alert, Button, Form, Input, Tooltip, Typography } from 'antd';
+import { Lock, Moon, ShieldCheck, Sun, UserRound } from 'lucide-react';
 import { useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthProvider';
+import { useThemeStore } from '../stores/themeStore';
 
 type LoginForm = {
   username: string;
@@ -12,6 +13,8 @@ type LoginForm = {
 
 export function LoginPage() {
   const { accessToken, login, loading } = useAuth();
+  const toggleMode = useThemeStore((s) => s.toggleMode);
+  const themeMode = useThemeStore((s) => s.mode);
   const navigate = useNavigate();
   const location = useLocation();
   const [error, setError] = useState('');
@@ -38,6 +41,11 @@ export function LoginPage() {
           <span>攻击面梳理平台</span>
         </div>
       </div>
+      <Tooltip title={themeMode === 'dark' ? '浅色模式' : '深色模式'}>
+        <button type="button" className="login-theme-toggle" aria-label="切换主题" onClick={toggleMode}>
+          {themeMode === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+        </button>
+      </Tooltip>
       <section className="login-shell-grid">
         <section className="login-panel">
           <div className="login-panel-head">

@@ -1,4 +1,8 @@
-:root {
+/* ──────────────────────────────────────────────
+   Light Theme (default)
+   ────────────────────────────────────────────── */
+:root,
+[data-theme="light"] {
   --asm-bg: #f8fafc;
   --asm-surface: #ffffff;
   --asm-surface-soft: #f1f5f9;
@@ -7,11 +11,74 @@
   --asm-text: #0f172a;
   --asm-muted: #64748b;
   --asm-primary: #165dff;
-  --asm-primary-soft: #e8f3ff;
+  --asm-primary-soft: rgba(22, 93, 255, 0.08);
   --asm-primary-strong: #0e42d2;
-  --asm-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
-  --asm-shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px -2px rgba(0, 0, 0, 0.02);
-  --asm-shadow-hover: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.08);
+  --asm-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.06), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+  --asm-shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.03), 0 2px 4px -2px rgba(0, 0, 0, 0.02);
+  --asm-shadow-hover: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.06);
+  /* contextual tokens */
+  --asm-topbar-bg: rgba(255, 255, 255, 0.92);
+  --asm-gradient-top: #f8fafc;
+  --asm-login-glow-1: rgba(22, 93, 255, 0.05);
+  --asm-login-glow-2: rgba(22, 93, 255, 0.07);
+  --asm-login-panel-bg: rgba(255, 255, 255, 0.85);
+  --asm-login-panel-border: rgba(226, 232, 240, 0.8);
+  --asm-login-panel-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.04), 0 20px 48px -10px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --asm-login-icon-bg: rgba(22, 93, 255, 0.08);
+  --asm-login-icon-border: rgba(22, 93, 255, 0.15);
+  --asm-toggle-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --asm-toggle-hover-shadow: 0 4px 12px rgba(22, 93, 255, 0.2);
+  /* status tones */
+  --asm-critical: #dc2626;
+  --asm-critical-soft: rgba(220, 38, 38, 0.08);
+  --asm-critical-glow: 0 8px 20px -8px rgba(220, 38, 38, 0.18);
+  --asm-high: #ea580c;
+  --asm-high-soft: rgba(234, 88, 12, 0.08);
+  --asm-high-glow: 0 8px 20px -8px rgba(234, 88, 12, 0.18);
+  --asm-good: #16a34a;
+  --asm-good-soft: rgba(22, 163, 74, 0.08);
+  --asm-good-glow: 0 8px 20px -8px rgba(22, 163, 74, 0.18);
+}
+
+/* ──────────────────────────────────────────────
+   Dark Theme
+   ────────────────────────────────────────────── */
+[data-theme="dark"] {
+  --asm-bg: #090d16;
+  --asm-surface: #0f172a;
+  --asm-surface-soft: #1e293b;
+  --asm-border: #1e293b;
+  --asm-border-strong: #334155;
+  --asm-text: #f8fafc;
+  --asm-muted: #94a3b8;
+  --asm-primary: #3b82f6;
+  --asm-primary-soft: rgba(59, 130, 246, 0.15);
+  --asm-primary-strong: #2563eb;
+  --asm-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  --asm-shadow-soft: 0 4px 12px -2px rgba(0, 0, 0, 0.4);
+  --asm-shadow-hover: 0 20px 40px -15px rgba(59, 130, 246, 0.15);
+  /* contextual tokens */
+  --asm-topbar-bg: rgba(15, 23, 42, 0.85);
+  --asm-gradient-top: #0f172a;
+  --asm-login-glow-1: rgba(59, 130, 246, 0.06);
+  --asm-login-glow-2: rgba(59, 130, 246, 0.08);
+  --asm-login-panel-bg: rgba(15, 23, 42, 0.75);
+  --asm-login-panel-border: rgba(255, 255, 255, 0.08);
+  --asm-login-panel-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5), 0 20px 48px -10px rgba(9, 13, 22, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --asm-login-icon-bg: rgba(59, 130, 246, 0.1);
+  --asm-login-icon-border: rgba(59, 130, 246, 0.2);
+  --asm-toggle-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --asm-toggle-hover-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+  /* status tones */
+  --asm-critical: #ef4444;
+  --asm-critical-soft: rgba(239, 68, 68, 0.15);
+  --asm-critical-glow: 0 12px 30px -10px rgba(239, 68, 68, 0.25), 0 0 15px rgba(239, 68, 68, 0.15);
+  --asm-high: #f97316;
+  --asm-high-soft: rgba(249, 115, 22, 0.15);
+  --asm-high-glow: 0 12px 30px -10px rgba(249, 115, 22, 0.25), 0 0 15px rgba(249, 115, 22, 0.15);
+  --asm-good: #10b981;
+  --asm-good-soft: rgba(16, 185, 129, 0.15);
+  --asm-good-glow: 0 12px 30px -10px rgba(16, 185, 129, 0.25), 0 0 15px rgba(16, 185, 129, 0.15);
 }
 
 * {
@@ -24,6 +91,7 @@ body {
   color: var(--asm-text);
   font-family:
     'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 #root {
@@ -34,7 +102,7 @@ body {
   min-height: calc(100vh - 56px);
   padding: 24px;
   background:
-    linear-gradient(180deg, #f8fafc 0%, var(--asm-bg) 100%),
+    linear-gradient(180deg, var(--asm-gradient-top) 0%, var(--asm-bg) 100%),
     var(--asm-bg);
 }
 
@@ -54,13 +122,13 @@ body {
   gap: 18px;
   padding: 0 18px 0 22px;
   border-bottom: 1px solid var(--asm-border);
-  background: rgb(255 255 255 / 94%);
+  background: var(--asm-topbar-bg);
   backdrop-filter: blur(12px);
 }
 
 .app-topbar-title {
   min-width: 0;
-  color: #26364d;
+  color: var(--asm-text);
   font-size: 14px;
   font-weight: 600;
   line-height: 1;
@@ -258,42 +326,57 @@ body {
 }
 
 .metric-card--critical {
-  border-left: 3.5px solid #ff4d4f !important;
+  border-left: 3.5px solid var(--asm-critical) !important;
 }
 
 .metric-card--critical .metric-card-icon {
-  background: #fde8e8;
-  color: #c53030;
+  background: var(--asm-critical-soft);
+  color: var(--asm-critical);
 }
 
 .metric-card--critical .metric-card-value {
-  color: #c53030;
+  color: var(--asm-critical);
+}
+
+.metric-card--critical:hover {
+  box-shadow: var(--asm-critical-glow) !important;
+  border-color: var(--asm-critical) !important;
 }
 
 .metric-card--high {
-  border-left: 3.5px solid #ff7a45 !important;
+  border-left: 3.5px solid var(--asm-high) !important;
 }
 
 .metric-card--high .metric-card-icon {
-  background: #fdeccc;
-  color: #ad4e00;
+  background: var(--asm-high-soft);
+  color: var(--asm-high);
 }
 
 .metric-card--high .metric-card-value {
-  color: #ad4e00;
+  color: var(--asm-high);
+}
+
+.metric-card--high:hover {
+  box-shadow: var(--asm-high-glow) !important;
+  border-color: var(--asm-high) !important;
 }
 
 .metric-card--good {
-  border-left: 3.5px solid #52c41a !important;
+  border-left: 3.5px solid var(--asm-good) !important;
 }
 
 .metric-card--good .metric-card-icon {
-  background: #e6f6f0;
-  color: #047857;
+  background: var(--asm-good-soft);
+  color: var(--asm-good);
 }
 
 .metric-card--good .metric-card-value {
-  color: #047857;
+  color: var(--asm-good);
+}
+
+.metric-card--good:hover {
+  box-shadow: var(--asm-good-glow) !important;
+  border-color: var(--asm-good) !important;
 }
 
 .metric-card--neutral {
@@ -303,6 +386,11 @@ body {
 .metric-card--neutral .metric-card-icon {
   background: var(--asm-primary-soft);
   color: var(--asm-primary);
+}
+
+.metric-card--neutral:hover {
+  box-shadow: var(--asm-shadow-hover) !important;
+  border-color: var(--asm-primary) !important;
 }
 
 .surface-table .ant-pro-card {
@@ -338,7 +426,7 @@ body {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #64748b;
+  color: var(--asm-muted);
   font-size: 14px;
   line-height: 1;
   text-align: left;
@@ -430,14 +518,15 @@ body {
 .asm-app-layout .ant-pro-sider,
 .asm-app-layout .ant-layout-sider,
 .asm-app-layout .ant-pro-sider .ant-layout-sider-children {
-  background: #fbfdff !important;
+  background: var(--asm-surface) !important;
   border-inline-end: 1px solid var(--asm-border);
   box-shadow: none !important;
+  overflow: visible !important;
 }
 
 .asm-app-layout .ant-pro-global-header {
   height: 56px;
-  background: rgb(255 255 255 / 92%);
+  background: var(--asm-topbar-bg);
   border-bottom: 1px solid var(--asm-border);
   box-shadow: none;
   backdrop-filter: blur(12px);
@@ -490,31 +579,40 @@ body {
 }
 
 .asm-app-layout .layout-collapse-toggle {
-  inset-block-start: auto !important;
-  inset-block-end: 16px !important;
-  inset-inline-end: 12px !important;
-  width: 32px !important;
-  height: 32px !important;
-  border: 1px solid var(--asm-border-strong);
-  border-radius: 8px;
-  background: #fff;
-  color: var(--asm-muted);
-  box-shadow: none;
-  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  position: absolute !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  right: -12px !important;
+  left: auto !important;
+  bottom: auto !important;
+  z-index: 999 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 24px !important;
+  height: 24px !important;
+  border: 1px solid var(--asm-border-strong) !important;
+  border-radius: 50% !important;
+  background: var(--asm-surface) !important;
+  color: var(--asm-text) !important;
+  box-shadow: var(--asm-toggle-shadow) !important;
+  cursor: pointer !important;
+  transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
 }
 
 .asm-app-layout .layout-collapse-toggle:hover {
-  border-color: #bfd8ff;
-  background: var(--asm-primary-soft);
-  color: var(--asm-primary);
-  box-shadow: none;
+  border-color: var(--asm-primary) !important;
+  background: var(--asm-primary) !important;
+  color: #ffffff !important;
+  transform: translateY(-50%) scale(1.1) !important;
+  box-shadow: var(--asm-toggle-hover-shadow) !important;
 }
 
 .asm-app-layout .layout-collapse-toggle:active,
 .asm-app-layout .layout-collapse-toggle:focus,
 .asm-app-layout .layout-collapse-toggle:focus-visible {
-  outline: none;
-  box-shadow: none;
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .asm-app-layout .layout-collapse-toggle > svg {
@@ -524,7 +622,7 @@ body {
 .asm-app-layout .ant-pro-sider-actions,
 .asm-app-layout .ant-pro-sider-footer {
   border-top: 1px solid var(--asm-border);
-  background: #fbfdff;
+  background: var(--asm-surface);
   box-shadow: none;
 }
 
@@ -533,7 +631,7 @@ body {
   font-size: 16px;
   line-height: 1.1;
   font-weight: 700;
-  color: #13294b;
+  color: var(--asm-text);
 }
 
 .layout-brand {
@@ -625,7 +723,7 @@ body {
 .layout-global-search .ant-input-affix-wrapper,
 .layout-global-search .ant-input,
 .layout-global-search .ant-input-group-addon .ant-btn {
-  background: #f6f9fe;
+  background: var(--asm-surface-soft);
   border-color: var(--asm-border);
   box-shadow: none;
 }
@@ -646,8 +744,8 @@ body {
 .layout-global-search .ant-input-affix-wrapper:focus,
 .layout-global-search .ant-input-affix-wrapper-focused,
 .layout-global-search .ant-input-group-addon .ant-btn:hover {
-  border-color: #bfd8ff;
-  background: #fff;
+  border-color: var(--asm-primary);
+  background: var(--asm-surface);
   box-shadow: none;
 }
 
@@ -671,7 +769,7 @@ body {
 }
 
 .layout-top-action:hover {
-  background: #f4f8ff !important;
+  background: var(--asm-primary-soft) !important;
   color: var(--asm-primary) !important;
 }
 
@@ -683,8 +781,8 @@ body {
   gap: 8px;
   border: 1px solid var(--asm-border);
   border-radius: 8px;
-  background: #fff;
-  color: #334155;
+  background: var(--asm-surface);
+  color: var(--asm-text);
   cursor: pointer;
   padding: 2px 8px 2px 4px;
   outline: 0;
@@ -694,8 +792,8 @@ body {
 
 .layout-user-trigger:hover,
 .layout-user-trigger:focus-visible {
-  border-color: #bfd8ff;
-  background: #f7fbff;
+  border-color: var(--asm-primary);
+  background: var(--asm-primary-soft);
   color: var(--asm-primary);
 }
 
@@ -725,9 +823,9 @@ body {
   overflow: hidden;
   padding: 88px 14px 36px;
   background: 
-    radial-gradient(circle at 10% 20%, rgba(22, 93, 255, 0.05) 0%, transparent 40%),
-    radial-gradient(circle at 90% 80%, rgba(22, 93, 255, 0.07) 0%, transparent 45%),
-    #f8fafc;
+    radial-gradient(circle at 10% 20%, var(--asm-login-glow-1) 0%, transparent 40%),
+    radial-gradient(circle at 90% 80%, var(--asm-login-glow-2) 0%, transparent 45%),
+    var(--asm-bg);
   background-size: cover;
   font-family:
     'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
@@ -740,7 +838,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 12px;
-  color: #0f172a;
+  color: var(--asm-text);
 }
 
 .login-logo img.logo-img {
@@ -767,20 +865,43 @@ body {
   font-size: 11px;
 }
 
+.login-theme-toggle {
+  position: fixed;
+  inset-block-start: 28px;
+  inset-inline-end: 30px;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid var(--asm-border-strong);
+  border-radius: 50%;
+  background: var(--asm-surface);
+  color: var(--asm-muted);
+  cursor: pointer;
+  outline: 0;
+  box-shadow: var(--asm-toggle-shadow);
+  transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.login-theme-toggle:hover {
+  border-color: var(--asm-primary);
+  background: var(--asm-primary);
+  color: #fff;
+  transform: scale(1.1);
+  box-shadow: var(--asm-toggle-hover-shadow);
+}
+
 .login-panel {
   width: min(100%, 398px);
   padding: 36px 40px 40px;
-  border: 1px solid rgba(226, 232, 240, 0.8);
+  border: 1px solid var(--asm-login-panel-border);
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--asm-login-panel-bg);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  box-shadow: 
-    0 10px 25px -5px rgba(15, 23, 42, 0.04),
-    0 20px 48px -10px rgba(15, 23, 42, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  box-shadow: var(--asm-login-panel-shadow);
   align-self: center;
-  transition: transform 0.3s ease;
+  transition: transform 0.3s ease, background 0.3s ease, box-shadow 0.3s ease;
 }
 
 .login-panel form {
@@ -799,9 +920,9 @@ body {
   height: 34px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid #d8e8ff;
+  border: 1px solid var(--asm-login-icon-border);
   border-radius: 8px;
-  background: #f0f6ff;
+  background: var(--asm-login-icon-bg);
   color: var(--asm-primary);
 }
 
@@ -812,7 +933,7 @@ body {
 }
 
 .login-panel .ant-form-item-label > label {
-  color: #344054;
+  color: var(--asm-text);
   font-size: 13px;
   font-weight: 500;
 }
@@ -825,14 +946,14 @@ body {
   height: 38px;
   border-color: var(--asm-border);
   border-radius: 8px;
-  background: #fbfdff;
+  background: var(--asm-surface-soft);
   box-shadow: none;
 }
 
 .login-panel .ant-input-affix-wrapper:hover,
 .login-panel .ant-input-affix-wrapper-focused {
-  border-color: #bfd8ff;
-  background: #fff;
+  border-color: var(--asm-primary);
+  background: var(--asm-surface);
   box-shadow: none;
 }
 
@@ -882,23 +1003,23 @@ body {
   gap: 16px;
   margin-top: 18px;
   padding: 12px 16px;
-  border: 1px solid #b7eb8f;
+  border: 1px solid var(--asm-good);
   border-radius: 8px;
-  background: #f6ffed;
+  background: var(--asm-good-soft);
 }
 
 .asset-graph {
   height: 260px;
   border: 1px solid var(--asm-border);
   border-radius: 6px;
-  background: #fbfcfd;
+  background: var(--asm-surface-soft);
 }
 
 .asset-graph-empty {
   display: grid;
   height: 260px;
   place-items: center;
-  border: 1px dashed #cbd5df;
+  border: 1px dashed var(--asm-border-strong);
   border-radius: 6px;
   color: var(--asm-muted);
 }
@@ -906,7 +1027,7 @@ body {
 .asset-graph-list {
   margin: 10px 0 0;
   padding-left: 18px;
-  color: #475569;
+  color: var(--asm-muted);
 }
 
 .import-stats {
@@ -950,7 +1071,7 @@ body {
 .plain-select {
   height: 32px;
   min-width: 160px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--asm-border);
   border-radius: 8px;
   background: var(--asm-surface);
   padding: 4px 10px;
@@ -964,9 +1085,9 @@ body {
 
 .settings-placeholder {
   padding: 18px;
-  border: 1px dashed #cbd5df;
+  border: 1px dashed var(--asm-border-strong);
   border-radius: 8px;
-  color: #64748b;
+  color: var(--asm-muted);
 }
 
 .card-title-row {
@@ -1091,7 +1212,7 @@ body {
 
 .card-muted-empty {
   border: 1px dashed var(--asm-border);
-  background: linear-gradient(0deg, #fbfdff, #fbfdff);
+  background: var(--asm-surface-soft);
   border-radius: 8px;
   padding: 10px 12px;
   color: var(--asm-muted);

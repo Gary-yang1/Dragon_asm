@@ -1,7 +1,7 @@
 import { ProLayout } from '@ant-design/pro-components';
 import { Avatar, Button, Dropdown, Input, Select, Space, Tooltip } from 'antd';
-import { BarChart3, Bell, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FolderKanban, FolderOpen, LayoutDashboard, LogOut, Radar, Server, Settings, ShieldCheck, SlidersHorizontal } from 'lucide-react';
-import { cloneElement, isValidElement, useCallback, useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react';
+import { BarChart3, Bell, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FolderKanban, FolderOpen, LayoutDashboard, LogOut, Moon, Radar, Server, Settings, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthProvider';
@@ -9,13 +9,17 @@ import { Permission } from '../auth/permissions';
 import { usePermission } from '../auth/usePermission';
 import { sanitizeDisplayName } from '../utils/text';
 import { listProjects, type Project } from '../api/projects';
+import { useThemeStore } from '../stores/themeStore';
 
 export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
+  const toggleMode = useThemeStore((s) => s.toggleMode);
+  const themeMode = useThemeStore((s) => s.mode);
   const { user, logout, can: canGlobal } = useAuth();
   const { can } = usePermission();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [collapsed, setCollapsed] = useState(false);
   const projectMatch = location.pathname.match(/^\/projects\/(\d+)(?:\/|$)/);
   const projectId = projectMatch ? Number(projectMatch[1]) : 0;
   const projectPrefix = projectId ? `/projects/${projectId}` : '';
@@ -164,21 +168,31 @@ export function AppLayout() {
             {dom}
           </div>
         )}
+      collapsed={collapsed}
+      onCollapse={setCollapsed}
       avatarProps={false}
       layout="side"
       siderWidth={216}
       fixSiderbar
       contentStyle={{ padding: 0 }}
       menu={{ collapsedShowTitle: false }}
-      collapsedButtonRender={(collapsed, defaultDom) => (
+      collapsedButtonRender={() => (
         <Tooltip title={collapsed ? '展开' : '收起'} placement="right">
-          {isValidElement(defaultDom)
-            ? cloneElement(defaultDom as ReactElement<{ className?: string; children?: ReactNode; 'aria-label'?: string }>, {
-                className: `${defaultDom.props.className ?? ''} layout-collapse-toggle`.trim(),
-                'aria-label': collapsed ? '展开侧边栏' : '收起侧边栏',
-                children: collapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />
-              })
-            : defaultDom}
+          <div
+            role="button"
+            tabIndex={0}
+            className="layout-collapse-toggle"
+            aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
+            onClick={() => setCollapsed(!collapsed)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                setCollapsed(!collapsed);
+              }
+            }}
+          >
+            {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+          </div>
         </Tooltip>
       )}
     >
@@ -232,6 +246,15 @@ export function AppLayout() {
               onSearch={(value) => jumpToSearchPage(value)}
             />
             <span className="layout-top-divider" aria-hidden="true" />
+            <Tooltip title={themeMode === 'dark' ? '浅色模式' : '深色模式'}>
+              <Button
+                aria-label="切换主题"
+                type="text"
+                className="layout-top-action"
+                icon={themeMode === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+                onClick={toggleMode}
+              />
+            </Tooltip>
             <Button
               aria-label="通知"
               type="text"
