@@ -228,16 +228,155 @@ WHERE id = ? AND project_id = ? AND status = ? AND deleted_at = '1970-01-01 00:0
 -- Discovery callback queries.
 -- name: InsertDiscoveryCallback :execresult
 INSERT IGNORE INTO discovery_callback (
-    tenant_id, org_id, project_id, run_id, seq,
-    phase, status, payload_hash, result_count, error_summary,
-    received_at
+    tenant_id, org_id, project_id, run_id, seq, schema_version,
+    phase, status, observed_at, payload_hash, payload_json, payload_size,
+    result_count, error_summary, received_at, ingest_status
 ) VALUES (
-    ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?,
-    ?
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?
 );
+
+-- name: GetDiscoveryCallback :one
+SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
+       phase, status, observed_at, payload_hash, payload_json, payload_size,
+       result_count, error_summary, received_at, enqueued_at, ingest_status,
+       ingest_attempt, ingest_error, processed_at, created_at, updated_at, deleted_at
+FROM discovery_callback
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: ListPendingDiscoveryCallbacks :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
+       phase, status, observed_at, payload_hash, payload_json, payload_size,
+       result_count, error_summary, received_at, enqueued_at, ingest_status,
+       ingest_attempt, ingest_error, processed_at, created_at, updated_at, deleted_at
+FROM discovery_callback
+WHERE (
+      ingest_status = 'pending'
+      OR (ingest_status = 'failed' AND ingest_attempt < 10)
+      OR (ingest_status = 'processing' AND ingest_attempt < 10 AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE))
+  )
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY received_at ASC, id ASC
+LIMIT ?;
 
 -- name: MarkDiscoveryCallbackEnqueued :exec
 UPDATE discovery_callback
 SET enqueued_at = ?
 WHERE project_id = ? AND run_id = ? AND seq = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: MarkDiscoveryCallbackProcessing :execresult
+UPDATE discovery_callback
+SET ingest_status = 'processing',
+    ingest_attempt = ingest_attempt + 1,
+    ingest_error = ''
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND (
+      ingest_status IN ('pending', 'failed')
+      OR (ingest_status = 'processing' AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE))
+  )
+  AND ingest_attempt < 10
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: MarkDiscoveryCallbackProcessed :execresult
+UPDATE discovery_callback
+SET ingest_status = 'processed',
+    ingest_error = '',
+    processed_at = ?
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND ingest_status = 'processing'
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: MarkDiscoveryCallbackFailed :exec
+UPDATE discovery_callback
+SET ingest_status = 'failed',
+    ingest_error = ?
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND ingest_status = 'processing'
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: ListDiscoveryCallbacksForRunForUpdate :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
+       phase, status, observed_at, payload_hash, payload_json, payload_size,
+       result_count, error_summary, received_at, enqueued_at, ingest_status,
+       ingest_attempt, ingest_error, processed_at, created_at, updated_at, deleted_at
+FROM discovery_callback
+WHERE project_id = ? AND run_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY seq
+FOR UPDATE;
+
+-- Discovery observation queries.
+-- name: UpsertDiscoveryObservation :execresult
+INSERT INTO discovery_observation (
+    tenant_id, org_id, project_id, run_id, seq, kind, natural_key, client_ref,
+    provider, capability, observed_at, confidence, active_probe, evidence_hash,
+    evidence_ref, normalized_json, normalized_size, ingest_status, ingest_error
+) VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?
+)
+ON DUPLICATE KEY UPDATE
+    id = LAST_INSERT_ID(id),
+    seq = VALUES(seq),
+    client_ref = VALUES(client_ref),
+    capability = VALUES(capability),
+    observed_at = GREATEST(observed_at, VALUES(observed_at)),
+    confidence = VALUES(confidence),
+    active_probe = VALUES(active_probe),
+    evidence_hash = VALUES(evidence_hash),
+    evidence_ref = VALUES(evidence_ref),
+    normalized_json = VALUES(normalized_json),
+    normalized_size = VALUES(normalized_size),
+    ingest_status = VALUES(ingest_status),
+    ingest_error = VALUES(ingest_error);
+
+-- name: GetDiscoveryObservation :one
+SELECT * FROM discovery_observation
+WHERE id = ? AND project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: ListDiscoveryObservationsByRun :many
+SELECT * FROM discovery_observation
+WHERE project_id = ? AND run_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY seq, id;
+
+-- name: ListDiscoveryObservationsByRunSeq :many
+SELECT * FROM discovery_observation
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id;
+
+-- name: ListDiscoveryObservationsByNaturalKey :many
+SELECT * FROM discovery_observation
+WHERE project_id = ? AND kind = ? AND natural_key = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY observed_at DESC, id DESC;
+
+-- name: MarkDiscoveryObservationMaterialized :exec
+UPDATE discovery_observation
+SET ingest_status = 'materialized', ingest_error = ''
+WHERE id = ? AND project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: ListCurrentDiscoveryAssetObservationKeys :many
+SELECT DISTINCT natural_key
+FROM discovery_observation
+WHERE project_id = ? AND run_id = ? AND capability = ?
+  AND kind = 'asset' AND ingest_status = 'materialized'
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: ListDiscoveryLifecycleAssets :many
+SELECT DISTINCT a.*
+FROM asset a
+JOIN discovery_observation o
+  ON o.project_id = a.project_id AND o.natural_key = a.asset_key
+WHERE a.project_id = ? AND o.capability = ? AND o.kind = 'asset'
+  AND o.ingest_status = 'materialized'
+  AND a.source = 'discovery'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+  AND o.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY a.id;

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -173,11 +174,18 @@ func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 		asset.WithRelationRepository(asset.NewRelationRepository(queries)),
 		asset.WithMissThreshold(envIntOr("ASSET_MISS_THRESHOLD", asset.DefaultMissThreshold)),
 	)
-	discoverySvc := discovery.NewService(
-		discovery.NewRepository(queries),
+	discoveryOpts := []discovery.ServiceOption{
 		discovery.WithDB(sqlDB),
 		discovery.WithAuditSink(auditSvc),
-	)
+	}
+	if engineBaseURL := strings.TrimSpace(os.Getenv("DISCOVERY_ENGINE_BASE_URL")); engineBaseURL != "" {
+		engineAdapter, engineErr := discovery.NewHTTPEngineAdapter(engineBaseURL, os.Getenv("DISCOVERY_ENGINE_TOKEN"), nil)
+		if engineErr != nil {
+			logger.Warn("discovery cancellation disabled; invalid engine configuration")
+		} else {
+			discoveryOpts = append(discoveryOpts, discovery.WithEngineAdapter(engineAdapter))
+		}
+	}
 	riskSvc := risk.NewService(risk.NewRepository(queries), risk.WithDB(sqlDB))
 	ticketSvc := ticket.NewService(
 		ticket.NewRepository(queries),
@@ -202,15 +210,38 @@ func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 		report.WithExportDir(envOr("REPORT_EXPORT_DIR", "/tmp/asm-report-exports")),
 		report.WithExportEnqueuer(report.NewAsynqExportEnqueuer(asynqClient, "low")),
 	)
-	callbackSecret := os.Getenv("DISCOVERY_CALLBACK_SECRET")
-	if callbackSecret != "" {
-		discoverySvc = discovery.NewService(
-			discovery.NewRepository(queries),
-			discovery.WithDB(sqlDB),
-			discovery.WithAuditSink(auditSvc),
+	callbackSecret := strings.TrimSpace(os.Getenv("DISCOVERY_CALLBACK_SECRET"))
+	callbackLegacySecret := strings.TrimSpace(os.Getenv("DISCOVERY_CALLBACK_LEGACY_SECRET"))
+	callbackSecretsJSON := strings.TrimSpace(os.Getenv("DISCOVERY_CALLBACK_SECRETS"))
+	callbackSecretRef := strings.TrimSpace(os.Getenv("DISCOVERY_CALLBACK_SECRET_REF"))
+	callbackBaseURL := strings.TrimSpace(os.Getenv("DISCOVERY_CALLBACK_BASE_URL"))
+	callbackConfigured := callbackSecret != "" || callbackSecretsJSON != ""
+	var callbackCredentials *discovery.CallbackCredentialSet
+	if callbackConfigured {
+		if callbackLegacySecret == "" {
+			callbackLegacySecret = callbackSecret
+		}
+		callbackCredentials, err = discovery.NewCallbackCredentialSet(callbackSecretRef, callbackLegacySecret, callbackSecretsJSON)
+		if err != nil {
+			return err
+		}
+		discoveryOpts = append(discoveryOpts,
 			discovery.WithCallbackEnqueuer(discovery.NewAsynqCallbackEnqueuer(asynqClient, "default")),
+			discovery.WithCallbackSecretRef(callbackCredentials.ActiveRef()),
 		)
 	}
+	if callbackConfigured && callbackBaseURL != "" {
+		if _, err := discovery.NewCallbackURLBuilder(callbackBaseURL); err == nil {
+			discoveryOpts = append(discoveryOpts,
+				discovery.WithDispatchEnqueuer(discovery.NewAsynqDispatchEnqueuer(asynqClient, "default")),
+			)
+		} else {
+			logger.Warn("discovery trigger disabled; invalid callback base URL", "env", "DISCOVERY_CALLBACK_BASE_URL")
+		}
+	} else {
+		logger.Warn("discovery trigger disabled; callback configuration incomplete")
+	}
+	discoverySvc := discovery.NewService(discovery.NewRepository(queries), discoveryOpts...)
 
 	// Split /api/v1 into public (login, refresh) and protected (everything
 	// else) groups. Business routes added to apiProtected automatically get
@@ -225,10 +256,15 @@ func wireAPIRoutes(engine *gin.Engine, logger *slog.Logger) error {
 	auth.NewHandler(authSvc).RegisterRoutes(apiPublic, apiAuthenticated)
 	auth.NewAdminUserHandler(adminUserSvc).RegisterRoutes(apiProtected)
 	project.NewHandler(projectSvc, enforcer).RegisterRoutes(apiProtected)
-	if callbackSecret != "" {
-		discovery.NewHandler(discoverySvc, callbackSecret, logger).RegisterPublicRoutes(apiPublic)
+	discovery.NewManagementHandler(discoverySvc, projectSvc, enforcer).RegisterRoutes(apiProtected)
+	if callbackCredentials != nil {
+		callbackHandler, handlerErr := discovery.NewCredentialBoundHandler(discoverySvc, callbackCredentials, logger)
+		if handlerErr != nil {
+			return handlerErr
+		}
+		callbackHandler.RegisterPublicRoutes(apiPublic)
 	} else {
-		logger.Warn("discovery callback route not wired; DISCOVERY_CALLBACK_SECRET is unset")
+		logger.Warn("discovery callback route not wired; callback credentials are unset")
 	}
 	asset.NewHandler(assetSvc, projectSvc, enforcer, logger).RegisterRoutes(apiProtected)
 	exposure.NewHandler(exposureSvc, projectSvc, enforcer).RegisterRoutes(apiProtected)

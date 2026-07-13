@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 )
@@ -38,6 +39,7 @@ type UpsertRelationParams struct {
 	Source       string
 	Confidence   uint8
 	ActorID      string
+	ObservedAt   time.Time
 }
 
 type sqlcRelationRepository struct {
@@ -50,6 +52,10 @@ func NewRelationRepository(q *dbgen.Queries) RelationRepository {
 }
 
 func (r *sqlcRelationRepository) Upsert(ctx context.Context, in UpsertRelationParams) error {
+	observedAt := in.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = nowFn()
+	}
 	_, err := r.q.UpsertRelation(ctx, dbgen.UpsertRelationParams{
 		TenantID:     in.TenantID,
 		OrgID:        in.OrgID,
@@ -59,8 +65,8 @@ func (r *sqlcRelationRepository) Upsert(ctx context.Context, in UpsertRelationPa
 		RelationType: in.RelationType,
 		Source:       in.Source,
 		Confidence:   in.Confidence,
-		FirstSeen:    nowFn(),
-		LastSeen:     nowFn(),
+		FirstSeen:    observedAt,
+		LastSeen:     observedAt,
 		CreatedBy:    in.ActorID,
 		UpdatedBy:    in.ActorID,
 	})

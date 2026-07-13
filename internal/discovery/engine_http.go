@@ -8,11 +8,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	engineSchemaVersion   = "1.0"
+	engineHTTPTimeout     = 30 * time.Second
+	engineMaxResponseBody = 1 << 20
 )
 
 // HTTPClient is the subset of http.Client used by HTTPEngineAdapter.
@@ -30,21 +37,25 @@ type HTTPEngineAdapter struct {
 // NewHTTPEngineAdapter builds an HTTP adapter. baseURL must come from trusted config.
 func NewHTTPEngineAdapter(baseURL string, token string, client HTTPClient) (*HTTPEngineAdapter, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
+	token = strings.TrimSpace(token)
+	if baseURL == "" || token == "" {
 		return nil, ErrEngineNotConfigured
 	}
 	u, err := url.Parse(baseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, ErrEngineNotConfigured
 	}
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: engineHTTPTimeout}
 	}
 	return &HTTPEngineAdapter{baseURL: baseURL, token: token, client: client}, nil
 }
 
 type dispatchRequest struct {
-	RunID          string         `json:"run_id"`
+	SchemaVersion  string         `json:"schema_version"`
+	RunID          uint64         `json:"run_id"`
+	ProjectID      uint64         `json:"project_id"`
+	ScopeID        uint64         `json:"scope_id"`
 	JobType        string         `json:"job_type"`
 	Targets        []Target       `json:"targets"`
 	RateLimit      int            `json:"rate_limit"`
@@ -60,16 +71,21 @@ type dispatchResponse struct {
 
 type statusResponse struct {
 	Status       string `json:"status"`
+	Progress     int    `json:"progress"`
 	ResultCount  uint64 `json:"result_count"`
 	ErrorSummary string `json:"error_summary"`
 }
 
 func (a *HTTPEngineAdapter) Dispatch(ctx context.Context, job ScanJob) (string, error) {
-	if strings.TrimSpace(job.RunID) == "" || strings.TrimSpace(job.JobType) == "" || len(job.Targets) == 0 {
+	if job.RunID == 0 || job.ProjectID == 0 || job.ScopeID == 0 || !validEngineV1JobType(job.JobType) ||
+		len(job.Targets) == 0 || strings.TrimSpace(job.CallbackURL) == "" {
 		return "", ErrEngineDispatch
 	}
 	body, err := json.Marshal(dispatchRequest{
+		SchemaVersion:  engineSchemaVersion,
 		RunID:          job.RunID,
+		ProjectID:      job.ProjectID,
+		ScopeID:        job.ScopeID,
 		JobType:        job.JobType,
 		Targets:        job.Targets,
 		RateLimit:      job.RateLimit,
@@ -86,10 +102,8 @@ func (a *HTTPEngineAdapter) Dispatch(ctx context.Context, job ScanJob) (string, 
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", job.RunID)
-	if a.token != "" {
-		req.Header.Set("Authorization", "Bearer "+a.token)
-	}
+	req.Header.Set("Idempotency-Key", strconv.FormatUint(job.RunID, 10))
+	req.Header.Set("Authorization", "Bearer "+a.token)
 
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -100,7 +114,7 @@ func (a *HTTPEngineAdapter) Dispatch(ctx context.Context, job ScanJob) (string, 
 		return "", fmt.Errorf("%w: status=%d", ErrEngineDispatch, resp.StatusCode)
 	}
 	var out dispatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := decodeEngineJSON(resp.Body, &out); err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(out.EngineJobID) == "" {
@@ -118,9 +132,7 @@ func (a *HTTPEngineAdapter) Cancel(ctx context.Context, engineJobID string) erro
 	if err != nil {
 		return err
 	}
-	if a.token != "" {
-		req.Header.Set("Authorization", "Bearer "+a.token)
-	}
+	req.Header.Set("Authorization", "Bearer "+a.token)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return err
@@ -141,9 +153,7 @@ func (a *HTTPEngineAdapter) Status(ctx context.Context, engineJobID string) (Eng
 	if err != nil {
 		return EngineJobStatus{}, err
 	}
-	if a.token != "" {
-		req.Header.Set("Authorization", "Bearer "+a.token)
-	}
+	req.Header.Set("Authorization", "Bearer "+a.token)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return EngineJobStatus{}, err
@@ -153,12 +163,45 @@ func (a *HTTPEngineAdapter) Status(ctx context.Context, engineJobID string) (Eng
 		return EngineJobStatus{}, fmt.Errorf("%w: status=%d", ErrEngineStatus, resp.StatusCode)
 	}
 	var out statusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := decodeEngineJSON(resp.Body, &out); err != nil {
 		return EngineJobStatus{}, err
 	}
 	out.Status = strings.TrimSpace(out.Status)
-	if out.Status == "" {
+	if !validEngineJobStatus(out.Status) || out.Progress < 0 || out.Progress > 100 {
 		return EngineJobStatus{}, ErrEngineStatus
 	}
 	return EngineJobStatus(out), nil
+}
+
+func decodeEngineJSON(body io.Reader, out any) error {
+	raw, err := io.ReadAll(io.LimitReader(body, engineMaxResponseBody+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > engineMaxResponseBody {
+		return ErrEngineStatus
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return ErrEngineStatus
+	}
+	return nil
+}
+
+func validEngineV1JobType(jobType string) bool {
+	return jobType == TaskTypePassiveIntel || jobType == TaskTypeDNS
+}
+
+func validEngineJobStatus(status string) bool {
+	switch status {
+	case EngineJobStatusRunning, EngineJobStatusSuccess, EngineJobStatusPartialSuccess, EngineJobStatusFailed, EngineJobStatusCancelled:
+		return true
+	default:
+		return false
+	}
 }

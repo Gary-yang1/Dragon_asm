@@ -1,5 +1,3 @@
-version: '3.9'
-
 # Development-only compose file.
 # Secrets use ${VAR:-fallback} so that a real .env file overrides them.
 # DO NOT use these fallback values outside local development.
@@ -25,7 +23,13 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-access-secret-changeme}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-refresh-secret-changeme}
-      ENGINE_CALLBACK_SECRET: ${ENGINE_CALLBACK_SECRET:-dev-callback-secret-changeme}
+      DISCOVERY_CALLBACK_SECRET: ${DISCOVERY_CALLBACK_SECRET:-dev-callback-secret-changeme}
+      DISCOVERY_CALLBACK_SECRET_REF: ${DISCOVERY_CALLBACK_SECRET_REF:-baiyan-primary}
+      DISCOVERY_CALLBACK_SECRETS: ${DISCOVERY_CALLBACK_SECRETS:-}
+      DISCOVERY_CALLBACK_LEGACY_SECRET: ${DISCOVERY_CALLBACK_LEGACY_SECRET:-}
+      DISCOVERY_CALLBACK_BASE_URL: ${DISCOVERY_CALLBACK_BASE_URL:-http://api:8080}
+      DISCOVERY_ENGINE_BASE_URL: ${DISCOVERY_ENGINE_BASE_URL:-}
+      DISCOVERY_ENGINE_TOKEN: ${DISCOVERY_ENGINE_TOKEN:-}
     depends_on:
       mysql:
         condition: service_healthy
@@ -46,11 +50,49 @@ services:
       DB_NAME: ${DB_NAME:-asm}
       REDIS_ADDR: "redis:6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      DISCOVERY_ENGINE_BASE_URL: ${DISCOVERY_ENGINE_BASE_URL:-}
+      DISCOVERY_ENGINE_TOKEN: ${DISCOVERY_ENGINE_TOKEN:-}
+      DISCOVERY_CALLBACK_BASE_URL: ${DISCOVERY_CALLBACK_BASE_URL:-http://api:8080}
     depends_on:
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  baiyan-engine:
+    profiles: ["baiyan"]
+    build:
+      context: ./engines/baiyan
+      dockerfile: Dockerfile.engine
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${BAIYAN_ENGINE_PORT:-9090}:9090"
+    environment:
+      BAIYAN_LISTEN_ADDR: ":9090"
+      BAIYAN_ENGINE_TOKEN: ${DISCOVERY_ENGINE_TOKEN:-}
+      BAIYAN_ENGINE_ID: ${DISCOVERY_CALLBACK_SECRET_REF:-baiyan-primary}
+      BAIYAN_CALLBACK_SECRET: ${DISCOVERY_CALLBACK_SECRET:-}
+      BAIYAN_CALLBACK_ALLOWED_ORIGIN: http://api:8080
+      BAIYAN_JOB_STORE_DIR: /var/lib/baiyan/jobs
+      BAIYAN_QUEUE_SIZE: ${BAIYAN_QUEUE_SIZE:-100}
+      BAIYAN_WORKERS: ${BAIYAN_WORKERS:-2}
+      BAIYAN_PASSIVE_PROVIDER_NAME: ${BAIYAN_PASSIVE_PROVIDER_NAME:-certificate_transparency}
+      BAIYAN_PASSIVE_PROVIDER_URL: ${BAIYAN_PASSIVE_PROVIDER_URL:-}
+      BAIYAN_PASSIVE_PROVIDER_TOKEN: ${BAIYAN_PASSIVE_PROVIDER_TOKEN:-}
+      BAIYAN_PASSIVE_MAX_RESULTS: ${BAIYAN_PASSIVE_MAX_RESULTS:-500}
+      BAIYAN_DNS_PROVIDER_URL: ${BAIYAN_DNS_PROVIDER_URL:-}
+      BAIYAN_DNS_PROVIDER_TOKEN: ${BAIYAN_DNS_PROVIDER_TOKEN:-}
+      BAIYAN_DNS_MAX_RESULTS: ${BAIYAN_DNS_MAX_RESULTS:-500}
+    volumes:
+      - baiyan_jobs:/var/lib/baiyan/jobs
     restart: unless-stopped
 
   mysql:
@@ -90,4 +132,5 @@ services:
 
 volumes:
   mysql_data:
+  baiyan_jobs:
   redis_data:

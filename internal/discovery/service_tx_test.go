@@ -275,3 +275,37 @@ func TestCreateTaskRunRollbackOnAuditFailure(t *testing.T) {
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestHandleCallbackRollsBackInboxWhenRunUpdateFails(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	now := time.Now().UTC()
+	raw := validCallbackRaw(t, 77, 1, CallbackPhaseProgress, TaskRunStatusRunning, 0)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run")).
+		WithArgs(uint64(77), uint64(6)).
+		WillReturnRows(taskRunRows(now, 77, 6, 10, 11, TaskTypePassiveIntel, TaskRunStatusRunning))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version")).
+		WithArgs(uint64(6), uint64(77), uint64(1)).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO discovery_callback")).
+		WithArgs(
+			"t1", "o1", uint64(6), uint64(77), uint64(1), callbackSchemaVersion,
+			CallbackPhaseProgress, TaskRunStatusRunning, sqlmock.AnyArg(), sqlmock.AnyArg(), raw, uint32(len(raw)),
+			uint64(0), "", now, CallbackIngestPending,
+		).
+		WillReturnResult(sqlmock.NewResult(9, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE task_run\nSET last_callback_at = ?")).
+		WithArgs(now, uint64(0), "engine", uint64(77), uint64(6), TaskRunStatusRunning).
+		WillReturnError(sql.ErrConnDone)
+	mock.ExpectRollback()
+
+	enqueuer := &fakeCallbackEnqueuer{}
+	svc := NewService(NewRepository(dbgen.New(sqlDB)), WithDB(sqlDB), WithNow(func() time.Time { return now }), WithCallbackEnqueuer(enqueuer))
+	_, err = svc.HandleCallback(context.Background(), signedCallbackInput(6, 77, 1, now, "secret", raw))
+	require.ErrorIs(t, err, sql.ErrConnDone)
+	require.Equal(t, 0, enqueuer.calls)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

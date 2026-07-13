@@ -6,7 +6,9 @@ import (
 )
 
 func TestScanPlanForHost(t *testing.T) {
-	app := &App{}
+	// default-web is the explicit --fast policy; the production default is the
+	// legacy full-port profile. Pin FastScan so this test matches its assertions.
+	app := &App{opts: Options{FastScan: true}}
 
 	tests := []struct {
 		host        string

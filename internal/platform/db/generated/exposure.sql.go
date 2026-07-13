@@ -269,8 +269,8 @@ ON DUPLICATE KEY UPDATE
     cert_not_after  = VALUES(cert_not_after),
     cert_san_json  = VALUES(cert_san_json),
     evidence_hash  = VALUES(evidence_hash),
-    source         = VALUES(source),
-    confidence     = VALUES(confidence),
+    source         = CASE WHEN source IN ('', 'discovery') THEN VALUES(source) ELSE source END,
+    confidence     = GREATEST(confidence, VALUES(confidence)),
     last_seen      = VALUES(last_seen),
     updated_by     = VALUES(updated_by)
 `

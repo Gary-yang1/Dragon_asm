@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/hibiken/asynq"
@@ -32,6 +33,12 @@ func main() {
 		Addr:     redisAddr,
 		Password: redisPassword,
 	}
+	queueClient := asynq.NewClient(redisOpt)
+	defer func() {
+		if err := queueClient.Close(); err != nil {
+			logger.Warn("redis queue client close failed", "error", err)
+		}
+	}()
 
 	// Worker concurrency — each queue gets its own worker budget.
 	// Queues added here as tasks are implemented in later milestones.
@@ -47,6 +54,12 @@ func main() {
 			Logger: &asynqLogger{logger},
 		},
 	)
+	scheduler := asynq.NewScheduler(redisOpt, &asynq.SchedulerOpts{Logger: &asynqLogger{logger}})
+	entries, err := discovery.RegisterPeriodicTasks(scheduler, "default")
+	if err != nil {
+		logger.Error("discovery periodic task registration failed", "error", err)
+		os.Exit(1)
+	}
 
 	sqlDB, err := db.Open(db.LoadConfigFromEnv())
 	if err != nil {
@@ -72,34 +85,52 @@ func main() {
 		report.WithAuditSink(auditSvc),
 		report.WithExportDir(envOr("REPORT_EXPORT_DIR", "/tmp/asm-report-exports")),
 	)
-	discoveryOpts := []discovery.ServiceOption{discovery.WithDB(sqlDB), discovery.WithAuditSink(auditSvc)}
+	discoveryOpts := []discovery.ServiceOption{
+		discovery.WithDB(sqlDB),
+		discovery.WithAuditSink(auditSvc),
+		discovery.WithCallbackEnqueuer(discovery.NewAsynqCallbackEnqueuer(queueClient, "default")),
+		discovery.WithAssetMissThreshold(envIntOr("ASSET_MISS_THRESHOLD", asset.DefaultMissThreshold)),
+	}
 	if engineURL := os.Getenv("DISCOVERY_ENGINE_BASE_URL"); engineURL != "" {
 		engine, err := discovery.NewHTTPEngineAdapter(engineURL, os.Getenv("DISCOVERY_ENGINE_TOKEN"), nil)
 		if err != nil {
-			logger.Error("invalid discovery engine config", "error", err)
-			os.Exit(1)
+			logger.Warn("discovery dispatch disabled; invalid engine configuration", "error", err)
+		} else {
+			discoveryOpts = append(discoveryOpts, discovery.WithEngineAdapter(engine))
 		}
-		discoveryOpts = append(discoveryOpts, discovery.WithEngineAdapter(engine))
 	} else {
-		logger.Warn("discovery engine not configured; timeout reconcile tasks will fail", "env", "DISCOVERY_ENGINE_BASE_URL")
+		logger.Warn("discovery dispatch disabled; engine not configured", "env", "DISCOVERY_ENGINE_BASE_URL")
 	}
-	discoverySvc := discovery.NewService(discovery.NewRepository(queries), discoveryOpts...)
+	discoveryRepo := discovery.NewRepository(queries)
+	discoverySvc := discovery.NewService(discoveryRepo, discoveryOpts...)
+	callbackBuilder, callbackErr := discovery.NewCallbackURLBuilder(os.Getenv("DISCOVERY_CALLBACK_BASE_URL"))
+	if callbackErr != nil {
+		logger.Warn("discovery dispatch disabled; callback base URL not configured", "env", "DISCOVERY_CALLBACK_BASE_URL")
+	}
 
 	mux := asynq.NewServeMux()
-	discovery.NewIngestHandler(assetSvc, logger).WithExposureIngester(exposureSvc).Register(mux)
+	discovery.NewDispatchHandler(discoverySvc, callbackBuilder, logger).Register(mux)
+	discovery.NewIngestHandler(assetSvc, logger).WithCallbackInbox(discoverySvc).WithCallbackFactIngester(discoverySvc).WithExposureIngester(exposureSvc).Register(mux)
+	discovery.NewRecoverCallbacksHandler(discoverySvc, logger).Register(mux)
 	discovery.NewReconcileHandler(discoverySvc, logger).Register(mux)
 	report.NewExportHandler(reportSvc, logger).Register(mux)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	if err := scheduler.Start(); err != nil {
+		logger.Error("worker scheduler failed to start", "error", err)
+		os.Exit(1)
+	}
+	defer scheduler.Shutdown()
 
 	go func() {
 		<-quit
 		logger.Info("shutting down worker")
+		scheduler.Shutdown()
 		srv.Shutdown()
 	}()
 
-	logger.Info("worker starting", "redis", redisAddr)
+	logger.Info("worker starting", "redis", redisAddr, "periodic_entries", len(entries))
 	if err := srv.Run(mux); err != nil {
 		logger.Error("worker failed", "error", err)
 		os.Exit(1)
@@ -112,6 +143,18 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envIntOr(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 // asynqLogger adapts slog to asynq's Logger interface.

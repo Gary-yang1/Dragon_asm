@@ -325,19 +325,73 @@ const (
 	CallbackPhaseFailed    = "failed"
 )
 
+const (
+	CallbackIngestPending    = "pending"
+	CallbackIngestProcessing = "processing"
+	CallbackIngestProcessed  = "processed"
+	CallbackIngestFailed     = "failed"
+)
+
+const (
+	ObservationKindAsset         = "asset"
+	ObservationKindRelation      = "relation"
+	ObservationKindExposure      = "exposure"
+	ObservationKindProviderError = "provider_error"
+
+	ObservationStatusObserved     = "observed"
+	ObservationStatusMaterialized = "materialized"
+	ObservationStatusFailed       = "failed"
+)
+
+type DiscoveryObservation struct {
+	ID             uint64
+	TenantID       string
+	OrgID          string
+	ProjectID      uint64
+	RunID          uint64
+	Seq            uint64
+	Kind           string
+	NaturalKey     string
+	ClientRef      string
+	Provider       string
+	Capability     string
+	ObservedAt     time.Time
+	Confidence     uint8
+	ActiveProbe    bool
+	EvidenceHash   string
+	EvidenceRef    string
+	NormalizedJSON []byte
+	NormalizedSize uint32
+	IngestStatus   string
+	IngestError    string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	DeletedAt      time.Time
+}
+
 // DiscoveryCallback records one idempotent callback batch from the engine.
 type DiscoveryCallback struct {
-	TenantID     string
-	OrgID        string
-	ProjectID    uint64
-	RunID        uint64
-	Seq          uint64
-	Phase        string
-	Status       string
-	PayloadHash  string
-	ResultCount  uint64
-	ErrorSummary string
-	ReceivedAt   time.Time
+	ID            uint64
+	TenantID      string
+	OrgID         string
+	ProjectID     uint64
+	RunID         uint64
+	Seq           uint64
+	SchemaVersion string
+	Phase         string
+	Status        string
+	ObservedAt    time.Time
+	PayloadHash   string
+	Payload       []byte
+	PayloadSize   uint32
+	ResultCount   uint64
+	ErrorSummary  string
+	ReceivedAt    time.Time
+	EnqueuedAt    time.Time
+	IngestStatus  string
+	IngestAttempt uint32
+	IngestError   string
+	ProcessedAt   time.Time
 }
 
 // HandleCallbackInput is the verified callback processing input.
@@ -345,6 +399,7 @@ type HandleCallbackInput struct {
 	ProjectID uint64
 	RunID     uint64
 	Seq       uint64
+	SecretRef string
 	Timestamp string
 	Signature string
 	RawBody   []byte

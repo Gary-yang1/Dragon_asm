@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -51,12 +50,15 @@ var validRunTransitions = map[string]map[string]bool{
 
 // Service applies the M2-1/M2-2 discovery scope/task operations and writes audit events.
 type Service struct {
-	repo             Repository
-	db               *sql.DB
-	engine           EngineAdapter
-	callbackEnqueuer CallbackEnqueuer
-	auditSink        auditRecorder
-	nowFn            func() time.Time
+	repo               Repository
+	db                 *sql.DB
+	engine             EngineAdapter
+	dispatchEnqueuer   DispatchEnqueuer
+	assetMissThreshold uint32
+	callbackEnqueuer   CallbackEnqueuer
+	callbackSecretRef  string
+	auditSink          auditRecorder
+	nowFn              func() time.Time
 }
 
 // auditRecorder is the minimal audit sink used by this service.
@@ -88,10 +90,25 @@ func WithEngineAdapter(engine EngineAdapter) ServiceOption {
 	}
 }
 
+// WithDispatchEnqueuer injects the producer used by manual TaskRun creation.
+func WithDispatchEnqueuer(enqueuer DispatchEnqueuer) ServiceOption {
+	return func(s *Service) {
+		s.dispatchEnqueuer = enqueuer
+	}
+}
+
 // WithCallbackEnqueuer injects the worker queue producer used by callback ingest.
 func WithCallbackEnqueuer(enqueuer CallbackEnqueuer) ServiceOption {
 	return func(s *Service) {
 		s.callbackEnqueuer = enqueuer
+	}
+}
+
+// WithCallbackSecretRef snapshots the configured engine identity on new runs.
+// It is a reference only; secret material is never persisted with TaskRun.
+func WithCallbackSecretRef(ref string) ServiceOption {
+	return func(s *Service) {
+		s.callbackSecretRef = strings.TrimSpace(ref)
 	}
 }
 
@@ -102,11 +119,24 @@ func WithNow(now func() time.Time) ServiceOption {
 	}
 }
 
+func WithAssetMissThreshold(threshold int) ServiceOption {
+	return func(s *Service) {
+		if threshold < 1 {
+			return
+		}
+		if threshold > 1000 {
+			threshold = 1000
+		}
+		s.assetMissThreshold = uint32(threshold) // #nosec G115 -- clamped to 1..1000
+	}
+}
+
 // NewService builds the discovery service.
 func NewService(repo Repository, opts ...ServiceOption) *Service {
 	s := &Service{
-		repo:  repo,
-		nowFn: func() time.Time { return time.Now().UTC() },
+		repo:               repo,
+		assetMissThreshold: 3,
+		nowFn:              func() time.Time { return time.Now().UTC() },
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -644,6 +674,9 @@ func (s *Service) CreateTaskRun(ctx context.Context, in CreateTaskRunInput) (*Ta
 	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
 		return nil, ErrInvalidActorID
 	}
+	if s.callbackSecretRef != "" && !validCallbackIdentity(s.callbackSecretRef) {
+		return nil, ErrInvalidCallbackIdentity
+	}
 	var run *TaskRun
 
 	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
@@ -655,24 +688,25 @@ func (s *Service) CreateTaskRun(ctx context.Context, in CreateTaskRunInput) (*Ta
 			return ErrTemplateDisabled
 		}
 		id, err := repo.CreateTaskRun(ctx, CreateTaskRunParams{
-			TenantID:       template.TenantID,
-			OrgID:          template.OrgID,
-			ProjectID:      in.ProjectID,
-			TemplateID:     in.TemplateID,
-			ScopeID:        template.ScopeID,
-			TaskType:       template.TaskType,
-			Status:         TaskRunStatusPending,
-			Progress:       0,
-			TimeoutSeconds: template.TimeoutSeconds,
-			RateLimit:      template.RateLimit,
-			Concurrency:    template.Concurrency,
-			RetryLimit:     template.RetryLimit,
-			Attempt:        0,
-			EngineJobID:    "",
-			DispatchedAt:   time.Time{},
-			LastCallbackAt: time.Time{},
-			ResultCount:    0,
-			ActorID:        in.ActorID,
+			TenantID:          template.TenantID,
+			OrgID:             template.OrgID,
+			ProjectID:         in.ProjectID,
+			TemplateID:        in.TemplateID,
+			ScopeID:           template.ScopeID,
+			TaskType:          template.TaskType,
+			Status:            TaskRunStatusPending,
+			Progress:          0,
+			TimeoutSeconds:    template.TimeoutSeconds,
+			RateLimit:         template.RateLimit,
+			Concurrency:       template.Concurrency,
+			RetryLimit:        template.RetryLimit,
+			Attempt:           0,
+			EngineJobID:       "",
+			DispatchedAt:      time.Time{},
+			LastCallbackAt:    time.Time{},
+			ResultCount:       0,
+			CallbackSecretRef: s.callbackSecretRef,
+			ActorID:           in.ActorID,
 		})
 		if err != nil {
 			return err
@@ -689,6 +723,40 @@ func (s *Service) CreateTaskRun(ctx context.Context, in CreateTaskRunInput) (*Ta
 		return nil, err
 	}
 	return run, nil
+}
+
+// CreateAndEnqueueTaskRun creates a pending run and reliably hands it to the
+// dispatch queue. A queue failure is fail-closed: the new run is cancelled and
+// remains auditable instead of becoming an orphaned pending run.
+func (s *Service) CreateAndEnqueueTaskRun(ctx context.Context, in CreateTaskRunInput) (*TaskRun, error) {
+	run, err := s.CreateTaskRun(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	if s.dispatchEnqueuer != nil {
+		err = s.dispatchEnqueuer.EnqueueTaskRun(ctx, DispatchTaskPayload{
+			ProjectID: run.ProjectID,
+			RunID:     run.ID,
+			ActorID:   in.ActorID,
+		})
+	} else {
+		err = ErrDispatchEnqueue
+	}
+	if err == nil {
+		return run, nil
+	}
+	cancelErr := s.MarkTaskRunCancelled(ctx, UpdateTaskRunStatusInput{
+		ProjectID:    run.ProjectID,
+		RunID:        run.ID,
+		ActorID:      in.ActorID,
+		ErrorSummary: "dispatch queue unavailable",
+		Meta:         in.Meta,
+	})
+	updated, getErr := s.GetTaskRun(ctx, run.ProjectID, run.ID)
+	if getErr == nil {
+		run = updated
+	}
+	return run, errors.Join(ErrDispatchEnqueue, err, cancelErr, getErr)
 }
 
 // GetTaskRun returns one live run.
@@ -774,6 +842,16 @@ func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) 
 	if s.engine == nil {
 		return nil, ErrEngineNotConfigured
 	}
+	existing, err := s.repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if existing.Status == TaskRunStatusRunning && strings.TrimSpace(existing.EngineJobID) != "" {
+		return existing, nil
+	}
+	if existing.Status != TaskRunStatusPending {
+		return nil, ErrTaskRunNotDispatchable
+	}
 	plan, err := s.BuildDispatchPlan(ctx, in.ProjectID, in.RunID, in.ActorID)
 	if err != nil {
 		return nil, err
@@ -790,6 +868,10 @@ func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) 
 		if err == nil {
 			run, recordErr := s.recordRunDispatched(ctx, in, engineJobID)
 			if recordErr != nil {
+				current, currentErr := s.repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+				if currentErr == nil && current.Status == TaskRunStatusRunning && current.EngineJobID == engineJobID {
+					return current, nil
+				}
 				_ = s.engine.Cancel(ctx, engineJobID)
 				return nil, recordErr
 			}
@@ -809,11 +891,10 @@ func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) 
 	return run, lastErr
 }
 
-// CancelDispatchedTaskRun cancels a running engine job and records run cancellation.
+// CancelDispatchedTaskRun cancels a pending or running run idempotently. Pending
+// jobs need no engine call; running jobs are cancelled remotely before the local
+// transition is committed.
 func (s *Service) CancelDispatchedTaskRun(ctx context.Context, in UpdateTaskRunStatusInput) error {
-	if s.engine == nil {
-		return ErrEngineNotConfigured
-	}
 	if in.ProjectID == 0 || in.RunID == 0 {
 		return ErrInvalidTaskRunID
 	}
@@ -824,13 +905,25 @@ func (s *Service) CancelDispatchedTaskRun(ctx context.Context, in UpdateTaskRunS
 	if err != nil {
 		return err
 	}
-	if run.Status != TaskRunStatusRunning || strings.TrimSpace(run.EngineJobID) == "" {
+	switch run.Status {
+	case TaskRunStatusCancelled:
+		return nil
+	case TaskRunStatusPending:
+		return s.MarkTaskRunCancelled(ctx, in)
+	case TaskRunStatusRunning:
+		if s.engine == nil {
+			return ErrEngineNotConfigured
+		}
+		if strings.TrimSpace(run.EngineJobID) == "" {
+			return ErrInvalidRunTransition
+		}
+		if err := s.engine.Cancel(ctx, run.EngineJobID); err != nil {
+			return err
+		}
+		return s.MarkTaskRunCancelled(ctx, in)
+	default:
 		return ErrInvalidRunTransition
 	}
-	if err := s.engine.Cancel(ctx, run.EngineJobID); err != nil {
-		return err
-	}
-	return s.MarkTaskRunCancelled(ctx, in)
 }
 
 // ReconcileTaskRun pulls the external engine state for one running run and
@@ -912,10 +1005,13 @@ func (s *Service) reconcileRun(ctx context.Context, run *TaskRun, actorID string
 		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusCancelled, status.ResultCount, status.ErrorSummary, meta)
 	case EngineJobStatusRunning:
 		if timeoutMode {
+			summary := "task run timed out"
 			if err := s.engine.Cancel(ctx, run.EngineJobID); err != nil {
-				return nil, err
+				// Local timeout closure is authoritative. Record the cancellation
+				// failure without exposing the upstream error or leaving the run live.
+				summary = "task run timed out; engine cancellation failed"
 			}
-			return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusFailed, run.ResultCount, "task run timed out", meta)
+			return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusFailed, run.ResultCount, summary, meta)
 		}
 		return run, nil
 	default:
@@ -963,7 +1059,9 @@ func scanJobFromDispatchPlan(plan *DispatchPlan, callbackURL string) ScanJob {
 		targets = append(targets, Target(target))
 	}
 	return ScanJob{
-		RunID:       strconv.FormatUint(plan.RunID, 10),
+		RunID:       plan.RunID,
+		ProjectID:   plan.ProjectID,
+		ScopeID:     plan.ScopeID,
 		JobType:     plan.TaskType,
 		Targets:     targets,
 		RateLimit:   plan.RateLimit,
@@ -980,6 +1078,10 @@ func (s *Service) recordRunDispatched(ctx context.Context, in DispatchTaskRunInp
 		before, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
 		if err != nil {
 			return err
+		}
+		if before.Status == TaskRunStatusRunning && before.EngineJobID == engineJobID {
+			after = before
+			return nil
 		}
 		if before.Status != TaskRunStatusPending {
 			return ErrInvalidRunTransition

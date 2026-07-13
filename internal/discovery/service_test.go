@@ -5,8 +5,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,25 +19,28 @@ import (
 )
 
 type fakeRepo struct {
-	scopes         map[uint64]map[uint64]*Scope
-	targets        map[uint64]map[uint64][]*ScopeTarget
-	clearCount     int
-	nextScopeID    uint64
-	nextTargetID   uint64
-	templates      map[uint64]map[uint64]*TaskTemplate
-	runs           map[uint64]map[uint64]*TaskRun
-	callbacks      map[uint64]map[uint64]map[uint64]*DiscoveryCallback
-	nextTemplateID uint64
-	nextRunID      uint64
+	scopes            map[uint64]map[uint64]*Scope
+	targets           map[uint64]map[uint64][]*ScopeTarget
+	clearCount        int
+	nextScopeID       uint64
+	nextTargetID      uint64
+	templates         map[uint64]map[uint64]*TaskTemplate
+	runs              map[uint64]map[uint64]*TaskRun
+	callbacks         map[uint64]map[uint64]map[uint64]*DiscoveryCallback
+	observations      map[uint64]map[uint64]*DiscoveryObservation
+	nextTemplateID    uint64
+	nextRunID         uint64
+	nextObservationID uint64
 }
 
 func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
-		scopes:    make(map[uint64]map[uint64]*Scope),
-		targets:   make(map[uint64]map[uint64][]*ScopeTarget),
-		templates: make(map[uint64]map[uint64]*TaskTemplate),
-		runs:      make(map[uint64]map[uint64]*TaskRun),
-		callbacks: make(map[uint64]map[uint64]map[uint64]*DiscoveryCallback),
+		scopes:       make(map[uint64]map[uint64]*Scope),
+		targets:      make(map[uint64]map[uint64][]*ScopeTarget),
+		templates:    make(map[uint64]map[uint64]*TaskTemplate),
+		runs:         make(map[uint64]map[uint64]*TaskRun),
+		callbacks:    make(map[uint64]map[uint64]map[uint64]*DiscoveryCallback),
+		observations: make(map[uint64]map[uint64]*DiscoveryObservation),
 	}
 }
 
@@ -528,13 +533,194 @@ func (r *fakeRepo) InsertDiscoveryCallback(ctx context.Context, in DiscoveryCall
 	return true, nil
 }
 
+func (r *fakeRepo) GetDiscoveryCallback(ctx context.Context, projectID, runID, seq uint64) (*DiscoveryCallback, error) {
+	_ = ctx
+	runs, ok := r.callbacks[projectID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	callbacks, ok := runs[runID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cb, ok := callbacks[seq]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *cb
+	cp.Payload = append([]byte(nil), cb.Payload...)
+	return &cp, nil
+}
+
+func (r *fakeRepo) ListPendingDiscoveryCallbacks(ctx context.Context, limit int32) ([]*DiscoveryCallback, error) {
+	_ = ctx
+	items := make([]*DiscoveryCallback, 0)
+	for _, runs := range r.callbacks {
+		for _, callbacks := range runs {
+			for _, cb := range callbacks {
+				if cb.IngestStatus == CallbackIngestPending {
+					cp := *cb
+					cp.Payload = append([]byte(nil), cb.Payload...)
+					items = append(items, &cp)
+					if int32(len(items)) == limit {
+						return items, nil
+					}
+				}
+			}
+		}
+	}
+	return items, nil
+}
+
 func (r *fakeRepo) MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error {
 	_ = ctx
 	cb, ok := r.callbacks[projectID][runID][seq]
 	if !ok {
 		return ErrNotFound
 	}
-	cb.ReceivedAt = enqueuedAt
+	cb.EnqueuedAt = enqueuedAt
+	return nil
+}
+
+func (r *fakeRepo) MarkDiscoveryCallbackProcessing(ctx context.Context, projectID, runID, seq uint64) (bool, error) {
+	_ = ctx
+	cb, err := r.GetDiscoveryCallback(context.Background(), projectID, runID, seq)
+	if err != nil {
+		return false, err
+	}
+	if cb.IngestStatus != CallbackIngestPending && cb.IngestStatus != CallbackIngestFailed {
+		return false, nil
+	}
+	stored := r.callbacks[projectID][runID][seq]
+	stored.IngestStatus = CallbackIngestProcessing
+	stored.IngestAttempt++
+	stored.IngestError = ""
+	return true, nil
+}
+
+func (r *fakeRepo) MarkDiscoveryCallbackProcessed(ctx context.Context, projectID, runID, seq uint64, processedAt time.Time) (bool, error) {
+	_ = ctx
+	cb, ok := r.callbacks[projectID][runID][seq]
+	if !ok || cb.IngestStatus != CallbackIngestProcessing {
+		return false, nil
+	}
+	cb.IngestStatus = CallbackIngestProcessed
+	cb.ProcessedAt = processedAt
+	cb.IngestError = ""
+	return true, nil
+}
+
+func (r *fakeRepo) MarkDiscoveryCallbackFailed(ctx context.Context, projectID, runID, seq uint64, summary string) error {
+	_ = ctx
+	cb, ok := r.callbacks[projectID][runID][seq]
+	if !ok {
+		return ErrNotFound
+	}
+	if cb.IngestStatus == CallbackIngestProcessing {
+		cb.IngestStatus = CallbackIngestFailed
+		cb.IngestError = summary
+	}
+	return nil
+}
+
+func (r *fakeRepo) ListDiscoveryCallbacksForRunForUpdate(ctx context.Context, projectID, runID uint64) ([]*DiscoveryCallback, error) {
+	_ = ctx
+	callbacks, ok := r.callbacks[projectID][runID]
+	if !ok {
+		return []*DiscoveryCallback{}, nil
+	}
+	items := make([]*DiscoveryCallback, 0, len(callbacks))
+	for seq := uint64(1); seq <= uint64(len(callbacks)); seq++ { // #nosec G115 -- bounded by in-memory test map size
+		if cb, ok := callbacks[seq]; ok {
+			cp := *cb
+			cp.Payload = append([]byte(nil), cb.Payload...)
+			items = append(items, &cp)
+		}
+	}
+	return items, nil
+}
+
+func (r *fakeRepo) UpsertDiscoveryObservation(ctx context.Context, in DiscoveryObservation) (*DiscoveryObservation, error) {
+	_ = ctx
+	normalized, err := normalizeDiscoveryObservation(in)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := r.observations[normalized.ProjectID]; !ok {
+		r.observations[normalized.ProjectID] = make(map[uint64]*DiscoveryObservation)
+	}
+	for _, existing := range r.observations[normalized.ProjectID] {
+		if existing.RunID == normalized.RunID && existing.Kind == normalized.Kind && existing.NaturalKey == normalized.NaturalKey && existing.Provider == normalized.Provider {
+			normalized.ID = existing.ID
+			cp := normalized
+			r.observations[normalized.ProjectID][existing.ID] = &cp
+			return &cp, nil
+		}
+	}
+	r.nextObservationID++
+	normalized.ID = r.nextObservationID
+	cp := normalized
+	r.observations[normalized.ProjectID][normalized.ID] = &cp
+	return &cp, nil
+}
+
+func (r *fakeRepo) GetDiscoveryObservation(ctx context.Context, projectID, observationID uint64) (*DiscoveryObservation, error) {
+	_ = ctx
+	item, ok := r.observations[projectID][observationID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *item
+	cp.NormalizedJSON = append([]byte(nil), item.NormalizedJSON...)
+	return &cp, nil
+}
+
+func (r *fakeRepo) ListDiscoveryObservationsByRun(ctx context.Context, projectID, runID, seq uint64) ([]*DiscoveryObservation, error) {
+	_ = ctx
+	items := make([]*DiscoveryObservation, 0)
+	for _, item := range r.observations[projectID] {
+		if item.RunID == runID && (seq == 0 || item.Seq == seq) {
+			cp := *item
+			items = append(items, &cp)
+		}
+	}
+	return items, nil
+}
+
+func (r *fakeRepo) ListDiscoveryObservationsByNaturalKey(ctx context.Context, projectID uint64, kind, naturalKey string) ([]*DiscoveryObservation, error) {
+	_ = ctx
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	naturalKey = strings.ToLower(strings.TrimSpace(naturalKey))
+	items := make([]*DiscoveryObservation, 0)
+	for _, item := range r.observations[projectID] {
+		if item.Kind == kind && item.NaturalKey == naturalKey {
+			cp := *item
+			items = append(items, &cp)
+		}
+	}
+	return items, nil
+}
+
+func (r *fakeRepo) MarkDiscoveryObservationMaterialized(ctx context.Context, projectID, observationID uint64) error {
+	_ = ctx
+	item, ok := r.observations[projectID][observationID]
+	if !ok {
+		return ErrNotFound
+	}
+	item.IngestStatus = ObservationStatusMaterialized
+	item.IngestError = ""
+	return nil
+}
+
+func (r *fakeRepo) ApplyDiscoveryObservationLifecycle(ctx context.Context, projectID, runID uint64, capability string, missThreshold uint32, allowMiss bool, actorID string, now time.Time) error {
+	_ = ctx
+	_ = projectID
+	_ = runID
+	_ = capability
+	_ = missThreshold
+	_ = allowMiss
+	_ = actorID
+	_ = now
 	return nil
 }
 
@@ -553,7 +739,7 @@ type fakeCallbackEnqueuer struct {
 	err   error
 }
 
-func (f *fakeCallbackEnqueuer) EnqueueDiscoveryCallback(_ context.Context, cb DiscoveryCallback, _ []byte) error {
+func (f *fakeCallbackEnqueuer) EnqueueDiscoveryCallback(_ context.Context, cb DiscoveryCallback) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -1162,7 +1348,7 @@ func TestCreateTaskRunUsesTemplateSnapshot(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	svc := NewService(repo)
+	svc := NewService(repo, WithCallbackSecretRef("baiyan-primary"))
 	template, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
 		TenantID:       "t1",
 		OrgID:          "o1",
@@ -1189,6 +1375,7 @@ func TestCreateTaskRunUsesTemplateSnapshot(t *testing.T) {
 	assert.Equal(t, template.ScopeID, run.ScopeID)
 	assert.Equal(t, template.TaskType, run.TaskType)
 	assert.Equal(t, TaskRunStatusPending, run.Status)
+	assert.Equal(t, "baiyan-primary", run.CallbackSecretRef)
 }
 
 func TestCreateTaskRunRejectsDisabledTemplate(t *testing.T) {
@@ -1586,7 +1773,7 @@ func TestDispatchTaskRunSuccessRecordsEngineJobAndRunning(t *testing.T) {
 	assert.Equal(t, "job-123", out.EngineJobID)
 	assert.Equal(t, 1, out.Attempt)
 	require.Len(t, engine.jobs, 1)
-	assert.Equal(t, "1", engine.jobs[0].RunID)
+	assert.Equal(t, uint64(1), engine.jobs[0].RunID)
 	assert.Equal(t, TaskTypeDNS, engine.jobs[0].JobType)
 	assert.Equal(t, "https://asm.example.com/callback", engine.jobs[0].CallbackURL)
 	assert.Equal(t, 30*time.Second, engine.jobs[0].Timeout)
@@ -1667,7 +1854,7 @@ func TestCancelDispatchedTaskRunCallsEngineAndMarksCancelled(t *testing.T) {
 	assert.Equal(t, "operator cancelled", cancelled.ErrorSummary)
 }
 
-func TestCancelDispatchedTaskRunRejectsPendingRun(t *testing.T) {
+func TestCancelDispatchedTaskRunCancelsPendingRunWithoutEngine(t *testing.T) {
 	engine := &fakeEngine{}
 	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
 	svc.engine = engine
@@ -1677,8 +1864,14 @@ func TestCancelDispatchedTaskRunRejectsPendingRun(t *testing.T) {
 		ProjectID: 1,
 		ActorID:   "alice",
 	})
-	assert.ErrorIs(t, err, ErrInvalidRunTransition)
+	require.NoError(t, err)
+	cancelled, getErr := svc.GetTaskRun(context.Background(), 1, run.ID)
+	require.NoError(t, getErr)
+	assert.Equal(t, TaskRunStatusCancelled, cancelled.Status)
 	assert.Equal(t, 0, engine.cancelCalls)
+	require.NoError(t, svc.CancelDispatchedTaskRun(context.Background(), UpdateTaskRunStatusInput{
+		RunID: run.ID, ProjectID: 1, ActorID: "alice",
+	}))
 }
 
 func TestReconcileTaskRunMarksEngineSuccess(t *testing.T) {
@@ -1701,6 +1894,33 @@ func TestReconcileTaskRunMarksEngineSuccess(t *testing.T) {
 	assert.Equal(t, 1, engine.statusCalls)
 	assert.Equal(t, TaskRunStatusSuccess, updated.Status)
 	assert.Equal(t, uint64(9), updated.ResultCount)
+}
+
+func TestReconcileTaskRunTerminalAndRunningMappings(t *testing.T) {
+	tests := []struct {
+		name         string
+		engineStatus string
+		wantStatus   string
+	}{
+		{name: "partial", engineStatus: EngineJobStatusPartialSuccess, wantStatus: TaskRunStatusPartial},
+		{name: "failed", engineStatus: EngineJobStatusFailed, wantStatus: TaskRunStatusFailed},
+		{name: "cancelled", engineStatus: EngineJobStatusCancelled, wantStatus: TaskRunStatusCancelled},
+		{name: "running", engineStatus: EngineJobStatusRunning, wantStatus: TaskRunStatusRunning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+			engine := &fakeEngine{ids: []string{"job-" + tt.name}, statuses: []EngineJobStatus{{
+				Status: tt.engineStatus, ResultCount: 4, ErrorSummary: tt.name,
+			}}}
+			svc.engine = engine
+			dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{ProjectID: 1, RunID: run.ID, ActorID: "alice"})
+			require.NoError(t, err)
+			updated, err := svc.ReconcileTaskRun(context.Background(), ReconcileTaskRunInput{ProjectID: 1, RunID: dispatched.ID, ActorID: "system"})
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, updated.Status)
+		})
+	}
 }
 
 func TestReconcileTimedOutRunsCancelsStillRunningEngineJob(t *testing.T) {
@@ -1735,6 +1955,29 @@ func TestReconcileTimedOutRunsCancelsStillRunningEngineJob(t *testing.T) {
 	assert.Equal(t, "task run timed out", updated.ErrorSummary)
 }
 
+func TestReconcileTimeoutClosesLocallyWhenEngineCancelFails(t *testing.T) {
+	now := time.Now().UTC()
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	engine := &fakeEngine{
+		ids: []string{"job-timeout-cancel-failure"}, statuses: []EngineJobStatus{{Status: EngineJobStatusRunning}},
+		cancelErr: errors.New("engine unreachable"),
+	}
+	svc.engine = engine
+	svc.nowFn = func() time.Time { return now }
+	dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{ProjectID: 1, RunID: run.ID, ActorID: "alice"})
+	require.NoError(t, err)
+	stored := svc.repo.(*fakeRepo).runs[1][dispatched.ID]
+	stored.DispatchedAt = now.Add(-time.Duration(stored.TimeoutSeconds+1) * time.Second)
+
+	result, err := svc.ReconcileTimedOutRuns(context.Background(), ReconcileTimedOutRunsInput{ActorID: "system", Limit: 10})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Updated)
+	updated, err := svc.GetTaskRun(context.Background(), 1, dispatched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, TaskRunStatusFailed, updated.Status)
+	assert.Equal(t, "task run timed out; engine cancellation failed", updated.ErrorSummary)
+}
+
 func TestHandleCallbackAcceptsNewRunningRunCallback(t *testing.T) {
 	now := time.Now().UTC()
 	enqueuer := &fakeCallbackEnqueuer{}
@@ -1750,7 +1993,7 @@ func TestHandleCallbackAcceptsNewRunningRunCallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running","result_count":3}`)
+	raw := validCallbackRaw(t, dispatched.ID, 1, CallbackPhaseProgress, TaskRunStatusRunning, 3)
 	input := signedCallbackInput(1, dispatched.ID, 1, now, "callback-secret", raw)
 	result, err := svc.HandleCallback(context.Background(), input)
 	require.NoError(t, err)
@@ -1759,7 +2002,7 @@ func TestHandleCallbackAcceptsNewRunningRunCallback(t *testing.T) {
 	assert.Equal(t, uint64(3), enqueuer.items[0].ResultCount)
 	updated, err := svc.GetTaskRun(context.Background(), 1, dispatched.ID)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(3), updated.ResultCount)
+	assert.Equal(t, uint64(0), updated.ResultCount)
 	assert.Equal(t, now, updated.LastCallbackAt)
 }
 
@@ -1776,7 +2019,7 @@ func TestHandleCallbackDuplicateSeqDoesNotEnqueueAgain(t *testing.T) {
 		ActorID:   "alice",
 	})
 	require.NoError(t, err)
-	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running","result_count":3}`)
+	raw := validCallbackRaw(t, dispatched.ID, 1, CallbackPhaseProgress, TaskRunStatusRunning, 3)
 	input := signedCallbackInput(1, dispatched.ID, 1, now, "callback-secret", raw)
 	_, err = svc.HandleCallback(context.Background(), input)
 	require.NoError(t, err)
@@ -1784,7 +2027,7 @@ func TestHandleCallbackDuplicateSeqDoesNotEnqueueAgain(t *testing.T) {
 	result, err := svc.HandleCallback(context.Background(), input)
 	require.NoError(t, err)
 	assert.True(t, result.Duplicate)
-	assert.Equal(t, 1, enqueuer.calls)
+	assert.Equal(t, 2, enqueuer.calls)
 }
 
 func TestHandleCallbackRejectsInvalidSignatureAndReplay(t *testing.T) {
@@ -1793,7 +2036,7 @@ func TestHandleCallbackRejectsInvalidSignatureAndReplay(t *testing.T) {
 	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
 	svc.nowFn = func() time.Time { return now }
 	svc.auditSink = audits
-	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running"}`)
+	raw := validCallbackRaw(t, run.ID, 1, CallbackPhaseProgress, TaskRunStatusRunning, 0)
 	input := signedCallbackInput(1, run.ID, 1, now, "callback-secret", raw)
 	input.Signature = "bad"
 	_, err := svc.HandleCallback(context.Background(), input)
@@ -1815,7 +2058,7 @@ func TestHandleCallbackRejectsNonRunningRun(t *testing.T) {
 	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
 	svc.nowFn = func() time.Time { return now }
 	svc.auditSink = audits
-	raw := []byte(`{"run_id":1,"seq":1,"phase":"progress","status":"running"}`)
+	raw := validCallbackRaw(t, run.ID, 1, CallbackPhaseProgress, TaskRunStatusRunning, 0)
 	input := signedCallbackInput(1, run.ID, 1, now, "callback-secret", raw)
 
 	_, err := svc.HandleCallback(context.Background(), input)
@@ -1839,4 +2082,39 @@ func signedCallbackInput(projectID, runID, seq uint64, ts time.Time, secret stri
 		RawBody:   raw,
 		Secret:    secret,
 	}
+}
+
+func validCallbackRaw(t *testing.T, runID, seq uint64, phase, status string, resultCount int) []byte {
+	t.Helper()
+	observedAt := time.Date(2026, time.July, 13, 1, 2, 3, 0, time.UTC)
+	assets := make([]map[string]any, 0, resultCount)
+	for i := 0; i < resultCount; i++ {
+		assets = append(assets, map[string]any{
+			"client_ref":    "asset-" + strconv.Itoa(i+1),
+			"asset_type":    "domain",
+			"value":         "example.com",
+			"source":        "baiyan",
+			"provider":      "crtsh",
+			"observed_at":   observedAt,
+			"confidence":    90,
+			"active_probe":  false,
+			"evidence_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		})
+	}
+	raw, err := json.Marshal(map[string]any{
+		"schema_version":  callbackSchemaVersion,
+		"run_id":          runID,
+		"seq":             seq,
+		"phase":           phase,
+		"status":          status,
+		"result_count":    resultCount,
+		"observed_at":     observedAt,
+		"assets":          assets,
+		"relations":       []any{},
+		"exposures":       []any{},
+		"provider_errors": []any{},
+		"error_summary":   "",
+	})
+	require.NoError(t, err)
+	return raw
 }

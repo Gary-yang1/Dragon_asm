@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: ASM Platform API
-  version: 0.8.0
+  version: 0.9.0
   description: |
-    Contract for the HTTP routes currently mounted by cmd/api. Discovery scope,
-    task template, and task run management are implemented below service level
-    but are not listed here until HTTP handlers are added.
+    Contract for the HTTP routes currently mounted by cmd/api, including
+    project-scoped Discovery scope, task template, TaskRun, and engine callback
+    management.
 servers:
   - url: /api/v1
 security:
@@ -413,6 +413,212 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ICPRequest" } } } }
       responses:
         "200": { description: ICP filing, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+  /projects/{project_id}/scopes:
+    get:
+      tags: [discovery]
+      summary: List project authorization scopes.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [id, name, status, valid_until], default: id }
+        - $ref: "#/components/parameters/SortOrder"
+      responses:
+        "200": { description: Paged scopes., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [discovery]
+      summary: Create a project authorization scope.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ScopeCreateRequest" } } }
+      responses:
+        "201": { description: Created scope., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /projects/{project_id}/scopes/{scope_id}:
+    get:
+      tags: [discovery]
+      summary: Get one project scope.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ScopeID"
+      responses:
+        "200": { description: Scope detail., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [discovery]
+      summary: Update one project scope.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ScopeID"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ScopeUpdateRequest" } } }
+      responses:
+        "200": { description: Updated scope., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /projects/{project_id}/scopes/{scope_id}/deactivate:
+    post:
+      tags: [discovery]
+      summary: Deactivate one project scope.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ScopeID"
+      responses:
+        "204": { description: Scope deactivated. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /projects/{project_id}/discovery/templates:
+    get:
+      tags: [discovery]
+      summary: List discovery task templates.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [id, name, task_type, enabled], default: id }
+        - $ref: "#/components/parameters/SortOrder"
+      responses:
+        "200": { description: Paged task templates., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [discovery]
+      summary: Create a discovery task template.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TaskTemplateCreateRequest" } } }
+      responses:
+        "201": { description: Created task template., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /projects/{project_id}/discovery/templates/{template_id}:
+    get:
+      tags: [discovery]
+      summary: Get one discovery task template.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/TemplateID"
+      responses:
+        "200": { description: Task template detail., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [discovery]
+      summary: Update one discovery task template.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/TemplateID"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TaskTemplateUpdateRequest" } } }
+      responses:
+        "200": { description: Updated task template., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    delete:
+      tags: [discovery]
+      summary: Soft-delete one discovery task template.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/TemplateID"
+      responses:
+        "204": { description: Task template deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{project_id}/discovery/templates/{template_id}/enabled:
+    patch:
+      tags: [discovery]
+      summary: Enable or disable one discovery task template.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/TemplateID"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TaskTemplateEnabledRequest" } } }
+      responses:
+        "200": { description: Updated task template., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{project_id}/discovery/templates/{template_id}/runs:
+    post:
+      tags: [discovery]
+      summary: Create one pending manual TaskRun.
+      description: The project must be active. Dispatch is asynchronous.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/TemplateID"
+      responses:
+        "201": { description: Pending TaskRun., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /projects/{project_id}/discovery/runs:
+    get:
+      tags: [discovery]
+      summary: List discovery TaskRuns.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [id, status, task_type, started_at], default: id }
+        - $ref: "#/components/parameters/SortOrder"
+      responses:
+        "200": { description: Paged TaskRuns., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /projects/{project_id}/discovery/runs/{run_id}:
+    get:
+      tags: [discovery]
+      summary: Get one discovery TaskRun.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200": { description: TaskRun detail., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{project_id}/discovery/runs/{run_id}/cancel:
+    post:
+      tags: [discovery]
+      summary: Cancel one dispatched TaskRun.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200": { description: Cancelled TaskRun., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /discovery/callback:
     post:
       tags: [discovery]
@@ -432,15 +638,21 @@ paths:
           in: header
           required: true
           schema: { type: string }
+        - name: X-Engine-ID
+          in: header
+          required: true
+          description: Stable engine identity bound to task_run.callback_secret_ref.
+          schema: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" }
         - name: X-Timestamp
           in: header
           required: true
           schema: { type: string }
       requestBody:
         required: true
+        x-max-body-bytes: 4194304
         content:
           application/json:
-            schema: { type: object, additionalProperties: true }
+            schema: { $ref: "#/components/schemas/DiscoveryCallbackBatchV1" }
       responses:
         "200":
           description: Callback accepted or detected as duplicate.
@@ -450,8 +662,17 @@ paths:
                 $ref: "#/components/schemas/DuplicateEnvelope"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          description: Callback body exceeds 4 MiB.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /projects/{project_id}/assets:
     get:
       tags: [assets]
@@ -924,6 +1145,21 @@ components:
       in: path
       required: true
       schema: { type: integer, format: uint64, minimum: 1 }
+    ScopeID:
+      name: scope_id
+      in: path
+      required: true
+      schema: { type: integer, format: uint64, minimum: 1 }
+    TemplateID:
+      name: template_id
+      in: path
+      required: true
+      schema: { type: integer, format: uint64, minimum: 1 }
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: integer, format: uint64, minimum: 1 }
     UserID:
       name: user_id
       in: path
@@ -937,7 +1173,17 @@ components:
       name: page_size
       in: query
       schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    SortOrder:
+      name: sort_order
+      in: query
+      schema: { type: string, enum: [asc, desc], default: desc }
   responses:
+    BadRequest:
+      description: The request body or parameters are malformed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
     Unauthorized:
       description: Authentication failed or missing.
       content:
@@ -952,6 +1198,24 @@ components:
             $ref: "#/components/schemas/ErrorEnvelope"
     Conflict:
       description: State conflict.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: The requested project-scoped resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unprocessable:
+      description: The request is well-formed but violates discovery validation rules.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ServiceUnavailable:
+      description: Discovery queue, callback configuration, or engine is unavailable.
       content:
         application/json:
           schema:
@@ -975,6 +1239,86 @@ components:
             code: { type: string }
             message: { type: string }
             details: {}
+    ScopeTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [target_type, match_mode, value]
+      properties:
+        target_type: { type: string, enum: [domain, ip, cidr, url] }
+        match_mode: { type: string, enum: [include, exclude] }
+        value: { type: string, minLength: 1, maxLength: 512 }
+    ScopeCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, authorized_by, valid_from, valid_until, targets]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        status: { type: string, enum: [active, inactive], default: inactive }
+        authorized_by: { type: string, minLength: 1, maxLength: 64 }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { $ref: "#/components/schemas/ScopeTargetRequest" }
+    ScopeUpdateRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        status: { type: string, enum: [active, inactive] }
+        authorized_by: { type: string, minLength: 1, maxLength: 64 }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { $ref: "#/components/schemas/ScopeTargetRequest" }
+    TaskTemplateCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_id, name, task_type, config, timeout_seconds, rate_limit, concurrency, retry_limit]
+      properties:
+        scope_id: { type: integer, format: uint64, minimum: 1 }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        task_type: { type: string, enum: [dns, ct_log, port_probe, web_probe, fingerprint, cloud_sync, passive_intel, import] }
+        config: { type: object, additionalProperties: true, maxProperties: 64 }
+        schedule: { type: string, maxLength: 255 }
+        enabled: { type: boolean, default: false }
+        timeout_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        rate_limit:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Per-job maximum outbound provider and DNS operations started per second.
+        concurrency: { type: integer, minimum: 1, maximum: 500 }
+        retry_limit: { type: integer, minimum: 0, maximum: 100 }
+    TaskTemplateUpdateRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        task_type: { type: string, enum: [dns, ct_log, port_probe, web_probe, fingerprint, cloud_sync, passive_intel, import] }
+        config: { type: object, additionalProperties: true, maxProperties: 64 }
+        schedule: { type: string, maxLength: 255 }
+        timeout_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        rate_limit:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Per-job maximum outbound provider and DNS operations started per second.
+        concurrency: { type: integer, minimum: 1, maximum: 500 }
+        retry_limit: { type: integer, minimum: 0, maximum: 100 }
+    TaskTemplateEnabledRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
     LoginRequest:
       type: object
       required: [username, password]
@@ -1173,6 +1517,100 @@ components:
               type: object
               properties:
                 duplicate: { type: boolean }
+    DiscoveryCallbackBatchV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, seq, phase, status, result_count, observed_at, assets, relations, exposures, provider_errors, error_summary]
+      properties:
+        schema_version: { type: string, enum: ["1.0"] }
+        run_id: { type: integer, format: uint64, minimum: 1 }
+        seq: { type: integer, format: uint64, minimum: 1 }
+        phase: { type: string, enum: [started, progress, completed, failed] }
+        status: { type: string, enum: [running, success, partial_success, failed, cancelled] }
+        result_count: { type: integer, format: uint64, minimum: 0, maximum: 2000 }
+        observed_at: { type: string, format: date-time }
+        assets: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/DiscoveryAssetFactV1" } }
+        relations: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/DiscoveryRelationFactV1" } }
+        exposures: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/DiscoveryExposureFactV1" } }
+        provider_errors: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/DiscoveryProviderErrorV1" } }
+        error_summary: { type: string, maxLength: 1024 }
+    DiscoveryAssetFactV1:
+      type: object
+      additionalProperties: false
+      required: [asset_type, value, source, provider, observed_at, confidence, active_probe, evidence_hash]
+      anyOf: [{ required: [client_ref] }, { required: [natural_key] }]
+      properties:
+        client_ref: { type: string, minLength: 1, maxLength: 128 }
+        natural_key: { type: string, minLength: 1, maxLength: 512 }
+        asset_type: { type: string, enum: [domain, subdomain, ip, certificate] }
+        value: { type: string, minLength: 1, maxLength: 2048 }
+        display_name: { type: string, maxLength: 255 }
+        source: { type: string, minLength: 1, maxLength: 64 }
+        provider: { type: string, minLength: 1, maxLength: 64 }
+        observed_at: { type: string, format: date-time }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        active_probe: { type: boolean, enum: [false] }
+        evidence_hash: { type: string, pattern: "^[a-f0-9]{64}$" }
+        evidence_ref: { type: string, maxLength: 512 }
+        attributes: { type: object, maxProperties: 32, additionalProperties: { type: string, maxLength: 1024 } }
+    DiscoveryFactReferenceV1:
+      type: object
+      additionalProperties: false
+      anyOf: [{ required: [client_ref] }, { required: [natural_key] }]
+      properties:
+        client_ref: { type: string, minLength: 1, maxLength: 128 }
+        natural_key: { type: string, minLength: 1, maxLength: 512 }
+    DiscoveryRelationFactV1:
+      type: object
+      additionalProperties: false
+      required: [relation_type, from, to, source, provider, observed_at, confidence, active_probe, evidence_hash]
+      anyOf: [{ required: [client_ref] }, { required: [natural_key] }]
+      properties:
+        client_ref: { type: string, minLength: 1, maxLength: 128 }
+        natural_key: { type: string, minLength: 1, maxLength: 512 }
+        relation_type: { type: string, enum: [contains, resolves_to, cname_to, presents_certificate] }
+        from: { $ref: "#/components/schemas/DiscoveryFactReferenceV1" }
+        to: { $ref: "#/components/schemas/DiscoveryFactReferenceV1" }
+        source: { type: string, minLength: 1, maxLength: 64 }
+        provider: { type: string, minLength: 1, maxLength: 64 }
+        observed_at: { type: string, format: date-time }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        active_probe: { type: boolean, enum: [false] }
+        evidence_hash: { type: string, pattern: "^[a-f0-9]{64}$" }
+        evidence_ref: { type: string, maxLength: 512 }
+    DiscoveryExposureFactV1:
+      type: object
+      additionalProperties: false
+      required: [parent, exposure_type, value, source, provider, observed_at, confidence, active_probe, evidence_hash]
+      anyOf: [{ required: [client_ref] }, { required: [natural_key] }]
+      properties:
+        client_ref: { type: string, minLength: 1, maxLength: 128 }
+        natural_key: { type: string, minLength: 1, maxLength: 512 }
+        parent: { $ref: "#/components/schemas/DiscoveryFactReferenceV1" }
+        exposure_type: { type: string, enum: [port, service, web, certificate] }
+        value: { type: string, minLength: 1, maxLength: 4096 }
+        protocol: { type: string, maxLength: 16 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        service: { type: string, maxLength: 128 }
+        version: { type: string, maxLength: 128 }
+        url: { type: string, format: uri, maxLength: 2048 }
+        fingerprint: { type: string, maxLength: 512 }
+        source: { type: string, minLength: 1, maxLength: 64 }
+        provider: { type: string, minLength: 1, maxLength: 64 }
+        observed_at: { type: string, format: date-time }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        active_probe: { type: boolean, enum: [false] }
+        evidence_hash: { type: string, pattern: "^[a-f0-9]{64}$" }
+        evidence_ref: { type: string, maxLength: 512 }
+    DiscoveryProviderErrorV1:
+      type: object
+      additionalProperties: false
+      required: [provider, code, message, retryable]
+      properties:
+        provider: { type: string, minLength: 1, maxLength: 64 }
+        code: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Z][A-Z0-9_]*$" }
+        message: { type: string, maxLength: 512 }
+        retryable: { type: boolean }
     Project:
       type: object
       required: [id, project_code, name, owner_user_id, criticality, status]

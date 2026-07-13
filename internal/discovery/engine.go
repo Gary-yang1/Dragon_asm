@@ -13,6 +13,7 @@ var (
 	ErrEngineDispatch      = errors.New("discovery: engine dispatch failed")
 	ErrEngineCancel        = errors.New("discovery: engine cancel failed")
 	ErrEngineStatus        = errors.New("discovery: engine status failed")
+	ErrCallbackURLConfig   = errors.New("discovery: callback base url not configured")
 )
 
 // Target is the engine-facing target shape. Values must already be authorized.
@@ -23,7 +24,9 @@ type Target struct {
 
 // ScanJob is the request passed to the engine adapter.
 type ScanJob struct {
-	RunID       string         `json:"run_id"`
+	RunID       uint64         `json:"run_id"`
+	ProjectID   uint64         `json:"project_id"`
+	ScopeID     uint64         `json:"scope_id"`
 	JobType     string         `json:"job_type"`
 	Targets     []Target       `json:"targets"`
 	RateLimit   int            `json:"rate_limit"`
@@ -45,6 +48,7 @@ const (
 // EngineJobStatus is the normalized status snapshot returned by the engine.
 type EngineJobStatus struct {
 	Status       string
+	Progress     int
 	ResultCount  uint64
 	ErrorSummary string
 }

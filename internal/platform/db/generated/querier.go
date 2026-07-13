@@ -62,6 +62,8 @@ type Querier interface {
 	// Returns the user's first live project membership, used by the web shell as
 	// the default project context after login.
 	GetDefaultProjectMembershipByUserID(ctx context.Context, userID string) (GetDefaultProjectMembershipByUserIDRow, error)
+	GetDiscoveryCallback(ctx context.Context, arg GetDiscoveryCallbackParams) (GetDiscoveryCallbackRow, error)
+	GetDiscoveryObservation(ctx context.Context, arg GetDiscoveryObservationParams) (DiscoveryObservation, error)
 	GetExposureByID(ctx context.Context, arg GetExposureByIDParams) (Exposure, error)
 	// sqlc queries for exposure snapshots and change_event writes.
 	GetExposureByKey(ctx context.Context, arg GetExposureByKeyParams) (Exposure, error)
@@ -131,6 +133,12 @@ type Querier interface {
 	// cannot both pass the "last administrator" guard.
 	ListActiveSystemAdminIDsForUpdate(ctx context.Context, tenantID string) ([]uint64, error)
 	ListAssetsByProject(ctx context.Context, arg ListAssetsByProjectParams) ([]Asset, error)
+	ListCurrentDiscoveryAssetObservationKeys(ctx context.Context, arg ListCurrentDiscoveryAssetObservationKeysParams) ([]string, error)
+	ListDiscoveryCallbacksForRunForUpdate(ctx context.Context, arg ListDiscoveryCallbacksForRunForUpdateParams) ([]ListDiscoveryCallbacksForRunForUpdateRow, error)
+	ListDiscoveryLifecycleAssets(ctx context.Context, arg ListDiscoveryLifecycleAssetsParams) ([]Asset, error)
+	ListDiscoveryObservationsByNaturalKey(ctx context.Context, arg ListDiscoveryObservationsByNaturalKeyParams) ([]DiscoveryObservation, error)
+	ListDiscoveryObservationsByRun(ctx context.Context, arg ListDiscoveryObservationsByRunParams) ([]DiscoveryObservation, error)
+	ListDiscoveryObservationsByRunSeq(ctx context.Context, arg ListDiscoveryObservationsByRunSeqParams) ([]DiscoveryObservation, error)
 	ListEnabledNotificationRulesByTrigger(ctx context.Context, arg ListEnabledNotificationRulesByTriggerParams) ([]NotificationRule, error)
 	ListEnabledRiskRules(ctx context.Context, projectID uint64) ([]RiskRule, error)
 	ListExpiredRiskDecisions(ctx context.Context, arg ListExpiredRiskDecisionsParams) ([]RiskDecision, error)
@@ -140,6 +148,7 @@ type Querier interface {
 	ListICPFilings(ctx context.Context, projectID uint64) ([]IcpFiling, error)
 	ListNotificationRulesByProject(ctx context.Context, projectID uint64) ([]NotificationRule, error)
 	ListOpenRisksForSLARecalc(ctx context.Context, arg ListOpenRisksForSLARecalcParams) ([]Risk, error)
+	ListPendingDiscoveryCallbacks(ctx context.Context, limit int32) ([]ListPendingDiscoveryCallbacksRow, error)
 	ListPlatformUserProjects(ctx context.Context, arg ListPlatformUserProjectsParams) ([]ListPlatformUserProjectsRow, error)
 	ListPlatformUsers(ctx context.Context, arg ListPlatformUsersParams) ([]ListPlatformUsersRow, error)
 	ListProjectDomainProfiles(ctx context.Context, projectID uint64) ([]ListProjectDomainProfilesRow, error)
@@ -169,6 +178,10 @@ type Querier interface {
 	ListTicketsByProject(ctx context.Context, arg ListTicketsByProjectParams) ([]Ticket, error)
 	ListVulnerabilityDefinitionsByProject(ctx context.Context, projectID uint64) ([]VulnerabilityDefinition, error)
 	MarkDiscoveryCallbackEnqueued(ctx context.Context, arg MarkDiscoveryCallbackEnqueuedParams) error
+	MarkDiscoveryCallbackFailed(ctx context.Context, arg MarkDiscoveryCallbackFailedParams) error
+	MarkDiscoveryCallbackProcessed(ctx context.Context, arg MarkDiscoveryCallbackProcessedParams) (sql.Result, error)
+	MarkDiscoveryCallbackProcessing(ctx context.Context, arg MarkDiscoveryCallbackProcessingParams) (sql.Result, error)
+	MarkDiscoveryObservationMaterialized(ctx context.Context, arg MarkDiscoveryObservationMaterializedParams) error
 	MarkReportExportFailed(ctx context.Context, arg MarkReportExportFailedParams) (sql.Result, error)
 	MarkReportExportRunning(ctx context.Context, arg MarkReportExportRunningParams) (sql.Result, error)
 	MarkReportExportSucceeded(ctx context.Context, arg MarkReportExportSucceededParams) (sql.Result, error)
@@ -232,6 +245,8 @@ type Querier interface {
 	// and status are preserved so a re-import never resets ownership or un-ignores an
 	// asset an operator deliberately set to 'ignored'/'inactive'.
 	UpsertAsset(ctx context.Context, arg UpsertAssetParams) (sql.Result, error)
+	// Discovery observation queries.
+	UpsertDiscoveryObservation(ctx context.Context, arg UpsertDiscoveryObservationParams) (sql.Result, error)
 	UpsertExposure(ctx context.Context, arg UpsertExposureParams) (sql.Result, error)
 	// sqlc queries for the asset_relation domain.
 	// Every read is scoped by project_id AND filters on the soft-delete sentinel, so

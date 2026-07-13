@@ -554,23 +554,29 @@ func TestRepoInsertDiscoveryCallbackReportsDuplicate(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO discovery_callback")).
 		WithArgs(
 			"t1", "o1", uint64(6), uint64(77), uint64(3),
-			CallbackPhaseProgress, TaskRunStatusRunning, "abc123", uint64(2), "",
-			now,
+			callbackSchemaVersion, CallbackPhaseProgress, TaskRunStatusRunning,
+			sql.NullTime{Time: now, Valid: true}, "abc123", []byte(`{"ok":true}`), uint32(11),
+			uint64(2), "", now, CallbackIngestPending,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	repo := NewRepository(dbgen.New(sqlDB))
 	inserted, err := repo.InsertDiscoveryCallback(context.Background(), DiscoveryCallback{
-		TenantID:    "t1",
-		OrgID:       "o1",
-		ProjectID:   6,
-		RunID:       77,
-		Seq:         3,
-		Phase:       CallbackPhaseProgress,
-		Status:      TaskRunStatusRunning,
-		PayloadHash: "abc123",
-		ResultCount: 2,
-		ReceivedAt:  now,
+		TenantID:      "t1",
+		OrgID:         "o1",
+		ProjectID:     6,
+		RunID:         77,
+		Seq:           3,
+		SchemaVersion: callbackSchemaVersion,
+		Phase:         CallbackPhaseProgress,
+		Status:        TaskRunStatusRunning,
+		ObservedAt:    now,
+		PayloadHash:   "abc123",
+		Payload:       []byte(`{"ok":true}`),
+		PayloadSize:   11,
+		ResultCount:   2,
+		ReceivedAt:    now,
+		IngestStatus:  CallbackIngestPending,
 	})
 	require.NoError(t, err)
 	assert.False(t, inserted)

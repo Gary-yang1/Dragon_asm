@@ -149,8 +149,8 @@ INSERT INTO asset_relation (
 )
 ON DUPLICATE KEY UPDATE
     last_seen  = VALUES(last_seen),
-    source     = VALUES(source),
-    confidence = VALUES(confidence),
+    source     = CASE WHEN source IN ('', 'discovery') THEN VALUES(source) ELSE source END,
+    confidence = GREATEST(confidence, VALUES(confidence)),
     updated_by = VALUES(updated_by)
 `
 

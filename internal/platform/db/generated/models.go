@@ -284,42 +284,84 @@ type ChangeEventArchive struct {
 }
 
 type DiscoveryCallback struct {
-	ID           uint64    `db:"id" json:"id"`
-	TenantID     string    `db:"tenant_id" json:"tenant_id"`
-	OrgID        string    `db:"org_id" json:"org_id"`
-	ProjectID    uint64    `db:"project_id" json:"project_id"`
-	RunID        uint64    `db:"run_id" json:"run_id"`
-	Seq          uint64    `db:"seq" json:"seq"`
-	Phase        string    `db:"phase" json:"phase"`
-	Status       string    `db:"status" json:"status"`
-	PayloadHash  string    `db:"payload_hash" json:"payload_hash"`
-	ResultCount  uint64    `db:"result_count" json:"result_count"`
-	ErrorSummary string    `db:"error_summary" json:"error_summary"`
-	ReceivedAt   time.Time `db:"received_at" json:"received_at"`
-	EnqueuedAt   time.Time `db:"enqueued_at" json:"enqueued_at"`
-	CreatedAt    time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
-	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
+	ID            uint64          `db:"id" json:"id"`
+	TenantID      string          `db:"tenant_id" json:"tenant_id"`
+	OrgID         string          `db:"org_id" json:"org_id"`
+	ProjectID     uint64          `db:"project_id" json:"project_id"`
+	RunID         uint64          `db:"run_id" json:"run_id"`
+	Seq           uint64          `db:"seq" json:"seq"`
+	Phase         string          `db:"phase" json:"phase"`
+	Status        string          `db:"status" json:"status"`
+	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
+	ResultCount   uint64          `db:"result_count" json:"result_count"`
+	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
+	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+	SchemaVersion string          `db:"schema_version" json:"schema_version"`
+	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
+	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
+	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string          `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
 }
 
 type DiscoveryCallbackArchive struct {
-	ID           uint64    `db:"id" json:"id"`
-	TenantID     string    `db:"tenant_id" json:"tenant_id"`
-	OrgID        string    `db:"org_id" json:"org_id"`
-	ProjectID    uint64    `db:"project_id" json:"project_id"`
-	RunID        uint64    `db:"run_id" json:"run_id"`
-	Seq          uint64    `db:"seq" json:"seq"`
-	Phase        string    `db:"phase" json:"phase"`
-	Status       string    `db:"status" json:"status"`
-	PayloadHash  string    `db:"payload_hash" json:"payload_hash"`
-	ResultCount  uint64    `db:"result_count" json:"result_count"`
-	ErrorSummary string    `db:"error_summary" json:"error_summary"`
-	ReceivedAt   time.Time `db:"received_at" json:"received_at"`
-	EnqueuedAt   time.Time `db:"enqueued_at" json:"enqueued_at"`
-	CreatedAt    time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
-	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
-	ArchivedAt   time.Time `db:"archived_at" json:"archived_at"`
+	ID            uint64          `db:"id" json:"id"`
+	TenantID      string          `db:"tenant_id" json:"tenant_id"`
+	OrgID         string          `db:"org_id" json:"org_id"`
+	ProjectID     uint64          `db:"project_id" json:"project_id"`
+	RunID         uint64          `db:"run_id" json:"run_id"`
+	Seq           uint64          `db:"seq" json:"seq"`
+	Phase         string          `db:"phase" json:"phase"`
+	Status        string          `db:"status" json:"status"`
+	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
+	ResultCount   uint64          `db:"result_count" json:"result_count"`
+	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
+	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+	ArchivedAt    time.Time       `db:"archived_at" json:"archived_at"`
+	SchemaVersion string          `db:"schema_version" json:"schema_version"`
+	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
+	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
+	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string          `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
+}
+
+type DiscoveryObservation struct {
+	ID             uint64          `db:"id" json:"id"`
+	TenantID       string          `db:"tenant_id" json:"tenant_id"`
+	OrgID          string          `db:"org_id" json:"org_id"`
+	ProjectID      uint64          `db:"project_id" json:"project_id"`
+	RunID          uint64          `db:"run_id" json:"run_id"`
+	Seq            uint64          `db:"seq" json:"seq"`
+	Kind           string          `db:"kind" json:"kind"`
+	NaturalKey     string          `db:"natural_key" json:"natural_key"`
+	ClientRef      string          `db:"client_ref" json:"client_ref"`
+	Provider       string          `db:"provider" json:"provider"`
+	Capability     string          `db:"capability" json:"capability"`
+	ObservedAt     time.Time       `db:"observed_at" json:"observed_at"`
+	Confidence     uint8           `db:"confidence" json:"confidence"`
+	ActiveProbe    bool            `db:"active_probe" json:"active_probe"`
+	EvidenceHash   string          `db:"evidence_hash" json:"evidence_hash"`
+	EvidenceRef    string          `db:"evidence_ref" json:"evidence_ref"`
+	NormalizedJson json.RawMessage `db:"normalized_json" json:"normalized_json"`
+	NormalizedSize uint32          `db:"normalized_size" json:"normalized_size"`
+	IngestStatus   string          `db:"ingest_status" json:"ingest_status"`
+	IngestError    string          `db:"ingest_error" json:"ingest_error"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
+	DeletedAt      time.Time       `db:"deleted_at" json:"deleted_at"`
 }
 
 type Exposure struct {

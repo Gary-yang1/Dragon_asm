@@ -122,16 +122,18 @@ JOIN (
 
 const archiveDiscoveryCallbacksSQL = `
 INSERT IGNORE INTO discovery_callback_archive (
-    id, tenant_id, org_id, project_id, run_id, seq, phase, status,
-    payload_hash, result_count, error_summary, received_at, enqueued_at,
+    id, tenant_id, org_id, project_id, run_id, seq, schema_version, phase, status, observed_at,
+    payload_hash, payload_json, payload_size, result_count, error_summary, received_at, enqueued_at,
+    ingest_status, ingest_attempt, ingest_error, processed_at,
     created_at, updated_at, deleted_at
 )
 SELECT
-    id, tenant_id, org_id, project_id, run_id, seq, phase, status,
-    payload_hash, result_count, error_summary, received_at, enqueued_at,
+    id, tenant_id, org_id, project_id, run_id, seq, schema_version, phase, status, observed_at,
+    payload_hash, payload_json, payload_size, result_count, error_summary, received_at, enqueued_at,
+    ingest_status, ingest_attempt, ingest_error, processed_at,
     created_at, updated_at, deleted_at
 FROM discovery_callback
-WHERE received_at < ?
+WHERE received_at < ? AND ingest_status IN ('processed', 'failed')
 ORDER BY received_at, id
 LIMIT ?`
 

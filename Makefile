@@ -56,6 +56,14 @@ migrate-create:
 tidy:
 	go mod tidy
 
+.PHONY: e2e-passive
+e2e-passive:
+	./integration/ext09/run.sh
+
+.PHONY: test-baiyan-image
+test-baiyan-image:
+	./integration/ext09/verify_engine_image.sh
+
 .PHONY: clean
 clean:
 	rm -rf $(BIN)

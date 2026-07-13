@@ -47,7 +47,19 @@ type Repository interface {
 	IncrementRunAttempt(ctx context.Context, projectID, runID uint64, actorID string, now time.Time) error
 	MarkRunCallbackReceived(ctx context.Context, projectID, runID uint64, actorID string, resultCount uint64, now time.Time) error
 	InsertDiscoveryCallback(ctx context.Context, in DiscoveryCallback) (bool, error)
+	GetDiscoveryCallback(ctx context.Context, projectID, runID, seq uint64) (*DiscoveryCallback, error)
+	ListPendingDiscoveryCallbacks(ctx context.Context, limit int32) ([]*DiscoveryCallback, error)
 	MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error
+	MarkDiscoveryCallbackProcessing(ctx context.Context, projectID, runID, seq uint64) (bool, error)
+	MarkDiscoveryCallbackProcessed(ctx context.Context, projectID, runID, seq uint64, processedAt time.Time) (bool, error)
+	MarkDiscoveryCallbackFailed(ctx context.Context, projectID, runID, seq uint64, summary string) error
+	ListDiscoveryCallbacksForRunForUpdate(ctx context.Context, projectID, runID uint64) ([]*DiscoveryCallback, error)
+	UpsertDiscoveryObservation(ctx context.Context, in DiscoveryObservation) (*DiscoveryObservation, error)
+	GetDiscoveryObservation(ctx context.Context, projectID, observationID uint64) (*DiscoveryObservation, error)
+	ListDiscoveryObservationsByRun(ctx context.Context, projectID, runID, seq uint64) ([]*DiscoveryObservation, error)
+	ListDiscoveryObservationsByNaturalKey(ctx context.Context, projectID uint64, kind, naturalKey string) ([]*DiscoveryObservation, error)
+	MarkDiscoveryObservationMaterialized(ctx context.Context, projectID, observationID uint64) error
+	ApplyDiscoveryObservationLifecycle(ctx context.Context, projectID, runID uint64, capability string, missThreshold uint32, allowMiss bool, actorID string, now time.Time) error
 }
 
 type CreateScopeParams struct {
@@ -562,17 +574,22 @@ func (r *sqlcRepository) MarkRunCallbackReceived(ctx context.Context, projectID,
 
 func (r *sqlcRepository) InsertDiscoveryCallback(ctx context.Context, in DiscoveryCallback) (bool, error) {
 	res, err := r.q.InsertDiscoveryCallback(ctx, dbgen.InsertDiscoveryCallbackParams{
-		TenantID:     in.TenantID,
-		OrgID:        in.OrgID,
-		ProjectID:    in.ProjectID,
-		RunID:        in.RunID,
-		Seq:          in.Seq,
-		Phase:        in.Phase,
-		Status:       in.Status,
-		PayloadHash:  in.PayloadHash,
-		ResultCount:  in.ResultCount,
-		ErrorSummary: in.ErrorSummary,
-		ReceivedAt:   in.ReceivedAt.UTC(),
+		TenantID:      in.TenantID,
+		OrgID:         in.OrgID,
+		ProjectID:     in.ProjectID,
+		RunID:         in.RunID,
+		Seq:           in.Seq,
+		SchemaVersion: in.SchemaVersion,
+		Phase:         in.Phase,
+		Status:        in.Status,
+		ObservedAt:    sql.NullTime{Time: in.ObservedAt.UTC(), Valid: !in.ObservedAt.IsZero()},
+		PayloadHash:   in.PayloadHash,
+		PayloadJson:   in.Payload,
+		PayloadSize:   in.PayloadSize,
+		ResultCount:   in.ResultCount,
+		ErrorSummary:  in.ErrorSummary,
+		ReceivedAt:    in.ReceivedAt.UTC(),
+		IngestStatus:  in.IngestStatus,
 	})
 	if err != nil {
 		return false, err
@@ -584,6 +601,32 @@ func (r *sqlcRepository) InsertDiscoveryCallback(ctx context.Context, in Discove
 	return affected > 0, nil
 }
 
+func (r *sqlcRepository) GetDiscoveryCallback(ctx context.Context, projectID, runID, seq uint64) (*DiscoveryCallback, error) {
+	row, err := r.q.GetDiscoveryCallback(ctx, dbgen.GetDiscoveryCallbackParams{ProjectID: projectID, RunID: runID, Seq: seq})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return callbackFromFields(row.ID, row.TenantID, row.OrgID, row.ProjectID, row.RunID, row.Seq,
+		row.SchemaVersion, row.Phase, row.Status, row.ObservedAt, row.PayloadHash, row.PayloadJson,
+		row.PayloadSize, row.ResultCount, row.ErrorSummary, row.ReceivedAt, row.EnqueuedAt,
+		row.IngestStatus, row.IngestAttempt, row.IngestError, row.ProcessedAt), nil
+}
+
+func (r *sqlcRepository) ListPendingDiscoveryCallbacks(ctx context.Context, limit int32) ([]*DiscoveryCallback, error) {
+	rows, err := r.q.ListPendingDiscoveryCallbacks(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]*DiscoveryCallback, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, callbackFromFields(row.ID, row.TenantID, row.OrgID, row.ProjectID, row.RunID, row.Seq,
+			row.SchemaVersion, row.Phase, row.Status, row.ObservedAt, row.PayloadHash, row.PayloadJson,
+			row.PayloadSize, row.ResultCount, row.ErrorSummary, row.ReceivedAt, row.EnqueuedAt,
+			row.IngestStatus, row.IngestAttempt, row.IngestError, row.ProcessedAt))
+	}
+	return items, nil
+}
+
 func (r *sqlcRepository) MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error {
 	return r.q.MarkDiscoveryCallbackEnqueued(ctx, dbgen.MarkDiscoveryCallbackEnqueuedParams{
 		EnqueuedAt: enqueuedAt.UTC(),
@@ -591,6 +634,68 @@ func (r *sqlcRepository) MarkDiscoveryCallbackEnqueued(ctx context.Context, proj
 		RunID:      runID,
 		Seq:        seq,
 	})
+}
+
+func (r *sqlcRepository) MarkDiscoveryCallbackProcessing(ctx context.Context, projectID, runID, seq uint64) (bool, error) {
+	res, err := r.q.MarkDiscoveryCallbackProcessing(ctx, dbgen.MarkDiscoveryCallbackProcessingParams{
+		ProjectID: projectID, RunID: runID, Seq: seq,
+	})
+	return rowsAffected(res, err)
+}
+
+func (r *sqlcRepository) MarkDiscoveryCallbackProcessed(ctx context.Context, projectID, runID, seq uint64, processedAt time.Time) (bool, error) {
+	res, err := r.q.MarkDiscoveryCallbackProcessed(ctx, dbgen.MarkDiscoveryCallbackProcessedParams{
+		ProcessedAt: processedAt.UTC(), ProjectID: projectID, RunID: runID, Seq: seq,
+	})
+	return rowsAffected(res, err)
+}
+
+func (r *sqlcRepository) MarkDiscoveryCallbackFailed(ctx context.Context, projectID, runID, seq uint64, summary string) error {
+	return r.q.MarkDiscoveryCallbackFailed(ctx, dbgen.MarkDiscoveryCallbackFailedParams{
+		IngestError: summary, ProjectID: projectID, RunID: runID, Seq: seq,
+	})
+}
+
+func (r *sqlcRepository) ListDiscoveryCallbacksForRunForUpdate(ctx context.Context, projectID, runID uint64) ([]*DiscoveryCallback, error) {
+	rows, err := r.q.ListDiscoveryCallbacksForRunForUpdate(ctx, dbgen.ListDiscoveryCallbacksForRunForUpdateParams{
+		ProjectID: projectID, RunID: runID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]*DiscoveryCallback, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, callbackFromFields(row.ID, row.TenantID, row.OrgID, row.ProjectID, row.RunID, row.Seq,
+			row.SchemaVersion, row.Phase, row.Status, row.ObservedAt, row.PayloadHash, row.PayloadJson,
+			row.PayloadSize, row.ResultCount, row.ErrorSummary, row.ReceivedAt, row.EnqueuedAt,
+			row.IngestStatus, row.IngestAttempt, row.IngestError, row.ProcessedAt))
+	}
+	return items, nil
+}
+
+func rowsAffected(result sql.Result, err error) (bool, error) {
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+func callbackFromFields(id uint64, tenantID, orgID string, projectID, runID, seq uint64,
+	schemaVersion, phase, status string, observedAt sql.NullTime, payloadHash string, payload []byte,
+	payloadSize uint32, resultCount uint64, errorSummary string, receivedAt, enqueuedAt time.Time,
+	ingestStatus string, ingestAttempt uint32, ingestError string, processedAt time.Time,
+) *DiscoveryCallback {
+	return &DiscoveryCallback{
+		ID: id, TenantID: tenantID, OrgID: orgID, ProjectID: projectID, RunID: runID, Seq: seq,
+		SchemaVersion: schemaVersion, Phase: phase, Status: status, ObservedAt: observedAt.Time,
+		PayloadHash: payloadHash, Payload: append([]byte(nil), payload...), PayloadSize: payloadSize,
+		ResultCount: resultCount, ErrorSummary: errorSummary, ReceivedAt: receivedAt, EnqueuedAt: enqueuedAt,
+		IngestStatus: ingestStatus, IngestAttempt: ingestAttempt, IngestError: ingestError, ProcessedAt: processedAt,
+	}
 }
 
 func mapErr(err error) error {

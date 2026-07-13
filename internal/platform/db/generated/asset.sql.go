@@ -273,9 +273,9 @@ INSERT INTO asset (
 )
 ON DUPLICATE KEY UPDATE
     last_seen    = VALUES(last_seen),
-    source       = VALUES(source),
-    confidence   = VALUES(confidence),
-    display_name = VALUES(display_name),
+    source       = CASE WHEN source IN ('', 'discovery') THEN VALUES(source) ELSE source END,
+    confidence   = GREATEST(confidence, VALUES(confidence)),
+    display_name = CASE WHEN display_name = '' THEN VALUES(display_name) ELSE display_name END,
     value        = VALUES(value),
     updated_by   = VALUES(updated_by)
 `

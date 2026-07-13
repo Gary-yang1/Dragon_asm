@@ -169,6 +169,7 @@ type ImportInput struct {
 	Confidence   uint8
 	Status       string
 	ActorID      string
+	ObservedAt   time.Time
 }
 
 // Import normalizes and idempotently upserts a single asset within its project.
@@ -241,6 +242,7 @@ func importWith(ctx context.Context, repo Repository, in ImportInput) (*Asset, e
 		Confidence:   confidence,
 		Status:       status,
 		ActorID:      in.ActorID,
+		ObservedAt:   in.ObservedAt,
 	}); err != nil {
 		return nil, err
 	}
@@ -618,6 +620,7 @@ type RelationInput struct {
 	Source       string
 	Confidence   uint8
 	ActorID      string
+	ObservedAt   time.Time
 }
 
 // UpsertRelation idempotently creates or refreshes a directed edge between two
@@ -682,6 +685,7 @@ func (s *Service) UpsertRelation(ctx context.Context, in RelationInput, meta Aud
 			Source:       in.Source,
 			Confidence:   confidence,
 			ActorID:      in.ActorID,
+			ObservedAt:   in.ObservedAt,
 		}); err != nil {
 			return err
 		}

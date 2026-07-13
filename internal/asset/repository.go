@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 )
@@ -88,6 +89,7 @@ type UpsertParams struct {
 	Confidence   uint8
 	Status       string
 	ActorID      string
+	ObservedAt   time.Time
 }
 
 type sqlcRepository struct {
@@ -101,6 +103,10 @@ func NewRepository(q *dbgen.Queries) Repository {
 }
 
 func (r *sqlcRepository) Upsert(ctx context.Context, in UpsertParams) error {
+	observedAt := in.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = nowFn()
+	}
 	_, err := r.q.UpsertAsset(ctx, dbgen.UpsertAssetParams{
 		TenantID:     in.TenantID,
 		OrgID:        in.OrgID,
@@ -114,8 +120,8 @@ func (r *sqlcRepository) Upsert(ctx context.Context, in UpsertParams) error {
 		BusinessUnit: in.BusinessUnit,
 		Confidence:   in.Confidence,
 		Status:       in.Status,
-		FirstSeen:    nowFn(),
-		LastSeen:     nowFn(),
+		FirstSeen:    observedAt,
+		LastSeen:     observedAt,
 		CreatedBy:    in.ActorID,
 		UpdatedBy:    in.ActorID,
 	})

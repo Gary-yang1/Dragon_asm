@@ -182,6 +182,123 @@ func (q *Queries) CreateTaskTemplate(ctx context.Context, arg CreateTaskTemplate
 	)
 }
 
+const getDiscoveryCallback = `-- name: GetDiscoveryCallback :one
+SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
+       phase, status, observed_at, payload_hash, payload_json, payload_size,
+       result_count, error_summary, received_at, enqueued_at, ingest_status,
+       ingest_attempt, ingest_error, processed_at, created_at, updated_at, deleted_at
+FROM discovery_callback
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetDiscoveryCallbackParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+	Seq       uint64 `db:"seq" json:"seq"`
+}
+
+type GetDiscoveryCallbackRow struct {
+	ID            uint64          `db:"id" json:"id"`
+	TenantID      string          `db:"tenant_id" json:"tenant_id"`
+	OrgID         string          `db:"org_id" json:"org_id"`
+	ProjectID     uint64          `db:"project_id" json:"project_id"`
+	RunID         uint64          `db:"run_id" json:"run_id"`
+	Seq           uint64          `db:"seq" json:"seq"`
+	SchemaVersion string          `db:"schema_version" json:"schema_version"`
+	Phase         string          `db:"phase" json:"phase"`
+	Status        string          `db:"status" json:"status"`
+	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
+	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64          `db:"result_count" json:"result_count"`
+	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
+	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string          `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
+	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+}
+
+func (q *Queries) GetDiscoveryCallback(ctx context.Context, arg GetDiscoveryCallbackParams) (GetDiscoveryCallbackRow, error) {
+	row := q.db.QueryRowContext(ctx, getDiscoveryCallback, arg.ProjectID, arg.RunID, arg.Seq)
+	var i GetDiscoveryCallbackRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.RunID,
+		&i.Seq,
+		&i.SchemaVersion,
+		&i.Phase,
+		&i.Status,
+		&i.ObservedAt,
+		&i.PayloadHash,
+		&i.PayloadJson,
+		&i.PayloadSize,
+		&i.ResultCount,
+		&i.ErrorSummary,
+		&i.ReceivedAt,
+		&i.EnqueuedAt,
+		&i.IngestStatus,
+		&i.IngestAttempt,
+		&i.IngestError,
+		&i.ProcessedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getDiscoveryObservation = `-- name: GetDiscoveryObservation :one
+SELECT id, tenant_id, org_id, project_id, run_id, seq, kind, natural_key, client_ref, provider, capability, observed_at, confidence, active_probe, evidence_hash, evidence_ref, normalized_json, normalized_size, ingest_status, ingest_error, created_at, updated_at, deleted_at FROM discovery_observation
+WHERE id = ? AND project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetDiscoveryObservationParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) GetDiscoveryObservation(ctx context.Context, arg GetDiscoveryObservationParams) (DiscoveryObservation, error) {
+	row := q.db.QueryRowContext(ctx, getDiscoveryObservation, arg.ID, arg.ProjectID)
+	var i DiscoveryObservation
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.RunID,
+		&i.Seq,
+		&i.Kind,
+		&i.NaturalKey,
+		&i.ClientRef,
+		&i.Provider,
+		&i.Capability,
+		&i.ObservedAt,
+		&i.Confidence,
+		&i.ActiveProbe,
+		&i.EvidenceHash,
+		&i.EvidenceRef,
+		&i.NormalizedJson,
+		&i.NormalizedSize,
+		&i.IngestStatus,
+		&i.IngestError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
 const getScopeByID = `-- name: GetScopeByID :one
 SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
@@ -325,28 +442,33 @@ func (q *Queries) IncrementTaskRunAttempt(ctx context.Context, arg IncrementTask
 
 const insertDiscoveryCallback = `-- name: InsertDiscoveryCallback :execresult
 INSERT IGNORE INTO discovery_callback (
-    tenant_id, org_id, project_id, run_id, seq,
-    phase, status, payload_hash, result_count, error_summary,
-    received_at
+    tenant_id, org_id, project_id, run_id, seq, schema_version,
+    phase, status, observed_at, payload_hash, payload_json, payload_size,
+    result_count, error_summary, received_at, ingest_status
 ) VALUES (
-    ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?,
-    ?
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?
 )
 `
 
 type InsertDiscoveryCallbackParams struct {
-	TenantID     string    `db:"tenant_id" json:"tenant_id"`
-	OrgID        string    `db:"org_id" json:"org_id"`
-	ProjectID    uint64    `db:"project_id" json:"project_id"`
-	RunID        uint64    `db:"run_id" json:"run_id"`
-	Seq          uint64    `db:"seq" json:"seq"`
-	Phase        string    `db:"phase" json:"phase"`
-	Status       string    `db:"status" json:"status"`
-	PayloadHash  string    `db:"payload_hash" json:"payload_hash"`
-	ResultCount  uint64    `db:"result_count" json:"result_count"`
-	ErrorSummary string    `db:"error_summary" json:"error_summary"`
-	ReceivedAt   time.Time `db:"received_at" json:"received_at"`
+	TenantID      string          `db:"tenant_id" json:"tenant_id"`
+	OrgID         string          `db:"org_id" json:"org_id"`
+	ProjectID     uint64          `db:"project_id" json:"project_id"`
+	RunID         uint64          `db:"run_id" json:"run_id"`
+	Seq           uint64          `db:"seq" json:"seq"`
+	SchemaVersion string          `db:"schema_version" json:"schema_version"`
+	Phase         string          `db:"phase" json:"phase"`
+	Status        string          `db:"status" json:"status"`
+	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
+	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64          `db:"result_count" json:"result_count"`
+	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
+	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
 }
 
 // Discovery callback queries.
@@ -357,12 +479,17 @@ func (q *Queries) InsertDiscoveryCallback(ctx context.Context, arg InsertDiscove
 		arg.ProjectID,
 		arg.RunID,
 		arg.Seq,
+		arg.SchemaVersion,
 		arg.Phase,
 		arg.Status,
+		arg.ObservedAt,
 		arg.PayloadHash,
+		arg.PayloadJson,
+		arg.PayloadSize,
 		arg.ResultCount,
 		arg.ErrorSummary,
 		arg.ReceivedAt,
+		arg.IngestStatus,
 	)
 }
 
@@ -403,6 +530,468 @@ func (q *Queries) InsertScopeTarget(ctx context.Context, arg InsertScopeTargetPa
 		arg.UpdatedBy,
 	)
 	return err
+}
+
+const listCurrentDiscoveryAssetObservationKeys = `-- name: ListCurrentDiscoveryAssetObservationKeys :many
+SELECT DISTINCT natural_key
+FROM discovery_observation
+WHERE project_id = ? AND run_id = ? AND capability = ?
+  AND kind = 'asset' AND ingest_status = 'materialized'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type ListCurrentDiscoveryAssetObservationKeysParams struct {
+	ProjectID  uint64 `db:"project_id" json:"project_id"`
+	RunID      uint64 `db:"run_id" json:"run_id"`
+	Capability string `db:"capability" json:"capability"`
+}
+
+func (q *Queries) ListCurrentDiscoveryAssetObservationKeys(ctx context.Context, arg ListCurrentDiscoveryAssetObservationKeysParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listCurrentDiscoveryAssetObservationKeys, arg.ProjectID, arg.RunID, arg.Capability)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var natural_key string
+		if err := rows.Scan(&natural_key); err != nil {
+			return nil, err
+		}
+		items = append(items, natural_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDiscoveryCallbacksForRunForUpdate = `-- name: ListDiscoveryCallbacksForRunForUpdate :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
+       phase, status, observed_at, payload_hash, payload_json, payload_size,
+       result_count, error_summary, received_at, enqueued_at, ingest_status,
+       ingest_attempt, ingest_error, processed_at, created_at, updated_at, deleted_at
+FROM discovery_callback
+WHERE project_id = ? AND run_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY seq
+FOR UPDATE
+`
+
+type ListDiscoveryCallbacksForRunForUpdateParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+}
+
+type ListDiscoveryCallbacksForRunForUpdateRow struct {
+	ID            uint64          `db:"id" json:"id"`
+	TenantID      string          `db:"tenant_id" json:"tenant_id"`
+	OrgID         string          `db:"org_id" json:"org_id"`
+	ProjectID     uint64          `db:"project_id" json:"project_id"`
+	RunID         uint64          `db:"run_id" json:"run_id"`
+	Seq           uint64          `db:"seq" json:"seq"`
+	SchemaVersion string          `db:"schema_version" json:"schema_version"`
+	Phase         string          `db:"phase" json:"phase"`
+	Status        string          `db:"status" json:"status"`
+	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
+	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64          `db:"result_count" json:"result_count"`
+	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
+	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string          `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
+	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+}
+
+func (q *Queries) ListDiscoveryCallbacksForRunForUpdate(ctx context.Context, arg ListDiscoveryCallbacksForRunForUpdateParams) ([]ListDiscoveryCallbacksForRunForUpdateRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDiscoveryCallbacksForRunForUpdate, arg.ProjectID, arg.RunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDiscoveryCallbacksForRunForUpdateRow{}
+	for rows.Next() {
+		var i ListDiscoveryCallbacksForRunForUpdateRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.RunID,
+			&i.Seq,
+			&i.SchemaVersion,
+			&i.Phase,
+			&i.Status,
+			&i.ObservedAt,
+			&i.PayloadHash,
+			&i.PayloadJson,
+			&i.PayloadSize,
+			&i.ResultCount,
+			&i.ErrorSummary,
+			&i.ReceivedAt,
+			&i.EnqueuedAt,
+			&i.IngestStatus,
+			&i.IngestAttempt,
+			&i.IngestError,
+			&i.ProcessedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDiscoveryLifecycleAssets = `-- name: ListDiscoveryLifecycleAssets :many
+SELECT DISTINCT a.id, a.tenant_id, a.org_id, a.project_id, a.asset_type, a.asset_key, a.display_name, a.value, a.source, a.owner, a.business_unit, a.confidence, a.status, a.first_seen, a.last_seen, a.created_at, a.updated_at, a.created_by, a.updated_by, a.deleted_at, a.miss_count
+FROM asset a
+JOIN discovery_observation o
+  ON o.project_id = a.project_id AND o.natural_key = a.asset_key
+WHERE a.project_id = ? AND o.capability = ? AND o.kind = 'asset'
+  AND o.ingest_status = 'materialized'
+  AND a.source = 'discovery'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+  AND o.deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY a.id
+`
+
+type ListDiscoveryLifecycleAssetsParams struct {
+	ProjectID  uint64 `db:"project_id" json:"project_id"`
+	Capability string `db:"capability" json:"capability"`
+}
+
+func (q *Queries) ListDiscoveryLifecycleAssets(ctx context.Context, arg ListDiscoveryLifecycleAssetsParams) ([]Asset, error) {
+	rows, err := q.db.QueryContext(ctx, listDiscoveryLifecycleAssets, arg.ProjectID, arg.Capability)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Asset{}
+	for rows.Next() {
+		var i Asset
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.AssetType,
+			&i.AssetKey,
+			&i.DisplayName,
+			&i.Value,
+			&i.Source,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.Confidence,
+			&i.Status,
+			&i.FirstSeen,
+			&i.LastSeen,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+			&i.MissCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDiscoveryObservationsByNaturalKey = `-- name: ListDiscoveryObservationsByNaturalKey :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, kind, natural_key, client_ref, provider, capability, observed_at, confidence, active_probe, evidence_hash, evidence_ref, normalized_json, normalized_size, ingest_status, ingest_error, created_at, updated_at, deleted_at FROM discovery_observation
+WHERE project_id = ? AND kind = ? AND natural_key = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY observed_at DESC, id DESC
+`
+
+type ListDiscoveryObservationsByNaturalKeyParams struct {
+	ProjectID  uint64 `db:"project_id" json:"project_id"`
+	Kind       string `db:"kind" json:"kind"`
+	NaturalKey string `db:"natural_key" json:"natural_key"`
+}
+
+func (q *Queries) ListDiscoveryObservationsByNaturalKey(ctx context.Context, arg ListDiscoveryObservationsByNaturalKeyParams) ([]DiscoveryObservation, error) {
+	rows, err := q.db.QueryContext(ctx, listDiscoveryObservationsByNaturalKey, arg.ProjectID, arg.Kind, arg.NaturalKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DiscoveryObservation{}
+	for rows.Next() {
+		var i DiscoveryObservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.RunID,
+			&i.Seq,
+			&i.Kind,
+			&i.NaturalKey,
+			&i.ClientRef,
+			&i.Provider,
+			&i.Capability,
+			&i.ObservedAt,
+			&i.Confidence,
+			&i.ActiveProbe,
+			&i.EvidenceHash,
+			&i.EvidenceRef,
+			&i.NormalizedJson,
+			&i.NormalizedSize,
+			&i.IngestStatus,
+			&i.IngestError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDiscoveryObservationsByRun = `-- name: ListDiscoveryObservationsByRun :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, kind, natural_key, client_ref, provider, capability, observed_at, confidence, active_probe, evidence_hash, evidence_ref, normalized_json, normalized_size, ingest_status, ingest_error, created_at, updated_at, deleted_at FROM discovery_observation
+WHERE project_id = ? AND run_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY seq, id
+`
+
+type ListDiscoveryObservationsByRunParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+}
+
+func (q *Queries) ListDiscoveryObservationsByRun(ctx context.Context, arg ListDiscoveryObservationsByRunParams) ([]DiscoveryObservation, error) {
+	rows, err := q.db.QueryContext(ctx, listDiscoveryObservationsByRun, arg.ProjectID, arg.RunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DiscoveryObservation{}
+	for rows.Next() {
+		var i DiscoveryObservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.RunID,
+			&i.Seq,
+			&i.Kind,
+			&i.NaturalKey,
+			&i.ClientRef,
+			&i.Provider,
+			&i.Capability,
+			&i.ObservedAt,
+			&i.Confidence,
+			&i.ActiveProbe,
+			&i.EvidenceHash,
+			&i.EvidenceRef,
+			&i.NormalizedJson,
+			&i.NormalizedSize,
+			&i.IngestStatus,
+			&i.IngestError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDiscoveryObservationsByRunSeq = `-- name: ListDiscoveryObservationsByRunSeq :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, kind, natural_key, client_ref, provider, capability, observed_at, confidence, active_probe, evidence_hash, evidence_ref, normalized_json, normalized_size, ingest_status, ingest_error, created_at, updated_at, deleted_at FROM discovery_observation
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id
+`
+
+type ListDiscoveryObservationsByRunSeqParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+	Seq       uint64 `db:"seq" json:"seq"`
+}
+
+func (q *Queries) ListDiscoveryObservationsByRunSeq(ctx context.Context, arg ListDiscoveryObservationsByRunSeqParams) ([]DiscoveryObservation, error) {
+	rows, err := q.db.QueryContext(ctx, listDiscoveryObservationsByRunSeq, arg.ProjectID, arg.RunID, arg.Seq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DiscoveryObservation{}
+	for rows.Next() {
+		var i DiscoveryObservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.RunID,
+			&i.Seq,
+			&i.Kind,
+			&i.NaturalKey,
+			&i.ClientRef,
+			&i.Provider,
+			&i.Capability,
+			&i.ObservedAt,
+			&i.Confidence,
+			&i.ActiveProbe,
+			&i.EvidenceHash,
+			&i.EvidenceRef,
+			&i.NormalizedJson,
+			&i.NormalizedSize,
+			&i.IngestStatus,
+			&i.IngestError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingDiscoveryCallbacks = `-- name: ListPendingDiscoveryCallbacks :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
+       phase, status, observed_at, payload_hash, payload_json, payload_size,
+       result_count, error_summary, received_at, enqueued_at, ingest_status,
+       ingest_attempt, ingest_error, processed_at, created_at, updated_at, deleted_at
+FROM discovery_callback
+WHERE (
+      ingest_status = 'pending'
+      OR (ingest_status = 'failed' AND ingest_attempt < 10)
+      OR (ingest_status = 'processing' AND ingest_attempt < 10 AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE))
+  )
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY received_at ASC, id ASC
+LIMIT ?
+`
+
+type ListPendingDiscoveryCallbacksRow struct {
+	ID            uint64          `db:"id" json:"id"`
+	TenantID      string          `db:"tenant_id" json:"tenant_id"`
+	OrgID         string          `db:"org_id" json:"org_id"`
+	ProjectID     uint64          `db:"project_id" json:"project_id"`
+	RunID         uint64          `db:"run_id" json:"run_id"`
+	Seq           uint64          `db:"seq" json:"seq"`
+	SchemaVersion string          `db:"schema_version" json:"schema_version"`
+	Phase         string          `db:"phase" json:"phase"`
+	Status        string          `db:"status" json:"status"`
+	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
+	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64          `db:"result_count" json:"result_count"`
+	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
+	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string          `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
+	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+}
+
+func (q *Queries) ListPendingDiscoveryCallbacks(ctx context.Context, limit int32) ([]ListPendingDiscoveryCallbacksRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingDiscoveryCallbacks, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingDiscoveryCallbacksRow{}
+	for rows.Next() {
+		var i ListPendingDiscoveryCallbacksRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.RunID,
+			&i.Seq,
+			&i.SchemaVersion,
+			&i.Phase,
+			&i.Status,
+			&i.ObservedAt,
+			&i.PayloadHash,
+			&i.PayloadJson,
+			&i.PayloadSize,
+			&i.ResultCount,
+			&i.ErrorSummary,
+			&i.ReceivedAt,
+			&i.EnqueuedAt,
+			&i.IngestStatus,
+			&i.IngestAttempt,
+			&i.IngestError,
+			&i.ProcessedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listRunningTaskRunsForReconcile = `-- name: ListRunningTaskRunsForReconcile :many
@@ -684,6 +1273,99 @@ func (q *Queries) MarkDiscoveryCallbackEnqueued(ctx context.Context, arg MarkDis
 		arg.RunID,
 		arg.Seq,
 	)
+	return err
+}
+
+const markDiscoveryCallbackFailed = `-- name: MarkDiscoveryCallbackFailed :exec
+UPDATE discovery_callback
+SET ingest_status = 'failed',
+    ingest_error = ?
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND ingest_status = 'processing'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkDiscoveryCallbackFailedParams struct {
+	IngestError string `db:"ingest_error" json:"ingest_error"`
+	ProjectID   uint64 `db:"project_id" json:"project_id"`
+	RunID       uint64 `db:"run_id" json:"run_id"`
+	Seq         uint64 `db:"seq" json:"seq"`
+}
+
+func (q *Queries) MarkDiscoveryCallbackFailed(ctx context.Context, arg MarkDiscoveryCallbackFailedParams) error {
+	_, err := q.db.ExecContext(ctx, markDiscoveryCallbackFailed,
+		arg.IngestError,
+		arg.ProjectID,
+		arg.RunID,
+		arg.Seq,
+	)
+	return err
+}
+
+const markDiscoveryCallbackProcessed = `-- name: MarkDiscoveryCallbackProcessed :execresult
+UPDATE discovery_callback
+SET ingest_status = 'processed',
+    ingest_error = '',
+    processed_at = ?
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND ingest_status = 'processing'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkDiscoveryCallbackProcessedParams struct {
+	ProcessedAt time.Time `db:"processed_at" json:"processed_at"`
+	ProjectID   uint64    `db:"project_id" json:"project_id"`
+	RunID       uint64    `db:"run_id" json:"run_id"`
+	Seq         uint64    `db:"seq" json:"seq"`
+}
+
+func (q *Queries) MarkDiscoveryCallbackProcessed(ctx context.Context, arg MarkDiscoveryCallbackProcessedParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markDiscoveryCallbackProcessed,
+		arg.ProcessedAt,
+		arg.ProjectID,
+		arg.RunID,
+		arg.Seq,
+	)
+}
+
+const markDiscoveryCallbackProcessing = `-- name: MarkDiscoveryCallbackProcessing :execresult
+UPDATE discovery_callback
+SET ingest_status = 'processing',
+    ingest_attempt = ingest_attempt + 1,
+    ingest_error = ''
+WHERE project_id = ? AND run_id = ? AND seq = ?
+  AND (
+      ingest_status IN ('pending', 'failed')
+      OR (ingest_status = 'processing' AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE))
+  )
+  AND ingest_attempt < 10
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkDiscoveryCallbackProcessingParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+	Seq       uint64 `db:"seq" json:"seq"`
+}
+
+func (q *Queries) MarkDiscoveryCallbackProcessing(ctx context.Context, arg MarkDiscoveryCallbackProcessingParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markDiscoveryCallbackProcessing, arg.ProjectID, arg.RunID, arg.Seq)
+}
+
+const markDiscoveryObservationMaterialized = `-- name: MarkDiscoveryObservationMaterialized :exec
+UPDATE discovery_observation
+SET ingest_status = 'materialized', ingest_error = ''
+WHERE id = ? AND project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type MarkDiscoveryObservationMaterializedParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) MarkDiscoveryObservationMaterialized(ctx context.Context, arg MarkDiscoveryObservationMaterializedParams) error {
+	_, err := q.db.ExecContext(ctx, markDiscoveryObservationMaterialized, arg.ID, arg.ProjectID)
 	return err
 }
 
@@ -1134,4 +1816,77 @@ func (q *Queries) UpdateTaskTemplate(ctx context.Context, arg UpdateTaskTemplate
 		arg.ProjectID,
 	)
 	return err
+}
+
+const upsertDiscoveryObservation = `-- name: UpsertDiscoveryObservation :execresult
+INSERT INTO discovery_observation (
+    tenant_id, org_id, project_id, run_id, seq, kind, natural_key, client_ref,
+    provider, capability, observed_at, confidence, active_probe, evidence_hash,
+    evidence_ref, normalized_json, normalized_size, ingest_status, ingest_error
+) VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?
+)
+ON DUPLICATE KEY UPDATE
+    id = LAST_INSERT_ID(id),
+    seq = VALUES(seq),
+    client_ref = VALUES(client_ref),
+    capability = VALUES(capability),
+    observed_at = GREATEST(observed_at, VALUES(observed_at)),
+    confidence = VALUES(confidence),
+    active_probe = VALUES(active_probe),
+    evidence_hash = VALUES(evidence_hash),
+    evidence_ref = VALUES(evidence_ref),
+    normalized_json = VALUES(normalized_json),
+    normalized_size = VALUES(normalized_size),
+    ingest_status = VALUES(ingest_status),
+    ingest_error = VALUES(ingest_error)
+`
+
+type UpsertDiscoveryObservationParams struct {
+	TenantID       string          `db:"tenant_id" json:"tenant_id"`
+	OrgID          string          `db:"org_id" json:"org_id"`
+	ProjectID      uint64          `db:"project_id" json:"project_id"`
+	RunID          uint64          `db:"run_id" json:"run_id"`
+	Seq            uint64          `db:"seq" json:"seq"`
+	Kind           string          `db:"kind" json:"kind"`
+	NaturalKey     string          `db:"natural_key" json:"natural_key"`
+	ClientRef      string          `db:"client_ref" json:"client_ref"`
+	Provider       string          `db:"provider" json:"provider"`
+	Capability     string          `db:"capability" json:"capability"`
+	ObservedAt     time.Time       `db:"observed_at" json:"observed_at"`
+	Confidence     uint8           `db:"confidence" json:"confidence"`
+	ActiveProbe    bool            `db:"active_probe" json:"active_probe"`
+	EvidenceHash   string          `db:"evidence_hash" json:"evidence_hash"`
+	EvidenceRef    string          `db:"evidence_ref" json:"evidence_ref"`
+	NormalizedJson json.RawMessage `db:"normalized_json" json:"normalized_json"`
+	NormalizedSize uint32          `db:"normalized_size" json:"normalized_size"`
+	IngestStatus   string          `db:"ingest_status" json:"ingest_status"`
+	IngestError    string          `db:"ingest_error" json:"ingest_error"`
+}
+
+// Discovery observation queries.
+func (q *Queries) UpsertDiscoveryObservation(ctx context.Context, arg UpsertDiscoveryObservationParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, upsertDiscoveryObservation,
+		arg.TenantID,
+		arg.OrgID,
+		arg.ProjectID,
+		arg.RunID,
+		arg.Seq,
+		arg.Kind,
+		arg.NaturalKey,
+		arg.ClientRef,
+		arg.Provider,
+		arg.Capability,
+		arg.ObservedAt,
+		arg.Confidence,
+		arg.ActiveProbe,
+		arg.EvidenceHash,
+		arg.EvidenceRef,
+		arg.NormalizedJson,
+		arg.NormalizedSize,
+		arg.IngestStatus,
+		arg.IngestError,
+	)
 }

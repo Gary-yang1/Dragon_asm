@@ -1,0 +1,813 @@
+openapi: 3.0.3
+info:
+  title: Baiyan Engine Contract
+  version: 1.0.0
+  description: |
+    Versioned contract between ASM and the Baiyan external discovery engine.
+    ASM is authoritative for projects, authorization scope, task state, RBAC,
+    audit, and risk. Baiyan executes only the targets supplied by ASM.
+
+    Contract limits:
+    - Engine request bodies: 2 MiB maximum.
+    - Callback request bodies: 4 MiB maximum.
+    - Callback batches: at most 1,000 assets, 1,000 relations, 1,000
+      exposures, and 100 provider errors; at most 2,000 combined facts.
+    - All timestamps use RFC 3339 UTC date-time values.
+    - Callback result_count is the number of facts in the current batch, not a
+      cumulative job total.
+servers:
+  - url: https://engine.example.com
+    description: Example Baiyan engine endpoint. The real origin is trusted configuration.
+tags:
+  - name: jobs
+    description: Asynchronous engine job control.
+paths:
+  /scan:
+    post:
+      tags: [jobs]
+      operationId: submitScan
+      summary: Submit an asynchronous discovery job.
+      description: |
+        The request must already have passed ASM project, Scope, exclusion, and
+        dangerous-address validation. A repeated Idempotency-Key with the same
+        canonical request returns the original engine_job_id. Reusing the key
+        with a different request returns IDEMPOTENCY_CONFLICT.
+      security:
+        - bearerAuth: []
+      x-max-request-body-bytes: 2097152
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanRequestV1"
+            examples:
+              passive:
+                value:
+                  schema_version: "1.0"
+                  run_id: 123
+                  project_id: 7
+                  scope_id: 11
+                  job_type: passive_intel
+                  targets:
+                    - type: domain
+                      value: example.com
+                  rate_limit: 100
+                  concurrency: 10
+                  timeout_seconds: 3600
+                  callback_url: https://asm.example.com/api/v1/discovery/callback?project_id=7&run_id=123
+                  options:
+                    profile: subdomain_passive
+                    sources: [subfinder]
+                    max_results: 3000
+      callbacks:
+        scanResults:
+          "{$request.body#/callback_url}":
+            post:
+              operationId: receiveScanCallback
+              summary: Deliver one immutable, ordered result batch to ASM.
+              description: |
+                Baiyan appends seq as a query parameter to the callback URL.
+                It signs timestamp + the exact raw request body with HMAC-SHA256.
+                completed and failed are final phases. A final callback is sent
+                only after all preceding sequence numbers received a 2xx response.
+              x-max-request-body-bytes: 4194304
+              parameters:
+                - $ref: "#/components/parameters/CallbackSequence"
+                - $ref: "#/components/parameters/CallbackEngineID"
+                - $ref: "#/components/parameters/CallbackTimestamp"
+                - $ref: "#/components/parameters/CallbackSignature"
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/CallbackBatchV1"
+              responses:
+                "200":
+                  description: Batch accepted or an identical batch was already accepted.
+                  content:
+                    application/json:
+                      schema:
+                        $ref: "#/components/schemas/CallbackAcceptedEnvelope"
+                "400":
+                  $ref: "#/components/responses/BadRequest"
+                "401":
+                  $ref: "#/components/responses/Unauthorized"
+                "409":
+                  $ref: "#/components/responses/Conflict"
+                "413":
+                  $ref: "#/components/responses/PayloadTooLarge"
+                "422":
+                  $ref: "#/components/responses/UnprocessableEntity"
+                "429":
+                  $ref: "#/components/responses/RateLimited"
+                "500":
+                  $ref: "#/components/responses/InternalError"
+                "503":
+                  $ref: "#/components/responses/Unavailable"
+      responses:
+        "202":
+          description: Job accepted for asynchronous execution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /scan/{engine_job_id}:
+    parameters:
+      - $ref: "#/components/parameters/EngineJobID"
+    get:
+      tags: [jobs]
+      operationId: getScan
+      summary: Read the current engine job status.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current job status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /scan/{engine_job_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/EngineJobID"
+    post:
+      tags: [jobs]
+      operationId: cancelScan
+      summary: Request idempotent job cancellation.
+      description: Repeating cancellation for a cancelled job returns the same cancelled state.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Cancellation accepted or the job was already cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque engine token
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Decimal representation of run_id. Maximum 20 digits.
+      schema:
+        type: string
+        pattern: "^[1-9][0-9]{0,19}$"
+    EngineJobID:
+      name: engine_job_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    CallbackSequence:
+      name: seq
+      in: query
+      required: true
+      description: Must equal the immutable seq field in the callback body.
+      schema:
+        type: integer
+        format: uint64
+        minimum: 1
+    CallbackTimestamp:
+      name: X-Timestamp
+      in: header
+      required: true
+      description: Unix seconds included verbatim before raw_body in the HMAC input.
+      schema:
+        type: string
+        pattern: "^[0-9]{10,12}$"
+    CallbackEngineID:
+      name: X-Engine-ID
+      in: header
+      required: true
+      description: Stable engine identity bound by ASM to task_run.callback_secret_ref.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    CallbackSignature:
+      name: X-Signature
+      in: header
+      required: true
+      description: Lowercase hexadecimal HMAC-SHA256 of timestamp + raw_body.
+      schema:
+        type: string
+        pattern: "^sha256=[a-f0-9]{64}$"
+  schemas:
+    UInt64ID:
+      type: integer
+      format: uint64
+      minimum: 1
+    SchemaVersion:
+      type: string
+      enum: ["1.0"]
+    Target:
+      type: object
+      additionalProperties: false
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [domain, subdomain, ip, cidr, url]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 2048
+      description: |
+        Target values are normalized and authorized by ASM. subdomain_passive
+        accepts domain only. resolve accepts domain or subdomain. Other target
+        types are reserved for later disabled-by-default profiles.
+    ScanRequestV1:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - run_id
+        - project_id
+        - scope_id
+        - job_type
+        - targets
+        - rate_limit
+        - concurrency
+        - timeout_seconds
+        - callback_url
+        - options
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        run_id:
+          $ref: "#/components/schemas/UInt64ID"
+        project_id:
+          $ref: "#/components/schemas/UInt64ID"
+        scope_id:
+          $ref: "#/components/schemas/UInt64ID"
+        job_type:
+          type: string
+          enum: [passive_intel, dns]
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Target"
+        rate_limit:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Maximum outbound provider and DNS operations started per second for this job.
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 500
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+        callback_url:
+          type: string
+          format: uri
+          minLength: 1
+          maxLength: 2048
+          description: Trusted ASM-generated URL. Callers cannot override it.
+        options:
+          oneOf:
+            - $ref: "#/components/schemas/PassiveOptions"
+            - $ref: "#/components/schemas/ResolveOptions"
+          discriminator:
+            propertyName: profile
+            mapping:
+              subdomain_passive: "#/components/schemas/PassiveOptions"
+              resolve: "#/components/schemas/ResolveOptions"
+    PassiveOptions:
+      type: object
+      additionalProperties: false
+      required: [profile, sources, max_results]
+      properties:
+        profile:
+          type: string
+          enum: [subdomain_passive]
+        sources:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            enum: [subfinder, fofa, quake, hunter, certificate_transparency]
+        max_results:
+          type: integer
+          minimum: 1
+          maximum: 10000
+    ResolveOptions:
+      type: object
+      additionalProperties: false
+      required: [profile, record_types, max_results]
+      properties:
+        profile:
+          type: string
+          enum: [resolve]
+        record_types:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            enum: [A, AAAA, CNAME]
+        max_results:
+          type: integer
+          minimum: 1
+          maximum: 10000
+    JobAccepted:
+      type: object
+      additionalProperties: false
+      required: [engine_job_id]
+      properties:
+        engine_job_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+    JobStatus:
+      type: object
+      additionalProperties: false
+      required: [status, progress, result_count, error_summary]
+      properties:
+        status:
+          type: string
+          enum: [running, success, partial_success, failed, cancelled]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        result_count:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: Cumulative count for status display only.
+        error_summary:
+          type: string
+          maxLength: 1024
+    CallbackBatchV1:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - run_id
+        - seq
+        - phase
+        - status
+        - result_count
+        - observed_at
+        - assets
+        - relations
+        - exposures
+        - provider_errors
+        - error_summary
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        run_id:
+          $ref: "#/components/schemas/UInt64ID"
+        seq:
+          type: integer
+          format: uint64
+          minimum: 1
+        phase:
+          type: string
+          enum: [started, progress, completed, failed]
+          description: completed and failed are final phases.
+        status:
+          type: string
+          enum: [running, success, partial_success, failed, cancelled]
+        result_count:
+          type: integer
+          format: uint64
+          minimum: 0
+          maximum: 2000
+          description: Number of facts in this batch, equal to assets + relations + exposures.
+        observed_at:
+          type: string
+          format: date-time
+        assets:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/AssetFact"
+        relations:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/RelationFact"
+        exposures:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/ExposureFact"
+        provider_errors:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ProviderError"
+        error_summary:
+          type: string
+          maxLength: 1024
+    AssetFact:
+      type: object
+      additionalProperties: false
+      required:
+        - asset_type
+        - value
+        - source
+        - provider
+        - observed_at
+        - confidence
+        - active_probe
+        - evidence_hash
+      anyOf:
+        - required: [client_ref]
+        - required: [natural_key]
+      properties:
+        client_ref:
+          type: string
+          minLength: 1
+          maxLength: 128
+        natural_key:
+          type: string
+          minLength: 1
+          maxLength: 512
+        asset_type:
+          type: string
+          enum: [domain, subdomain, ip, certificate]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        display_name:
+          type: string
+          maxLength: 255
+        source:
+          type: string
+          minLength: 1
+          maxLength: 64
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 64
+        observed_at:
+          type: string
+          format: date-time
+        confidence:
+          type: integer
+          minimum: 0
+          maximum: 100
+        active_probe:
+          type: boolean
+          enum: [false]
+        evidence_hash:
+          $ref: "#/components/schemas/EvidenceHash"
+        evidence_ref:
+          type: string
+          maxLength: 512
+        attributes:
+          type: object
+          maxProperties: 32
+          additionalProperties:
+            type: string
+            maxLength: 1024
+    FactReference:
+      type: object
+      additionalProperties: false
+      anyOf:
+        - required: [client_ref]
+        - required: [natural_key]
+      properties:
+        client_ref:
+          type: string
+          minLength: 1
+          maxLength: 128
+        natural_key:
+          type: string
+          minLength: 1
+          maxLength: 512
+    RelationFact:
+      type: object
+      additionalProperties: false
+      required:
+        - relation_type
+        - from
+        - to
+        - source
+        - provider
+        - observed_at
+        - confidence
+        - active_probe
+        - evidence_hash
+      anyOf:
+        - required: [client_ref]
+        - required: [natural_key]
+      properties:
+        client_ref:
+          type: string
+          minLength: 1
+          maxLength: 128
+        natural_key:
+          type: string
+          minLength: 1
+          maxLength: 512
+        relation_type:
+          type: string
+          enum: [contains, resolves_to, cname_to, presents_certificate]
+        from:
+          $ref: "#/components/schemas/FactReference"
+        to:
+          $ref: "#/components/schemas/FactReference"
+        source:
+          type: string
+          minLength: 1
+          maxLength: 64
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 64
+        observed_at:
+          type: string
+          format: date-time
+        confidence:
+          type: integer
+          minimum: 0
+          maximum: 100
+        active_probe:
+          type: boolean
+          enum: [false]
+        evidence_hash:
+          $ref: "#/components/schemas/EvidenceHash"
+        evidence_ref:
+          type: string
+          maxLength: 512
+    ExposureFact:
+      type: object
+      additionalProperties: false
+      required:
+        - parent
+        - exposure_type
+        - value
+        - source
+        - provider
+        - observed_at
+        - confidence
+        - active_probe
+        - evidence_hash
+      anyOf:
+        - required: [client_ref]
+        - required: [natural_key]
+      properties:
+        client_ref:
+          type: string
+          minLength: 1
+          maxLength: 128
+        natural_key:
+          type: string
+          minLength: 1
+          maxLength: 512
+        parent:
+          $ref: "#/components/schemas/FactReference"
+        exposure_type:
+          type: string
+          enum: [port, service, web, certificate]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        protocol:
+          type: string
+          maxLength: 16
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        service:
+          type: string
+          maxLength: 128
+        version:
+          type: string
+          maxLength: 128
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+        fingerprint:
+          type: string
+          maxLength: 512
+        source:
+          type: string
+          minLength: 1
+          maxLength: 64
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 64
+        observed_at:
+          type: string
+          format: date-time
+        confidence:
+          type: integer
+          minimum: 0
+          maximum: 100
+        active_probe:
+          type: boolean
+          enum: [false]
+        evidence_hash:
+          $ref: "#/components/schemas/EvidenceHash"
+        evidence_ref:
+          type: string
+          maxLength: 512
+    EvidenceHash:
+      type: string
+      pattern: "^[a-f0-9]{64}$"
+      description: Lowercase SHA-256 of the bounded evidence summary.
+    ProviderError:
+      type: object
+      additionalProperties: false
+      required: [provider, code, message, retryable]
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 64
+        code:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Z][A-Z0-9_]*$"
+        message:
+          type: string
+          maxLength: 512
+        retryable:
+          type: boolean
+    CallbackAcceptedEnvelope:
+      type: object
+      additionalProperties: false
+      required: [request_id, data]
+      properties:
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        data:
+          type: object
+          additionalProperties: false
+          required: [duplicate]
+          properties:
+            duplicate:
+              type: boolean
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        request_id:
+          type: string
+          maxLength: 128
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_REQUEST
+                - INVALID_SCHEMA_VERSION
+                - INVALID_PROFILE
+                - INVALID_SIGNATURE
+                - CALLBACK_REPLAY
+                - CALLBACK_PAYLOAD_CONFLICT
+                - IDEMPOTENCY_CONFLICT
+                - JOB_NOT_FOUND
+                - JOB_NOT_CANCELLABLE
+                - PAYLOAD_TOO_LARGE
+                - RATE_LIMITED
+                - ENGINE_UNAVAILABLE
+                - INTERNAL_ERROR
+            message:
+              type: string
+              maxLength: 512
+            details:
+              type: object
+              maxProperties: 16
+              additionalProperties:
+                type: string
+                maxLength: 256
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid authentication/signature.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Job or TaskRun not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Idempotency, callback payload, state, or cancellation conflict.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PayloadTooLarge:
+      description: Request body exceeds the documented hard limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    UnprocessableEntity:
+      description: Well-formed JSON that violates the contract or profile policy.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: Request rejected by an engine or callback rate limit.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: Internal processing error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unavailable:
+      description: Engine or callback ingest dependency temporarily unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

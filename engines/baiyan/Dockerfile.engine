@@ -1,0 +1,31 @@
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /src
+
+COPY go.mod ./
+COPY internal/capability ./internal/capability
+COPY internal/contract ./internal/contract
+COPY internal/engine ./internal/engine
+COPY internal/job ./internal/job
+COPY cmd/baiyan-engine ./cmd/baiyan-engine
+
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/baiyan-engine ./cmd/baiyan-engine
+
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S -g 10001 baiyan && \
+    adduser -S -D -H -s /sbin/nologin -u 10001 -G baiyan baiyan && \
+    mkdir -p /var/lib/baiyan/jobs && \
+    chown -R 10001:10001 /var/lib/baiyan
+
+WORKDIR /app
+
+COPY --from=builder --chown=10001:10001 /out/baiyan-engine /app/baiyan-engine
+
+USER 10001:10001
+
+EXPOSE 9090
+VOLUME ["/var/lib/baiyan/jobs"]
+
+ENTRYPOINT ["/app/baiyan-engine"]

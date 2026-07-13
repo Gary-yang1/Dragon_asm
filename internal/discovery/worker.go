@@ -25,10 +25,30 @@ type ExposureIngester interface {
 	Ingest(ctx context.Context, in exposure.IngestInput) (*exposure.IngestResult, error)
 }
 
+// CallbackInboxReader loads the durable callback body by the identifiers kept
+// in Redis. This keeps bounded raw payloads out of the queue backend.
+type CallbackInboxManager interface {
+	GetDiscoveryCallback(ctx context.Context, projectID, runID, seq uint64) (*DiscoveryCallback, error)
+	ClaimDiscoveryCallbackIngest(ctx context.Context, projectID, runID, seq uint64) (bool, error)
+	FailDiscoveryCallbackIngest(ctx context.Context, projectID, runID, seq uint64) error
+	CompleteDiscoveryCallbackIngest(ctx context.Context, projectID, runID, seq uint64) (CompleteCallbackIngestResult, error)
+}
+
+type CallbackFactIngester interface {
+	IngestCallbackFacts(ctx context.Context, callback DiscoveryCallback) error
+}
+
+type callbackIngestPayload struct {
+	Callback DiscoveryCallback
+	RawBody  json.RawMessage
+}
+
 // IngestHandler is the M2-5 worker entrypoint for normalized result ingestion.
 type IngestHandler struct {
 	assets    AssetImporter
 	exposures ExposureIngester
+	inbox     CallbackInboxManager
+	facts     CallbackFactIngester
 	logger    *slog.Logger
 }
 
@@ -41,14 +61,58 @@ func (h *IngestHandler) WithExposureIngester(ingester ExposureIngester) *IngestH
 	return h
 }
 
+func (h *IngestHandler) WithCallbackInbox(inbox CallbackInboxManager) *IngestHandler {
+	h.inbox = inbox
+	return h
+}
+
+func (h *IngestHandler) WithCallbackFactIngester(ingester CallbackFactIngester) *IngestHandler {
+	h.facts = ingester
+	return h
+}
+
 func (h *IngestHandler) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(TaskTypeIngestScanResult, h.Handle)
 }
 
 func (h *IngestHandler) Handle(ctx context.Context, task *asynq.Task) error {
-	var payload CallbackTaskPayload
-	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+	var ref CallbackTaskPayload
+	if err := json.Unmarshal(task.Payload(), &ref); err != nil {
 		return err
+	}
+	if ref.ProjectID == 0 || ref.RunID == 0 || ref.Seq == 0 || h.inbox == nil {
+		return ErrInvalidCallbackPayload
+	}
+	stored, err := h.inbox.GetDiscoveryCallback(ctx, ref.ProjectID, ref.RunID, ref.Seq)
+	if err != nil {
+		return err
+	}
+	if stored.IngestStatus == CallbackIngestProcessed {
+		return nil
+	}
+	claimed, err := h.inbox.ClaimDiscoveryCallbackIngest(ctx, ref.ProjectID, ref.RunID, ref.Seq)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		latest, getErr := h.inbox.GetDiscoveryCallback(ctx, ref.ProjectID, ref.RunID, ref.Seq)
+		if getErr == nil && latest.IngestStatus == CallbackIngestProcessed {
+			return nil
+		}
+		return ErrCallbackIngestBusy
+	}
+	payload := callbackIngestPayload{Callback: *stored, RawBody: json.RawMessage(stored.Payload)}
+	if err := h.ingest(ctx, payload); err != nil {
+		_ = h.inbox.FailDiscoveryCallbackIngest(ctx, ref.ProjectID, ref.RunID, ref.Seq)
+		return err
+	}
+	_, err = h.inbox.CompleteDiscoveryCallbackIngest(ctx, ref.ProjectID, ref.RunID, ref.Seq)
+	return err
+}
+
+func (h *IngestHandler) ingest(ctx context.Context, payload callbackIngestPayload) error {
+	if h.facts != nil {
+		return h.facts.IngestCallbackFacts(ctx, payload.Callback)
 	}
 	if h.assets != nil {
 		body, err := parseCallbackResult(payload.RawBody)
@@ -118,7 +182,7 @@ func (h *IngestHandler) Handle(ctx context.Context, task *asynq.Task) error {
 	return nil
 }
 
-func (h *IngestHandler) importAsset(ctx context.Context, payload CallbackTaskPayload, item callbackAsset) (*asset.Asset, error) {
+func (h *IngestHandler) importAsset(ctx context.Context, payload callbackIngestPayload, item callbackAsset) (*asset.Asset, error) {
 	return h.assets.Import(ctx, asset.ImportInput{
 		TenantID:     payload.Callback.TenantID,
 		OrgID:        payload.Callback.OrgID,
@@ -135,7 +199,7 @@ func (h *IngestHandler) importAsset(ctx context.Context, payload CallbackTaskPay
 	})
 }
 
-func (h *IngestHandler) importCertificateAsset(ctx context.Context, payload CallbackTaskPayload, item callbackExposure) (*asset.Asset, error) {
+func (h *IngestHandler) importCertificateAsset(ctx context.Context, payload callbackIngestPayload, item callbackExposure) (*asset.Asset, error) {
 	value := strings.TrimSpace(item.Fingerprint)
 	if value == "" {
 		value = strings.TrimSpace(item.CertSerial)
