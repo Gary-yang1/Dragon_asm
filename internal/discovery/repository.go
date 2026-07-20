@@ -15,6 +15,22 @@ import (
 
 var ErrNotFound = errors.New("discovery: scope not found")
 
+var taskRunUnsetTime = time.Unix(0, 0).UTC()
+
+func taskRunTimeForDatabase(value time.Time) time.Time {
+	if value.IsZero() {
+		return taskRunUnsetTime
+	}
+	return value
+}
+
+func taskRunTimeFromDatabase(value time.Time) time.Time {
+	if value.Equal(taskRunUnsetTime) {
+		return time.Time{}
+	}
+	return value
+}
+
 type Repository interface {
 	CreateScope(ctx context.Context, in CreateScopeParams) (uint64, error)
 	GetScope(ctx context.Context, projectID, scopeID uint64) (*Scope, error)
@@ -381,12 +397,12 @@ func (r *sqlcRepository) CreateTaskRun(ctx context.Context, in CreateTaskRunPara
 		RetryLimit:        int32Bounded(in.RetryLimit),
 		Attempt:           int32Bounded(in.Attempt),
 		EngineJobID:       in.EngineJobID,
-		DispatchedAt:      in.DispatchedAt,
-		LastCallbackAt:    in.LastCallbackAt,
+		DispatchedAt:      taskRunTimeForDatabase(in.DispatchedAt),
+		LastCallbackAt:    taskRunTimeForDatabase(in.LastCallbackAt),
 		ResultCount:       in.ResultCount,
 		CallbackSecretRef: in.CallbackSecretRef,
-		StartedAt:         in.StartedAt,
-		FinishedAt:        in.FinishedAt,
+		StartedAt:         taskRunTimeForDatabase(in.StartedAt),
+		FinishedAt:        taskRunTimeForDatabase(in.FinishedAt),
 		ErrorSummary:      in.ErrorSummary,
 		CreatedBy:         in.ActorID,
 		UpdatedBy:         in.ActorID,
@@ -765,12 +781,12 @@ func toDomainTaskRun(row dbgen.TaskRun) *TaskRun {
 		RetryLimit:        int(row.RetryLimit),
 		Attempt:           int(row.Attempt),
 		EngineJobID:       row.EngineJobID,
-		DispatchedAt:      row.DispatchedAt,
-		LastCallbackAt:    row.LastCallbackAt,
+		DispatchedAt:      taskRunTimeFromDatabase(row.DispatchedAt),
+		LastCallbackAt:    taskRunTimeFromDatabase(row.LastCallbackAt),
 		ResultCount:       uint64(row.ResultCount),
 		CallbackSecretRef: row.CallbackSecretRef,
-		StartedAt:         row.StartedAt,
-		FinishedAt:        row.FinishedAt,
+		StartedAt:         taskRunTimeFromDatabase(row.StartedAt),
+		FinishedAt:        taskRunTimeFromDatabase(row.FinishedAt),
 		ErrorSummary:      row.ErrorSummary,
 		CreatedBy:         row.CreatedBy,
 		UpdatedBy:         row.UpdatedBy,

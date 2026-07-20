@@ -31,8 +31,8 @@ export function ChangePasswordPage() {
   return (
     <main className="login-shell">
       <div className="login-logo">
-        <span className="layout-brand-mark">B</span>
-        <div><strong>BiuASM</strong><span>攻击面梳理平台</span></div>
+        <span className="layout-brand-mark">A</span>
+        <div><strong>ArgusASM</strong><span>攻击面梳理平台</span></div>
       </div>
       <section className="login-shell-grid">
         <section className="login-panel">

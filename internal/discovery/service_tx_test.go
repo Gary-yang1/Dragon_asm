@@ -244,6 +244,7 @@ func TestCreateTaskRunRollbackOnAuditFailure(t *testing.T) {
 	defer sqlDB.Close()
 
 	now := time.Time{}
+	databaseUnsetTime := time.Unix(0, 0).UTC()
 	auditErr := errors.New("audit sink failure")
 
 	mock.ExpectBegin()
@@ -255,8 +256,8 @@ func TestCreateTaskRunRollbackOnAuditFailure(t *testing.T) {
 			"t1", "o1", uint64(17), uint64(1700), uint64(170),
 			TaskTypeDNS, TaskRunStatusPending, int32(0),
 			int32(30), int32(20), int32(10), int32(3), int32(0),
-			"", now, now, uint64(0), "",
-			now, now, "", "alice", "alice",
+			"", databaseUnsetTime, databaseUnsetTime, uint64(0), "",
+			databaseUnsetTime, databaseUnsetTime, "", "alice", "alice",
 		).
 		WillReturnResult(sqlmock.NewResult(int64(17000), 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run")).

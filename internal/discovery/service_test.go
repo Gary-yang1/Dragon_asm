@@ -1111,7 +1111,7 @@ func TestIsTargetAllowedDangerousTarget(t *testing.T) {
 
 func TestServiceListScopesProjectIsolation(t *testing.T) {
 	repo := newFakeRepo()
-	_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+	projectOneScopeID, err := repo.CreateScope(context.Background(), CreateScopeParams{
 		TenantID:     "t1",
 		OrgID:        "o1",
 		ProjectID:    1,
@@ -1123,7 +1123,11 @@ func TestServiceListScopesProjectIsolation(t *testing.T) {
 		ActorID:      "alice",
 	})
 	require.NoError(t, err)
-	_, err = repo.CreateScope(context.Background(), CreateScopeParams{
+	require.NoError(t, repo.InsertScopeTarget(context.Background(), InsertScopeTargetParams{
+		TenantID: "t1", OrgID: "o1", ProjectID: 1, ScopeID: projectOneScopeID,
+		TargetType: TargetTypeDomain, MatchMode: MatchModeInclude, Value: "project-one.example", ActorID: "alice",
+	}))
+	projectTwoScopeID, err := repo.CreateScope(context.Background(), CreateScopeParams{
 		TenantID:     "t1",
 		OrgID:        "o1",
 		ProjectID:    2,
@@ -1135,6 +1139,10 @@ func TestServiceListScopesProjectIsolation(t *testing.T) {
 		ActorID:      "alice",
 	})
 	require.NoError(t, err)
+	require.NoError(t, repo.InsertScopeTarget(context.Background(), InsertScopeTargetParams{
+		TenantID: "t1", OrgID: "o1", ProjectID: 2, ScopeID: projectTwoScopeID,
+		TargetType: TargetTypeDomain, MatchMode: MatchModeInclude, Value: "project-two.example", ActorID: "alice",
+	}))
 
 	svc := NewService(repo)
 	scopes, err := svc.ListScopes(context.Background(), 1)
@@ -1142,6 +1150,8 @@ func TestServiceListScopesProjectIsolation(t *testing.T) {
 	assert.Len(t, scopes, 1)
 	assert.Equal(t, uint64(1), scopes[0].ID)
 	assert.Equal(t, uint64(1), scopes[0].ProjectID)
+	require.Len(t, scopes[0].Targets, 1)
+	assert.Equal(t, "project-one.example", scopes[0].Targets[0].Value)
 }
 
 func TestServiceListScopesRejectsInvalidProjectID(t *testing.T) {

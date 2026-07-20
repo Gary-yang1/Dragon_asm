@@ -72,8 +72,8 @@ http.interceptors.response.use(
   }
 );
 
-export async function getJSON<T>(url: string, params?: Record<string, unknown>) {
-  return http.get<unknown, T>(url, { params });
+export async function getJSON<T>(url: string, params?: Record<string, unknown>, signal?: globalThis.AbortSignal) {
+  return http.get<unknown, T>(url, { params, signal });
 }
 
 export async function postJSON<T>(url: string, data?: unknown) {

@@ -360,13 +360,14 @@ func TestRepoCreateTaskRunWritesProjectScoped(t *testing.T) {
 	defer sqlDB.Close()
 
 	now := time.Time{}
+	databaseUnsetTime := time.Unix(0, 0).UTC()
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO task_run")).
 		WithArgs(
 			"t1", "o1", uint64(6), uint64(77), uint64(66), TaskTypeDNS,
 			TaskRunStatusPending, int32(0),
 			int32(30), int32(20), int32(10), int32(3),
-			int32(0), "", now, now, uint64(0),
-			"", now, now, "", "u1", "u1",
+			int32(0), "", databaseUnsetTime, databaseUnsetTime, uint64(0),
+			"", databaseUnsetTime, databaseUnsetTime, "", "u1", "u1",
 		).
 		WillReturnResult(sqlmock.NewResult(88, 1))
 
@@ -398,6 +399,23 @@ func TestRepoCreateTaskRunWritesProjectScoped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(88), id)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTaskRunDatabaseSentinelRestoresUnsetDomainTimes(t *testing.T) {
+	databaseUnsetTime := time.Unix(0, 0).UTC()
+	row := dbgen.TaskRun{
+		DispatchedAt:   databaseUnsetTime,
+		LastCallbackAt: databaseUnsetTime,
+		StartedAt:      databaseUnsetTime,
+		FinishedAt:     databaseUnsetTime,
+	}
+
+	run := toDomainTaskRun(row)
+
+	assert.True(t, run.DispatchedAt.IsZero())
+	assert.True(t, run.LastCallbackAt.IsZero())
+	assert.True(t, run.StartedAt.IsZero())
+	assert.True(t, run.FinishedAt.IsZero())
 }
 
 func TestRepoMarkTaskRunRunningScoped(t *testing.T) {

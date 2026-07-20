@@ -35,9 +35,9 @@ export function LoginPage() {
   return (
     <main className="login-shell">
       <div className="login-logo">
-        <img src="/asmlogo.png" alt="BiuASM Logo" className="logo-img" />
+        <img src="/asmlogo.png" alt="ArgusASM Logo" className="logo-img" />
         <div>
-          <strong>BiuASM</strong>
+          <strong>ArgusASM</strong>
           <span>攻击面梳理平台</span>
         </div>
       </div>

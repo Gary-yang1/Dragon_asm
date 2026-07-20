@@ -378,7 +378,18 @@ func (s *Service) ListScopes(ctx context.Context, projectID uint64) ([]*Scope, e
 	if projectID == 0 {
 		return nil, ErrInvalidProjectID
 	}
-	return s.repo.ListScopes(ctx, projectID)
+	scopes, err := s.repo.ListScopes(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for _, scope := range scopes {
+		targets, err := s.repo.ListScopeTargets(ctx, projectID, scope.ID)
+		if err != nil {
+			return nil, err
+		}
+		scope.Targets = targets
+	}
+	return scopes, nil
 }
 
 // IsTargetAllowed validates time window + target policy and returns a reason.

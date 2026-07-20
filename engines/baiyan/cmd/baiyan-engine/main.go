@@ -38,7 +38,19 @@ func main() {
 		logger.Error("callback checkpoint unavailable", "error", err)
 		os.Exit(1)
 	}
-	providers := make([]capability.PassiveProvider, 0, 1)
+	providers := make([]capability.PassiveProvider, 0, 2)
+	fofaEmail := os.Getenv("FOFA_EMAIL")
+	fofaKey := os.Getenv("FOFA_KEY")
+	if fofaEmail != "" || fofaKey != "" {
+		provider, err := capability.NewFOFAPassiveProvider(
+			fofaEmail, fofaKey, "", &http.Client{Timeout: 20 * time.Second}, envIntOr("FOFA_MAX_RESULTS", 1000),
+		)
+		if err != nil {
+			logger.Error("invalid FOFA provider configuration", "error", err)
+			os.Exit(1)
+		}
+		providers = append(providers, provider)
+	}
 	if baseURL := os.Getenv("BAIYAN_PASSIVE_PROVIDER_URL"); baseURL != "" {
 		provider, err := capability.NewHTTPPassiveProvider(
 			envOr("BAIYAN_PASSIVE_PROVIDER_NAME", "certificate_transparency"), baseURL,

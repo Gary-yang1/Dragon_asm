@@ -1,5 +1,5 @@
 import { ProLayout } from '@ant-design/pro-components';
-import { Avatar, Button, Dropdown, Input, Select, Space, Tooltip } from 'antd';
+import { Avatar, Button, Dropdown, Input, Space, Tooltip } from 'antd';
 import { BarChart3, Bell, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FolderKanban, FolderOpen, LayoutDashboard, LogOut, Moon, Radar, Server, Settings, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -53,6 +53,7 @@ export function AppLayout() {
       { path: `${projectPrefix}/reports`, name: '报表中心', icon: <BarChart3 size={16} />, permission: Permission.ReportRead },
       { path: `${projectPrefix}/settings`, name: '项目设置', icon: <Settings size={16} />, permission: Permission.AdminManage }
     ];
+
     return [
       ...globalItems,
       {
@@ -99,6 +100,38 @@ export function AppLayout() {
     return /[A-Za-z0-9]/.test(first) ? first.toUpperCase() : first;
   }, [userLabel]);
 
+  const dropdownItems = useMemo(() => {
+    return [
+      {
+        key: 'all',
+        label: '全部项目 (全局视图)',
+      },
+      ...(canGlobal(Permission.ProjectCreate) ? [{
+        key: 'create',
+        label: '创建新项目',
+      }] : []),
+      { type: 'divider' as const },
+      ...projects.map(p => ({
+        key: String(p.id),
+        label: p.name,
+      }))
+    ];
+  }, [canGlobal, projects]);
+
+  const handleDropdownClick = useCallback(({ key }: { key: string }) => {
+    if (key === 'all') {
+      navigate('/workspace');
+      return;
+    }
+    if (key === 'create') {
+      navigate('/projects/new');
+      return;
+    }
+    const nextProjectId = Number(key);
+    localStorage.setItem('asm.lastProject', String(nextProjectId));
+    navigate(`/projects/${nextProjectId}/overview`);
+  }, [navigate]);
+
   const jumpToSearchPage = useCallback((value: string) => {
     const keyword = value.trim();
     if (!keyword) return;
@@ -136,18 +169,32 @@ export function AppLayout() {
   return (
       <ProLayout
         className="asm-app-layout"
-        title="BiuASM"
-        logo={<img src="/asmlogo.png" alt="BiuASM Logo" className="layout-brand-logo-img" />}
+        title="ArgusASM"
+        logo={<img src="/asmlogo.png" alt="ArgusASM Logo" className="layout-brand-logo-img" />}
         location={{ pathname: location.pathname }}
         route={{ path: '/', routes }}
-        menuHeaderRender={(logo, title) => (
-          <div className="layout-brand">
-            {logo}
-            <div>
-              <div className="layout-brand-title">{title}</div>
-              <div className="layout-brand-subtitle">攻击面梳理平台</div>
+        menuHeaderRender={(logo) => (
+          <Dropdown
+            menu={{
+              items: dropdownItems,
+              onClick: handleDropdownClick,
+            }}
+            trigger={['click']}
+            placement="bottomLeft"
+          >
+            <div className="layout-brand-dropdown-trigger" role="button" tabIndex={0}>
+              {logo}
+              <div className="brand-text-wrapper">
+                <div className="brand-project-title-row">
+                  <span className="brand-project-title">
+                    {projectId ? (selectedProject?.name ?? `项目 ${projectId}`) : '全局工作台'}
+                  </span>
+                  <ChevronDown size={12} className="brand-project-chevron" />
+                </div>
+                <div className="brand-project-subtitle">ArgusASM 攻击面平台</div>
+              </div>
             </div>
-          </div>
+          </Dropdown>
         )}
         menuItemRender={(item, dom) => (
           <div
@@ -199,39 +246,6 @@ export function AppLayout() {
       <div className="layout-content-shell">
         <header className="app-topbar">
           <div className="app-topbar-project">
-            <Select
-              aria-label="当前项目"
-              className="layout-project-switcher"
-              value={projectId ? String(projectId) : 'all'}
-              options={[
-                {
-                  label: '全局视图',
-                  options: [
-                    { value: 'all', label: '全部项目' },
-                    ...(canGlobal(Permission.ProjectCreate) ? [{ value: 'create', label: '创建项目' }] : [])
-                  ]
-                },
-                {
-                  label: '项目工作区',
-                  options: projects.map((project) => ({ value: String(project.id), label: project.name }))
-                }
-              ]}
-              onChange={(value) => {
-                if (value === 'all') {
-                  navigate('/workspace');
-                  return;
-                }
-                if (value === 'create') {
-                  navigate('/projects/new');
-                  return;
-                }
-                const nextProjectId = Number(value);
-                localStorage.setItem('asm.lastProject', String(nextProjectId));
-                navigate(`/projects/${nextProjectId}/overview`);
-              }}
-              showSearch
-              optionFilterProp="label"
-            />
             {projectId
               ? <span className="app-topbar-title">{selectedProject?.name ?? '项目工作区'}</span>
               : <span className="app-topbar-title">全局工作台</span>}

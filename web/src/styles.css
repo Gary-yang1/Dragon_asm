@@ -1442,3 +1442,58 @@ body {
     padding: 24px;
   }
 }
+
+/* Brand Dropdown Selector Trigger Custom Styling */
+.layout-brand-dropdown-trigger {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  cursor: pointer;
+  padding: 6px 8px;
+  margin-left: -8px;
+  border-radius: 8px;
+  transition: background-color 0.2s;
+  user-select: none;
+}
+
+.layout-brand-dropdown-trigger:hover {
+  background-color: var(--asm-surface-soft);
+}
+
+.brand-text-wrapper {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex-grow: 1;
+}
+
+.brand-project-title-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.brand-project-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--asm-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.brand-project-chevron {
+  color: var(--asm-muted);
+  flex-shrink: 0;
+}
+
+.brand-project-subtitle {
+  color: var(--asm-muted);
+  font-size: 10.5px;
+  line-height: 1.2;
+  margin-top: 1px;
+}

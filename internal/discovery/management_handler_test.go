@@ -75,6 +75,11 @@ func TestManagementHandlerScopePermissionAndProjectMetadata(t *testing.T) {
 	assert.Equal(t, "tenant-a", created.TenantID)
 	assert.Equal(t, "org-a", created.OrgID)
 	assert.Equal(t, "example.com", created.Targets[0].Value)
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/projects/7/scopes", nil))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), `"targets":[{"id":1,"target_type":"domain","match_mode":"include","value":"example.com"}]`)
 }
 
 func TestManagementHandlerSecurityOpsCanReadButCannotWriteScope(t *testing.T) {

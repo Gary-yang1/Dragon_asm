@@ -17,6 +17,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "antd": "^5.22.7",
     "axios": "^1.7.9",
+    "dayjs": "^1.11.21",
     "echarts": "^5.5.1",
     "i18next": "^24.2.0",
     "lucide-react": "^0.468.0",
