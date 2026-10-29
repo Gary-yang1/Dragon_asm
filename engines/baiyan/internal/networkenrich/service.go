@@ -17,7 +17,6 @@ import (
 
 const (
 	SchemaVersion   = "1.0"
-	RuleVersion     = "dns-cname-v1"
 	Capability      = "network_enrichment"
 	MaxItems        = 20
 	maxAddresses    = 32
@@ -156,7 +155,7 @@ func (s *Service) enrich(ctx context.Context, input Input) Result {
 			result.CNAMEs = append(result.CNAMEs, name)
 		}
 	}
-	result.CDN, result.Cloud = Classify(result.CNAMEs, input.Fingerprints)
+	result.CDN, result.Cloud = ClassifyNetwork(result.CNAMEs, result.ResolvedIPs, input.Fingerprints)
 	switch {
 	case ipErr != nil && cnameErr != nil:
 		result.Status = "failed"

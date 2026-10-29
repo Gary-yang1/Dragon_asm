@@ -217,6 +217,9 @@ func (s *Service) ListDerivedTargets(ctx context.Context, projectID, sourceRunID
 			result.Items = append(result.Items, candidate)
 		}
 	}
+	if err := applyIPNetwork(ctx, s.repo, projectID, result.Items); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 func (s *Service) selectedDerived(ctx context.Context, projectID, sourceRunID uint64, ids []uint64) (*Scope, []DerivedTarget, error) {
@@ -246,6 +249,11 @@ func (s *Service) selectedDerived(ctx context.Context, projectID, sourceRunID ui
 			return nil, nil, ErrInheritanceInvalid
 		}
 		selected = append(selected, candidate)
+	}
+	// The same network rules as the list: a CDN edge becomes "excluded", which
+	// AuthorizeDerivedTargets refuses, so hiding it in the page is not the guard.
+	if err := applyIPNetwork(ctx, s.repo, projectID, selected); err != nil {
+		return nil, nil, err
 	}
 	sort.Slice(selected, func(i, j int) bool { return selected[i].ObservationID < selected[j].ObservationID })
 	return scope, selected, nil

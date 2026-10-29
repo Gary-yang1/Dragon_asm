@@ -1,10 +1,11 @@
 import { Alert, Button, Descriptions, Form, Input, Popconfirm, Progress, Select, Space, Tabs, Tooltip, message } from 'antd';
 import { Pencil } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 
-import { updateAsset, type Asset, type AssetGraphData, type AssetUpdateInput } from '../../api/assets';
+import { getAssetNetwork, updateAsset, type Asset, type AssetGraphData, type AssetNetworkInfo, type AssetUpdateInput } from '../../api/assets';
 import { errorMessage } from '../../api/errorMessage';
 import { AssetRiskList } from '../../components/AssetRiskList';
+import { NetworkTag } from '../../components/NetworkTag';
 import { EnumChip } from '../../components/StatusChip';
 import { assetSourceMeta, assetStatusMeta, assetTypeMeta, describe } from '../../utils/taxonomy';
 import { AssetGraph } from './AssetGraph';
@@ -62,6 +63,7 @@ function AssetOverview({ projectId, asset, canEdit, onUpdated }: Omit<AssetDetai
   return (
     <Space direction="vertical" size={18} className="full-width">
       <AssetManagementCard projectId={projectId} asset={asset} canEdit={canEdit} onUpdated={onUpdated} />
+      {['ip', 'domain', 'subdomain'].includes(asset.asset_type) ? <AssetNetworkFacts projectId={projectId} asset={asset} /> : null}
       <Descriptions size="small" column={2} bordered>
         <Descriptions.Item label="值" span={2}>{asset.value}</Descriptions.Item>
         <Descriptions.Item label="类型">{describe(assetTypeMeta, asset.asset_type).label}</Descriptions.Item>
@@ -191,6 +193,40 @@ export function AssetManagementCard({ projectId, asset, canEdit, onUpdated, extr
       <Descriptions.Item label="负责人">{asset.owner || <span className="secondary-text">未设置</span>}</Descriptions.Item>
       <Descriptions.Item label="业务单元">{asset.business_unit || <span className="secondary-text">未设置</span>}</Descriptions.Item>
       {extra}
+    </Descriptions>
+  );
+}
+
+/**
+ * Where an address or name sits on the network. Shown only when the platform
+ * knows something; an unidentified asset is unknown, not "own origin".
+ */
+function AssetNetworkFacts({ projectId, asset }: { projectId: number; asset: Asset }) {
+  const [info, setInfo] = useState<AssetNetworkInfo>();
+  useEffect(() => {
+    let active = true;
+    setInfo(undefined);
+    getAssetNetwork(projectId, [asset.id])
+      .then((items) => { if (active) setInfo(items[0]); })
+      .catch(() => { /* Attribution is supplementary; the detail stays usable without it. */ });
+    return () => { active = false; };
+  }, [projectId, asset.id]);
+  if (!info || (!info.role && !info.shared && !(asset.asset_type === 'ip' && info.resolved_by > 0))) return null;
+  return (
+    <Descriptions size="small" column={2} bordered title="网络归属">
+      {info.role === 'cdn_edge' ? (
+        <Descriptions.Item label="判断" span={2}>
+          <NetworkTag info={info} /> 不计入本单位 IP 资产，不能作为扫描目标
+        </Descriptions.Item>
+      ) : null}
+      {info.role === 'cdn_served' ? (
+        <Descriptions.Item label="判断" span={2}>{info.provider ? `经 ${info.provider} CDN 提供服务` : '经 CDN 提供服务'}，解析地址是 CDN 节点，不是源站</Descriptions.Item>
+      ) : null}
+      {info.shared ? <Descriptions.Item label="判断" span={2}><NetworkTag info={info} /> 请核实是否为本单位地址</Descriptions.Item> : null}
+      {info.evidence ? <Descriptions.Item label="依据" span={2}>{info.evidence}</Descriptions.Item> : null}
+      {info.rule_version ? <Descriptions.Item label="规则版本">{info.rule_version}</Descriptions.Item> : null}
+      {info.observed_at ? <Descriptions.Item label="判断时间">{formatTime(info.observed_at)}</Descriptions.Item> : null}
+      {asset.asset_type === 'ip' ? <Descriptions.Item label="解析到此地址的域名">{info.resolved_by} 个</Descriptions.Item> : null}
     </Descriptions>
   );
 }

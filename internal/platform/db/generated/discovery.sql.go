@@ -8,6 +8,7 @@ package dbgen
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -1007,6 +1008,74 @@ func (q *Queries) ListDiscoveryObservationsByRunSeq(ctx context.Context, arg Lis
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIPNetworkAttribution = `-- name: ListIPNetworkAttribution :many
+SELECT a.value,
+       COALESCE(n.role, '') AS role,
+       COALESCE(n.provider, '') AS provider,
+       (SELECT COUNT(DISTINCT r.from_asset_id) FROM asset_relation r
+         WHERE r.project_id = a.project_id AND r.to_asset_id = a.id
+           AND r.relation_type = 'resolves_to' AND r.deleted_at = '1970-01-01 00:00:00.000') AS resolved_by
+FROM asset a
+LEFT JOIN asset_network_attribution n ON n.project_id = a.project_id AND n.asset_id = a.id
+WHERE a.project_id = ?
+  AND a.asset_type = 'ip'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.value IN (/*SLICE:ip_values*/?)
+`
+
+type ListIPNetworkAttributionParams struct {
+	ProjectID uint64   `db:"project_id" json:"project_id"`
+	IpValues  []string `db:"ip_values" json:"ip_values"`
+}
+
+type ListIPNetworkAttributionRow struct {
+	Value      string `db:"value" json:"value"`
+	Role       string `db:"role" json:"role"`
+	Provider   string `db:"provider" json:"provider"`
+	ResolvedBy int64  `db:"resolved_by" json:"resolved_by"`
+}
+
+// Network attribution for IP assets by value, so derived targets and active
+// dispatch can refuse CDN edges and flag addresses shared by many names.
+func (q *Queries) ListIPNetworkAttribution(ctx context.Context, arg ListIPNetworkAttributionParams) ([]ListIPNetworkAttributionRow, error) {
+	query := listIPNetworkAttribution
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ProjectID)
+	if len(arg.IpValues) > 0 {
+		for _, v := range arg.IpValues {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ip_values*/?", strings.Repeat(",?", len(arg.IpValues))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ip_values*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIPNetworkAttributionRow{}
+	for rows.Next() {
+		var i ListIPNetworkAttributionRow
+		if err := rows.Scan(
+			&i.Value,
+			&i.Role,
+			&i.Provider,
+			&i.ResolvedBy,
 		); err != nil {
 			return nil, err
 		}

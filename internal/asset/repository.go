@@ -238,7 +238,12 @@ func (r *sqlcRepository) Summary(
 	if err != nil {
 		return nil, mapErr(err)
 	}
+	shared, err := r.q.CountSharedIPAssets(ctx, dbgen.CountSharedIPAssetsParams{ProjectID: projectID, MinNames: SharedIPMinNames})
+	if err != nil {
+		return nil, mapErr(err)
+	}
 	return &AssetSummary{
+		Network: AssetNetworkSummary{CDNEdge: row.CdnEdgeCount, SharedIP: shared, SharedIPMinNames: SharedIPMinNames},
 		Inventory: AssetInventorySummary{
 			Total: row.Total, ManagedTotal: row.ManagedTotal,
 			Active: row.Active, Inactive: row.Inactive, Ignored: row.Ignored,

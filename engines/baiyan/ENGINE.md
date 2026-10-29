@@ -203,6 +203,32 @@ but gets no `resolves_to`/`cname_to` relations, so names a source merely
 remembered do not attach to a shared wildcard IP. A host with any answer of its
 own is kept as a normal record. Probe failures leave resolution unfiltered.
 
+### CDN attribution
+
+One rule set, `networkenrich.ClassifyNetwork` (rule version `cdn-rules-v2`),
+serves both `/enrich/network` and the passive DNS stage. Evidence is checked
+strongest first: curated CNAME suffixes (CDN and cloud), CNAME keywords, edge
+address ranges, then an exact scanner fingerprint. No match stays `unknown`.
+
+The keyword and IPv4 range lists are the OneForAll data the Baiyan CLI already
+used (`lib/OneForAll/data/cdn_*.json`), embedded from
+`internal/networkenrich/rules/`. They are applied more strictly than the CLI's
+substring match: dotted keywords need a label boundary, provider words must
+begin the registrable label, and generic words (`cdn`, `cache`), DNS-hosting
+names (`awsdns`, `dnsv1`), bare short labels and cloud-hosting suffixes
+(`amazonaws.com`, `aliyuncs.com`) are not CDN evidence. Cloudflare's published
+IPv4/IPv6 ranges are added with a provider name. Upstream OneForAll is GPL-3.0;
+confirm the data may be distributed in the engine image before release.
+
+The passive DNS stage records evidence, not decisions. A host keeps aliases that
+leave every scope root in `attributes.dns_cname` (in-scope aliases still become
+`cname_to` relations). An identified host carries `cdn_status`, `cdn_provider`,
+`cdn_evidence` and `attribution_rule_version`; an address carries the same plus
+`ip_role=cdn_edge` when its range is listed or the host that resolved to it is
+served through an edge by alias. Resolution relations are kept. ASM stores the
+identified judgements in `asset_network_attribution` and decides what an edge
+means for its inventory, derived targets and active scanning.
+
 ### Search-engine website snapshots
 
 FOFA results are requested with `host,domain,ip,port,protocol,title,server`.

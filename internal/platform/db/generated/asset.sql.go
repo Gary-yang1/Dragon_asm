@@ -26,23 +26,24 @@ func (q *Queries) CountAssetsByProject(ctx context.Context, projectID uint64) (i
 
 const countAssetsByProjectFiltered = `-- name: CountAssetsByProjectFiltered :one
 SELECT COUNT(*) FROM asset
-WHERE project_id = ?
-  AND deleted_at = '1970-01-01 00:00:00.000'
-  AND (? = '' OR asset_type = ?)
+WHERE asset.project_id = ?
+  AND asset.deleted_at = '1970-01-01 00:00:00.000'
+  AND (? = '' OR asset.asset_type = ?)
   AND (
       ? = ''
-      OR (? = 'domains' AND asset_type IN ('domain', 'subdomain'))
-      OR (? = 'ips' AND asset_type = 'ip')
-      OR (? = 'web' AND asset_type = 'web')
-      OR (? = 'external' AND asset_type IN ('cloud_resource', 'third_party'))
+      OR (? = 'domains' AND asset.asset_type IN ('domain', 'subdomain'))
+      OR (? = 'ips' AND asset.asset_type = 'ip' AND NOT EXISTS (SELECT 1 FROM asset_network_attribution n WHERE n.project_id = asset.project_id AND n.asset_id = asset.id AND n.role = 'cdn_edge'))
+      OR (? = 'cdn_edges' AND asset.asset_type = 'ip' AND EXISTS (SELECT 1 FROM asset_network_attribution n WHERE n.project_id = asset.project_id AND n.asset_id = asset.id AND n.role = 'cdn_edge'))
+      OR (? = 'web' AND asset.asset_type = 'web')
+      OR (? = 'external' AND asset.asset_type IN ('cloud_resource', 'third_party'))
   )
-  AND (? = '' OR status = ?)
+  AND (? = '' OR asset.status = ?)
   AND (
       ? = ''
-      OR display_name LIKE CONCAT('%', ?, '%')
-      OR value LIKE CONCAT('%', ?, '%')
-      OR owner LIKE CONCAT('%', ?, '%')
-      OR business_unit LIKE CONCAT('%', ?, '%')
+      OR asset.display_name LIKE CONCAT('%', ?, '%')
+      OR asset.value LIKE CONCAT('%', ?, '%')
+      OR asset.owner LIKE CONCAT('%', ?, '%')
+      OR asset.business_unit LIKE CONCAT('%', ?, '%')
   )
 `
 
@@ -64,6 +65,7 @@ func (q *Queries) CountAssetsByProjectFiltered(ctx context.Context, arg CountAss
 		arg.Category,
 		arg.Category,
 		arg.Category,
+		arg.Category,
 		arg.Status,
 		arg.Status,
 		arg.Keyword,
@@ -72,6 +74,39 @@ func (q *Queries) CountAssetsByProjectFiltered(ctx context.Context, arg CountAss
 		arg.Keyword,
 		arg.Keyword,
 	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countSharedIPAssets = `-- name: CountSharedIPAssets :one
+SELECT COUNT(*) FROM (
+    SELECT t.id
+    FROM asset t
+    JOIN asset_relation r
+      ON r.project_id = t.project_id AND r.to_asset_id = t.id
+     AND r.relation_type = 'resolves_to' AND r.deleted_at = '1970-01-01 00:00:00.000'
+    WHERE t.project_id = ?
+      AND t.asset_type = 'ip'
+      AND t.status <> 'ignored'
+      AND t.deleted_at = '1970-01-01 00:00:00.000'
+      AND NOT EXISTS (SELECT 1 FROM asset_network_attribution n
+                      WHERE n.project_id = t.project_id AND n.asset_id = t.id AND n.role = 'cdn_edge')
+    GROUP BY t.id
+    HAVING COUNT(DISTINCT r.from_asset_id) >= ?
+) AS shared
+`
+
+type CountSharedIPAssetsParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	MinNames  uint64 `db:"min_names" json:"min_names"`
+}
+
+// An address many live names resolve to is likely shared hosting or an edge the
+// rule set does not list. It is a hint, not a judgement: the address stays in
+// the inventory and is only labelled.
+func (q *Queries) CountSharedIPAssets(ctx context.Context, arg CountSharedIPAssetsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countSharedIPAssets, arg.ProjectID, arg.MinNames)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -186,28 +221,34 @@ func (q *Queries) GetAssetByKey(ctx context.Context, arg GetAssetByKeyParams) (A
 const getAssetSummary = `-- name: GetAssetSummary :one
 SELECT
     COUNT(*) AS total,
-    COUNT(CASE WHEN status <> 'ignored' THEN 1 END) AS managed_total,
-    COUNT(CASE WHEN status = 'active' THEN 1 END) AS active,
-    COUNT(CASE WHEN status = 'inactive' THEN 1 END) AS inactive,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 THEN 1 END) AS managed_total,
+    COUNT(CASE WHEN status = 'active' AND is_edge = 0 THEN 1 END) AS active,
+    COUNT(CASE WHEN status = 'inactive' AND is_edge = 0 THEN 1 END) AS inactive,
     COUNT(CASE WHEN status = 'ignored' THEN 1 END) AS ignored,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'domain' THEN 1 END) AS domain_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'subdomain' THEN 1 END) AS subdomain_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'ip' THEN 1 END) AS ip_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'port' THEN 1 END) AS port_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'service' THEN 1 END) AS service_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'web' THEN 1 END) AS web_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'certificate' THEN 1 END) AS certificate_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'cloud_resource' THEN 1 END) AS cloud_resource_count,
-    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'third_party' THEN 1 END) AS third_party_count,
-    COUNT(CASE WHEN status <> 'ignored' AND first_seen >= ? THEN 1 END) AS new_24h,
-    COUNT(CASE WHEN status <> 'ignored' AND last_seen >= ? THEN 1 END) AS observed_24h,
-    COUNT(CASE WHEN status <> 'ignored' AND last_seen < ? THEN 1 END) AS stale_30d,
-    COUNT(CASE WHEN status <> 'ignored' AND owner = '' THEN 1 END) AS unowned,
-    COUNT(CASE WHEN status <> 'ignored' AND business_unit = '' THEN 1 END) AS unassigned_business_unit,
-    COUNT(CASE WHEN status <> 'ignored' AND confidence < ? THEN 1 END) AS low_confidence
-FROM asset
-WHERE project_id = ?
-  AND deleted_at = '1970-01-01 00:00:00.000'
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'domain' THEN 1 END) AS domain_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'subdomain' THEN 1 END) AS subdomain_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'ip' THEN 1 END) AS ip_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'port' THEN 1 END) AS port_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'service' THEN 1 END) AS service_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'web' THEN 1 END) AS web_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'certificate' THEN 1 END) AS certificate_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'cloud_resource' THEN 1 END) AS cloud_resource_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND asset_type = 'third_party' THEN 1 END) AS third_party_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 1 THEN 1 END) AS cdn_edge_count,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND first_seen >= ? THEN 1 END) AS new_24h,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND last_seen >= ? THEN 1 END) AS observed_24h,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND last_seen < ? THEN 1 END) AS stale_30d,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND owner = '' THEN 1 END) AS unowned,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND business_unit = '' THEN 1 END) AS unassigned_business_unit,
+    COUNT(CASE WHEN status <> 'ignored' AND is_edge = 0 AND confidence < ? THEN 1 END) AS low_confidence
+FROM (
+    SELECT a.status, a.asset_type, a.first_seen, a.last_seen, a.owner, a.business_unit, a.confidence,
+           EXISTS (SELECT 1 FROM asset_network_attribution n
+                   WHERE n.project_id = a.project_id AND n.asset_id = a.id AND n.role = 'cdn_edge') AS is_edge
+    FROM asset a
+    WHERE a.project_id = ?
+      AND a.deleted_at = '1970-01-01 00:00:00.000'
+) AS summarized
 `
 
 type GetAssetSummaryParams struct {
@@ -233,6 +274,7 @@ type GetAssetSummaryRow struct {
 	CertificateCount       int64 `db:"certificate_count" json:"certificate_count"`
 	CloudResourceCount     int64 `db:"cloud_resource_count" json:"cloud_resource_count"`
 	ThirdPartyCount        int64 `db:"third_party_count" json:"third_party_count"`
+	CdnEdgeCount           int64 `db:"cdn_edge_count" json:"cdn_edge_count"`
 	New24h                 int64 `db:"new_24h" json:"new_24h"`
 	Observed24h            int64 `db:"observed_24h" json:"observed_24h"`
 	Stale30d               int64 `db:"stale_30d" json:"stale_30d"`
@@ -241,6 +283,9 @@ type GetAssetSummaryRow struct {
 	LowConfidence          int64 `db:"low_confidence" json:"low_confidence"`
 }
 
+// CDN edge addresses (asset_network_attribution role cdn_edge) are DNS answers,
+// not assets the organisation runs: they are counted on their own and kept out
+// of every managed figure, where their churn and empty owners would distort it.
 func (q *Queries) GetAssetSummary(ctx context.Context, arg GetAssetSummaryParams) (GetAssetSummaryRow, error) {
 	row := q.db.QueryRowContext(ctx, getAssetSummary,
 		arg.NewSince,
@@ -265,6 +310,7 @@ func (q *Queries) GetAssetSummary(ctx context.Context, arg GetAssetSummaryParams
 		&i.CertificateCount,
 		&i.CloudResourceCount,
 		&i.ThirdPartyCount,
+		&i.CdnEdgeCount,
 		&i.New24h,
 		&i.Observed24h,
 		&i.Stale30d,
@@ -335,23 +381,24 @@ func (q *Queries) ListAssetsByProject(ctx context.Context, arg ListAssetsByProje
 
 const listAssetsByProjectFiltered = `-- name: ListAssetsByProjectFiltered :many
 SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset
-WHERE project_id = ?
-  AND deleted_at = '1970-01-01 00:00:00.000'
-  AND (? = '' OR asset_type = ?)
+WHERE asset.project_id = ?
+  AND asset.deleted_at = '1970-01-01 00:00:00.000'
+  AND (? = '' OR asset.asset_type = ?)
   AND (
       ? = ''
-      OR (? = 'domains' AND asset_type IN ('domain', 'subdomain'))
-      OR (? = 'ips' AND asset_type = 'ip')
-      OR (? = 'web' AND asset_type = 'web')
-      OR (? = 'external' AND asset_type IN ('cloud_resource', 'third_party'))
+      OR (? = 'domains' AND asset.asset_type IN ('domain', 'subdomain'))
+      OR (? = 'ips' AND asset.asset_type = 'ip' AND NOT EXISTS (SELECT 1 FROM asset_network_attribution n WHERE n.project_id = asset.project_id AND n.asset_id = asset.id AND n.role = 'cdn_edge'))
+      OR (? = 'cdn_edges' AND asset.asset_type = 'ip' AND EXISTS (SELECT 1 FROM asset_network_attribution n WHERE n.project_id = asset.project_id AND n.asset_id = asset.id AND n.role = 'cdn_edge'))
+      OR (? = 'web' AND asset.asset_type = 'web')
+      OR (? = 'external' AND asset.asset_type IN ('cloud_resource', 'third_party'))
   )
-  AND (? = '' OR status = ?)
+  AND (? = '' OR asset.status = ?)
   AND (
       ? = ''
-      OR display_name LIKE CONCAT('%', ?, '%')
-      OR value LIKE CONCAT('%', ?, '%')
-      OR owner LIKE CONCAT('%', ?, '%')
-      OR business_unit LIKE CONCAT('%', ?, '%')
+      OR asset.display_name LIKE CONCAT('%', ?, '%')
+      OR asset.value LIKE CONCAT('%', ?, '%')
+      OR asset.owner LIKE CONCAT('%', ?, '%')
+      OR asset.business_unit LIKE CONCAT('%', ?, '%')
   )
 ORDER BY id
 LIMIT ? OFFSET ?
@@ -375,6 +422,7 @@ func (q *Queries) ListAssetsByProjectFiltered(ctx context.Context, arg ListAsset
 		arg.ProjectID,
 		arg.AssetType,
 		arg.AssetType,
+		arg.Category,
 		arg.Category,
 		arg.Category,
 		arg.Category,

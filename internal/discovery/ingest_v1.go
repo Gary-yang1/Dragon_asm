@@ -48,7 +48,7 @@ func (s *Service) IngestCallbackFacts(ctx context.Context, callback DiscoveryCal
 		if err != nil {
 			return err
 		}
-		if err := s.ingestCallbackFactsWith(ctx, dbgen.New(tx), callback, payload); err != nil {
+		if err := s.ingestCallbackFactsWith(ctx, tx, dbgen.New(tx), callback, payload); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -56,7 +56,9 @@ func (s *Service) IngestCallbackFacts(ctx context.Context, callback DiscoveryCal
 	})
 }
 
-func (s *Service) ingestCallbackFactsWith(ctx context.Context, q *dbgen.Queries, callback DiscoveryCallback, payload callbackPayload) error {
+// tx is the transaction q wraps; facts without a generated query (network
+// attribution) are written through it so they commit or roll back together.
+func (s *Service) ingestCallbackFactsWith(ctx context.Context, tx dbgen.DBTX, q *dbgen.Queries, callback DiscoveryCallback, payload callbackPayload) error {
 	discoveryRepo := NewRepository(q)
 	run, err := discoveryRepo.GetTaskRun(ctx, callback.ProjectID, callback.RunID)
 	if err != nil {
@@ -100,6 +102,9 @@ func (s *Service) ingestCallbackFactsWith(ctx context.Context, q *dbgen.Queries,
 			if err := insertAssetChangeEvent(ctx, exposureRepo, callback, fact, before, materialized); err != nil {
 				return err
 			}
+		}
+		if err := upsertNetworkAttribution(ctx, tx, callback, materialized, fact.Attributes, fact.ObservedAt); err != nil {
+			return err
 		}
 		if err := discoveryRepo.MarkDiscoveryObservationMaterialized(ctx, callback.ProjectID, observation.ID); err != nil {
 			return err

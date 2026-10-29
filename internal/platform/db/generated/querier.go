@@ -34,6 +34,10 @@ type Querier interface {
 	CountReportExports(ctx context.Context, projectID uint64) (int64, error)
 	CountRisksByProject(ctx context.Context, projectID uint64) (int64, error)
 	CountRisksByProjectFiltered(ctx context.Context, arg CountRisksByProjectFilteredParams) (int64, error)
+	// An address many live names resolve to is likely shared hosting or an edge the
+	// rule set does not list. It is a hint, not a judgement: the address stays in
+	// the inventory and is only labelled.
+	CountSharedIPAssets(ctx context.Context, arg CountSharedIPAssetsParams) (int64, error)
 	CountSuppressionRulesByProject(ctx context.Context, projectID uint64) (int64, error)
 	CountTicketsByProject(ctx context.Context, projectID uint64) (int64, error)
 	// Ownership lookup for the active-scanning gate. It matches the domain itself or
@@ -77,6 +81,9 @@ type Querier interface {
 	// need to remember to add either filter.
 	GetAssetByID(ctx context.Context, arg GetAssetByIDParams) (Asset, error)
 	GetAssetByKey(ctx context.Context, arg GetAssetByKeyParams) (Asset, error)
+	// CDN edge addresses (asset_network_attribution role cdn_edge) are DNS answers,
+	// not assets the organisation runs: they are counted on their own and kept out
+	// of every managed figure, where their churn and empty owners would distort it.
 	GetAssetSummary(ctx context.Context, arg GetAssetSummaryParams) (GetAssetSummaryRow, error)
 	// Returns the user's first live project membership, used by the web shell as
 	// the default project context after login.
@@ -178,6 +185,9 @@ type Querier interface {
 	ListExposuresByProject(ctx context.Context, arg ListExposuresByProjectParams) ([]Exposure, error)
 	ListICPFilingDomainIDs(ctx context.Context, arg ListICPFilingDomainIDsParams) ([]uint64, error)
 	ListICPFilings(ctx context.Context, projectID uint64) ([]IcpFiling, error)
+	// Network attribution for IP assets by value, so derived targets and active
+	// dispatch can refuse CDN edges and flag addresses shared by many names.
+	ListIPNetworkAttribution(ctx context.Context, arg ListIPNetworkAttributionParams) ([]ListIPNetworkAttributionRow, error)
 	ListInheritanceObservations(ctx context.Context, arg ListInheritanceObservationsParams) ([]DiscoveryObservation, error)
 	ListNotificationRulesByProject(ctx context.Context, projectID uint64) ([]NotificationRule, error)
 	ListOpenRisksForSLARecalc(ctx context.Context, arg ListOpenRisksForSLARecalcParams) ([]Risk, error)

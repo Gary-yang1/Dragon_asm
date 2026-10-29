@@ -874,7 +874,8 @@ paths:
         - name: category
           in: query
           description: Business-facing asset view. Combined with asset_type when both are present.
-          schema: { type: string, enum: [domains, ips, web, external] }
+          schema: { type: string, enum: [domains, ips, cdn_edges, web, external] }
+          description: "`ips` is the organisation's own address inventory and excludes identified CDN edges, which `cdn_edges` lists."
         - name: status
           in: query
           schema: { type: string, enum: [active, inactive, ignored] }
@@ -901,6 +902,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AssetSummaryEnvelope"
+  /projects/{project_id}/assets/network:
+    get:
+      tags: [assets]
+      summary: Network attribution for up to 100 assets (one list page).
+      description: >-
+        Returns, per asset, the identified CDN judgement (role cdn_edge for an
+        address, cdn_served for a name) with provider, evidence and rule version,
+        and how many live names resolve to it. No role means unknown, not "own
+        origin". shared is true for an address with no role that at least
+        shared_ip_min_names names resolve to.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - name: asset_ids
+          in: query
+          required: true
+          description: Comma-separated asset ids, 1-100.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Attribution per requested asset in the project.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericEnvelope"
   /projects/{project_id}/assets/import:
     post:
       tags: [assets]

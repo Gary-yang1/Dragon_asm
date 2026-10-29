@@ -424,6 +424,13 @@ func (e *PassiveExecutor) Execute(ctx context.Context, request contract.ScanRequ
 					assets = append(assets, fact)
 					continue
 				}
+				external, hostEdge, aliasEdge := hostAttribution(entry, roots)
+				if len(external) > 0 {
+					fact.Attributes[attrDNSCNAME] = boundedJoin(external, maxAttributeValue)
+				}
+				if hostEdge.Status == "identified" {
+					annotateCDN(fact.Attributes, hostEdge)
+				}
 				assets = append(assets, fact)
 				for _, raw := range entry.IPs {
 					ip := net.ParseIP(strings.TrimSpace(raw))
@@ -432,7 +439,13 @@ func (e *PassiveExecutor) Execute(ctx context.Context, request contract.ScanRequ
 					}
 					value := ip.String()
 					to := stableRef("ip", value)
-					assets = append(assets, assetFact(to, "ip:"+value, "ip", value, "dns", e.now()))
+					ipFact := assetFact(to, "ip:"+value, "ip", value, "dns", e.now())
+					ipFact.Attributes = map[string]string{}
+					addressAttribution(ipFact.Attributes, value, host, aliasEdge)
+					if len(ipFact.Attributes) == 0 {
+						ipFact.Attributes = nil
+					}
+					assets = append(assets, ipFact)
 					relations = append(relations, relationFact(stableRef("resolve", host, value), "resolves_to", ref, kind+":"+host, to, "ip:"+value, "dns", e.now()))
 				}
 				if records["CNAME"] {
@@ -627,16 +640,31 @@ func requestedDNSRecordTypes(jobType string, options map[string]any) map[string]
 	return result
 }
 
+// dedupeAssets keeps the first fact per asset and folds later duplicates'
+// attributes into it, so an edge judgement recorded on one sighting of an
+// address is not dropped because another sighting came first.
 func dedupeAssets(items []contract.AssetFact) []contract.AssetFact {
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
 	out := make([]contract.AssetFact, 0, len(items))
 	for _, item := range items {
 		key := item.Provider + "|" + item.AssetType + "|" + item.Value
-		if _, ok := seen[key]; ok {
+		index, ok := seen[key]
+		if !ok {
+			seen[key] = len(out)
+			out = append(out, item)
 			continue
 		}
-		seen[key] = struct{}{}
-		out = append(out, item)
+		for name, value := range item.Attributes {
+			if value == "" {
+				continue
+			}
+			if out[index].Attributes == nil {
+				out[index].Attributes = map[string]string{}
+			}
+			if out[index].Attributes[name] == "" {
+				out[index].Attributes[name] = value
+			}
+		}
 	}
 	return out
 }

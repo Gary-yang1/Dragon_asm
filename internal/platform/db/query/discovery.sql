@@ -439,3 +439,19 @@ WHERE project_id = sqlc.arg(project_id) AND id > sqlc.arg(after_id) AND status =
   AND asset_type IN ('domain', 'subdomain', 'web')
   AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id LIMIT 1000;
+
+-- name: ListIPNetworkAttribution :many
+-- Network attribution for IP assets by value, so derived targets and active
+-- dispatch can refuse CDN edges and flag addresses shared by many names.
+SELECT a.value,
+       COALESCE(n.role, '') AS role,
+       COALESCE(n.provider, '') AS provider,
+       (SELECT COUNT(DISTINCT r.from_asset_id) FROM asset_relation r
+         WHERE r.project_id = a.project_id AND r.to_asset_id = a.id
+           AND r.relation_type = 'resolves_to' AND r.deleted_at = '1970-01-01 00:00:00.000') AS resolved_by
+FROM asset a
+LEFT JOIN asset_network_attribution n ON n.project_id = a.project_id AND n.asset_id = a.id
+WHERE a.project_id = sqlc.arg(project_id)
+  AND a.asset_type = 'ip'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.value IN (sqlc.slice(ip_values));

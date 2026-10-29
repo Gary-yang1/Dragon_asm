@@ -181,6 +181,22 @@ type Asset struct {
 	MissCount    uint32    `db:"miss_count" json:"miss_count"`
 }
 
+type AssetNetworkAttribution struct {
+	ID          uint64    `db:"id" json:"id"`
+	TenantID    string    `db:"tenant_id" json:"tenant_id"`
+	OrgID       string    `db:"org_id" json:"org_id"`
+	ProjectID   uint64    `db:"project_id" json:"project_id"`
+	AssetID     uint64    `db:"asset_id" json:"asset_id"`
+	Role        string    `db:"role" json:"role"`
+	Provider    string    `db:"provider" json:"provider"`
+	Evidence    string    `db:"evidence" json:"evidence"`
+	RuleVersion string    `db:"rule_version" json:"rule_version"`
+	SourceRunID uint64    `db:"source_run_id" json:"source_run_id"`
+	ObservedAt  time.Time `db:"observed_at" json:"observed_at"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+
 type AssetRelation struct {
 	ID           uint64    `db:"id" json:"id"`
 	TenantID     string    `db:"tenant_id" json:"tenant_id"`

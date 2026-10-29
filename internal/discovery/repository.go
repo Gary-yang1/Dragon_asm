@@ -58,6 +58,9 @@ type Repository interface {
 	// GetTaskRunForUpdate reads and row-locks a run. Transactions that touch both
 	// a run and its callback rows take this lock first (callback lock order).
 	GetTaskRunForUpdate(ctx context.Context, projectID, runID uint64) (*TaskRun, error)
+	// ListIPNetworkAttribution returns attribution for the project's IP assets
+	// with the given values; values with no IP asset are absent.
+	ListIPNetworkAttribution(ctx context.Context, projectID uint64, values []string) ([]IPNetworkAttribution, error)
 	ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error)
 	ListRunningRunsForReconcile(ctx context.Context, limit int32) ([]*TaskRun, error)
 	MarkRunRunning(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, startedAt time.Time) error
@@ -501,6 +504,21 @@ func (r *sqlcRepository) GetTaskRunForUpdate(ctx context.Context, projectID, run
 		return nil, mapErr(err)
 	}
 	return toDomainTaskRun(row), nil
+}
+
+func (r *sqlcRepository) ListIPNetworkAttribution(ctx context.Context, projectID uint64, values []string) ([]IPNetworkAttribution, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	rows, err := r.q.ListIPNetworkAttribution(ctx, dbgen.ListIPNetworkAttributionParams{ProjectID: projectID, IpValues: values})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]IPNetworkAttribution, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, IPNetworkAttribution{Value: row.Value, Role: row.Role, Provider: row.Provider, ResolvedBy: row.ResolvedBy})
+	}
+	return out, nil
 }
 
 func (r *sqlcRepository) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error) {

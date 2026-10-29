@@ -76,13 +76,21 @@ const (
 	CategoryIPs      = "ips"
 	CategoryWeb      = "web"
 	CategoryExternal = "external"
+	// CategoryCDNEdges lists addresses identified as CDN edges. They are kept out
+	// of CategoryIPs, which is the organisation's own address inventory.
+	CategoryCDNEdges = "cdn_edges"
 )
+
+// SharedIPMinNames is how many live names must resolve to an address before it
+// is labelled as likely shared. It is a hint for review, not an exclusion.
+const SharedIPMinNames = 5
 
 var validAssetCategories = map[string]bool{
 	CategoryDomains:  true,
 	CategoryIPs:      true,
 	CategoryWeb:      true,
 	CategoryExternal: true,
+	CategoryCDNEdges: true,
 }
 
 // IsValidType reports whether t is a known asset_type.
@@ -114,6 +122,16 @@ type AssetSummary struct {
 	ByType     AssetTypeSummary       `json:"by_type"`
 	Freshness  AssetFreshnessSummary  `json:"freshness"`
 	Governance AssetGovernanceSummary `json:"governance"`
+	Network    AssetNetworkSummary    `json:"network"`
+}
+
+// AssetNetworkSummary counts addresses that are not the organisation's own:
+// identified CDN edges (excluded from every other figure) and addresses shared
+// by many names (still counted, only labelled).
+type AssetNetworkSummary struct {
+	CDNEdge          int64 `json:"cdn_edge"`
+	SharedIP         int64 `json:"shared_ip"`
+	SharedIPMinNames int   `json:"shared_ip_min_names"`
 }
 
 type AssetInventorySummary struct {

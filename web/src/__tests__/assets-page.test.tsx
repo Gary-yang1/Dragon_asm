@@ -127,6 +127,10 @@ describe('AssetsPage', () => {
           }
         })
       ),
+      http.get('/api/v1/projects/1/assets/network', ({ request }) => {
+        const ids = (new URL(request.url).searchParams.get('asset_ids') ?? '').split(',').filter(Boolean).map(Number);
+        return HttpResponse.json({ data: { items: ids.map((id) => ({ asset_id: id, resolved_by: 0, shared: false })) } });
+      }),
       http.get('/api/v1/projects/1/assets/1', () =>
         HttpResponse.json({
           request_id: 'req-asset',
@@ -433,6 +437,58 @@ describe('AssetsPage', () => {
     await userEvent.click(await within(drawer).findByRole('tab', { name: '关联风险' }));
     expect(await within(drawer).findByRole('link', { name: 'RDP open to internet' })).toHaveAttribute('href', '/projects/1/risks?risk_id=7');
     expect(assetIds).toEqual(['1']);
+  });
+
+  it('keeps CDN edges out of the IP view and labels edge and shared addresses', async () => {
+    const categories: string[] = [];
+    const edgeRow = { ...assetRows[1], id: 7, display_name: 'Edge', value: '104.16.1.1', status: 'active' };
+    const sharedRow = { ...assetRows[1], id: 8, display_name: 'Vhost', value: '198.51.100.66', status: 'active' };
+    server.use(
+      http.get('/api/v1/projects/1/assets', ({ request }) => {
+        const category = new URL(request.url).searchParams.get('category') ?? '';
+        categories.push(category);
+        const items = category === 'cdn_edges' ? [edgeRow] : [sharedRow];
+        return HttpResponse.json({ data: { items, total: items.length, page_size: 20, page_number: 1 } });
+      }),
+      http.get('/api/v1/projects/1/assets/summary', () => HttpResponse.json({ data: {
+        inventory: { total: 3, managed_total: 2, active: 2, inactive: 0, ignored: 0 },
+        by_type: { domain: 1, subdomain: 0, ip: 1, port: 0, service: 0, web: 0, certificate: 0, cloud_resource: 0, third_party: 0 },
+        freshness: { new_24h: 0, observed_24h: 0, stale_30d: 0 },
+        governance: { unowned: 0, unassigned_business_unit: 0, low_confidence: 0, low_confidence_below: 50 },
+        network: { cdn_edge: 1, shared_ip: 1, shared_ip_min_names: 5 }
+      } })),
+      http.get('/api/v1/projects/1/assets/network', () => HttpResponse.json({ data: { items: [
+        { asset_id: 7, role: 'cdn_edge', provider: 'Cloudflare', evidence: 'Address 104.16.1.1 is in CDN range 104.16.0.0/13', rule_version: 'cdn-rules-v2', resolved_by: 6, shared: false },
+        { asset_id: 8, resolved_by: 12, shared: true }
+      ] } }))
+    );
+    renderAssets('/projects/1/assets?view=ips');
+    expect(await screen.findByText('疑似共享 · 12 个域名')).toBeInTheDocument();
+    expect(categories.at(-1)).toBe('ips');
+    expect(within(screen.getByLabelText('资产概况')).getByText('疑似共享 IP')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('tab', { name: /CDN 节点 1/ }));
+    await waitFor(() => expect(categories.at(-1)).toBe('cdn_edges'));
+    expect(await screen.findByText('CDN · Cloudflare')).toBeInTheDocument();
+    expect(screen.queryByText(/疑似共享 ·/)).not.toBeInTheDocument();
+  });
+
+  it('shows network attribution in an IP asset detail', async () => {
+    const edge = { ...assetRows[1], id: 7, value: '104.16.1.1', display_name: 'Edge' };
+    server.use(
+      http.get('/api/v1/projects/1/assets/7', () => HttpResponse.json({ data: edge })),
+      http.get('/api/v1/projects/1/assets/7/graph', () => HttpResponse.json({ data: { nodes: [], edges: [], truncated: false } })),
+      http.get('/api/v1/projects/1/assets/network', () => HttpResponse.json({ data: { items: [
+        { asset_id: 7, role: 'cdn_edge', provider: 'Cloudflare', evidence: 'Address 104.16.1.1 is in CDN range 104.16.0.0/13', rule_version: 'cdn-rules-v2', observed_at: '2026-10-30T01:00:00.000Z', resolved_by: 6, shared: false }
+      ] } }))
+    );
+    renderAssets('/projects/1/assets?view=ips&asset_id=7');
+    const drawer = await screen.findByRole('dialog');
+    expect(await within(drawer).findByText('网络归属')).toBeInTheDocument();
+    expect(within(drawer).getByText('CDN · Cloudflare')).toBeInTheDocument();
+    expect(within(drawer).getByText('Address 104.16.1.1 is in CDN range 104.16.0.0/13')).toBeInTheDocument();
+    expect(within(drawer).getByText('cdn-rules-v2')).toBeInTheDocument();
+    expect(within(drawer).getByText('6 个')).toBeInTheDocument();
   });
 
   it('toggles a status filter from the overview counts', async () => {

@@ -1908,3 +1908,4 @@ button.project-active-gate-overlay:focus-visible {
 .asset-risk-list li > a { flex:1; min-width:0; overflow-wrap:anywhere; }
 .asset-risk-list li.is-closed { opacity:.6; }
 .web-results .web-crawl-tag { margin:4px 0 0; font-size:11px; line-height:18px; }
+.network-tag { margin-top:4px; font-size:11px; line-height:18px; }

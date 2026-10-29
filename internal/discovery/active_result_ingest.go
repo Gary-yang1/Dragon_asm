@@ -509,7 +509,7 @@ func (s *Service) ingestActiveResultPayload(
 		_ = tx.Rollback()
 		return nil
 	}
-	if err := s.ingestCallbackFactsWith(ctx, q, callback, payload); err != nil {
+	if err := s.ingestCallbackFactsWith(ctx, tx, q, callback, payload); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

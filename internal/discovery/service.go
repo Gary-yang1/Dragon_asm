@@ -1185,6 +1185,11 @@ func (s *Service) BuildDispatchPlan(ctx context.Context, projectID, runID uint64
 			return nil, err
 		}
 	}
+	// Independent of the ownership policy: a CDN edge belongs to the CDN, and
+	// no policy setting makes scanning it the organisation's to authorise.
+	if err := s.refuseCDNEdgeTargets(ctx, projectID, run.TaskType, config.Targets); err != nil {
+		return nil, err
+	}
 
 	return &DispatchPlan{
 		RunID:          run.ID,

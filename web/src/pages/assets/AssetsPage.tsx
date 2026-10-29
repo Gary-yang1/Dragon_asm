@@ -7,16 +7,19 @@ import { Link, useSearchParams } from 'react-router-dom';
 import {
   getAsset,
   getAssetGraph,
+  getAssetNetwork,
   getAssetSummary,
   listAssets,
   type Asset,
   type AssetGraphData,
   type AssetListQuery,
+  type AssetNetworkInfo,
   type AssetSummary
 } from '../../api/assets';
 import { errorMessage } from '../../api/errorMessage';
 import { Permission } from '../../auth/permissions';
 import { usePermission } from '../../auth/usePermission';
+import { NetworkTag } from '../../components/NetworkTag';
 import { PageHeader } from '../../components/PageHeader';
 import { StateView } from '../../components/StateView';
 import { ConfidenceMeter, EnumChip } from '../../components/StatusChip';
@@ -26,13 +29,15 @@ import { AssetDetail } from './AssetDetail';
 import { AssetImportDrawer } from './AssetImportDrawer';
 import { WebResults } from '../../components/WebResults';
 
-type AssetView = 'domains' | 'ips' | 'ports' | 'services' | 'web' | 'certificates' | 'external' | 'all';
+type AssetView = 'domains' | 'ips' | 'cdn_edges' | 'ports' | 'services' | 'web' | 'certificates' | 'external' | 'all';
 
 // Single-type views pin asset_type instead of a category; the type filter is
 // hidden for them because there is nothing left to narrow.
 const assetViews: Array<{ key: AssetView; label: string; category?: AssetListQuery['category']; assetType?: string }> = [
   { key: 'domains', label: '域名资产', category: 'domains' },
   { key: 'ips', label: 'IP 资产', category: 'ips' },
+  // CDN edges answer DNS for the organisation's names but are not its servers.
+  { key: 'cdn_edges', label: 'CDN 节点', category: 'cdn_edges' },
   { key: 'ports', label: '端口', assetType: 'port' },
   { key: 'services', label: '服务', assetType: 'service' },
   { key: 'web', label: 'Web 资产', category: 'web' },
@@ -63,6 +68,8 @@ function viewCount(view: AssetView, summary: AssetSummary | null) {
       return summary.by_type.domain + summary.by_type.subdomain;
     case 'ips':
       return summary.by_type.ip;
+    case 'cdn_edges':
+      return summary.network?.cdn_edge;
     case 'ports':
       return summary.by_type.port;
     case 'services':
@@ -88,6 +95,9 @@ export function AssetsPage() {
   const activeCategory = activeViewMeta?.category;
   const pinnedAssetType = activeViewMeta?.assetType;
   const tableAction = useRef<ActionType>();
+  // Network attribution for the IP rows on the current page, read in one batch.
+  const [network, setNetwork] = useState<Record<number, AssetNetworkInfo>>({});
+  const networkRequest = useRef(0);
   const selectedId = Number(searchParams.get('asset_id')) || 0;
   const [columnView, setColumnView] = useState('technical');
   const [graphError, setGraphError] = useState('');
@@ -179,6 +189,7 @@ export function AssetsPage() {
                 {row.value}
               </Typography.Text>
             ) : null}
+            {row.asset_type === 'ip' ? <NetworkTag info={network[row.id]} /> : null}
           </Space>
         )
       },
@@ -342,6 +353,16 @@ export function AssetsPage() {
               keyword: keyword || undefined
             });
             setListError('');
+            const ipIds = page.items.filter((item) => item.asset_type === 'ip').map((item) => item.id);
+            const requestId = ++networkRequest.current;
+            // Best effort: a failed lookup leaves rows unlabelled, never mislabelled.
+            void getAssetNetwork(projectId, ipIds)
+              .then((items) => {
+                if (requestId === networkRequest.current) setNetwork(Object.fromEntries(items.map((item) => [item.asset_id, item])));
+              })
+              .catch(() => {
+                if (requestId === networkRequest.current) setNetwork({});
+              });
             return { data: page.items, total: page.total, success: true };
           } catch (error) {
             setListError(errorMessage(error));
@@ -397,6 +418,12 @@ function AssetOverviewLine({ summary, activeStatus, onStatusFilter }: { summary:
       label: '低置信度',
       value: summary?.governance.low_confidence,
       hint: summary ? `置信度低于 ${summary.governance.low_confidence_below}` : undefined
+    },
+    {
+      key: 'shared-ip',
+      label: '疑似共享 IP',
+      value: summary?.network?.shared_ip,
+      hint: summary?.network ? `被不少于 ${summary.network.shared_ip_min_names} 个域名解析；仍计入 IP 资产，仅作提示` : undefined
     }
   ];
   return (

@@ -764,6 +764,8 @@ func writeManagementError(c *gin.Context, err error) {
 		httpx.Unprocessable(c, "主动扫描的速率或并发超过上限")
 	case errors.Is(err, ErrOwnershipRequired):
 		httpx.Unprocessable(c, "主动扫描要求目标域名已通过所有权校验")
+	case errors.Is(err, ErrActiveTargetCDNEdge):
+		httpx.Unprocessable(c, "目标包含 CDN 边缘节点地址，不是本单位资产，不能主动扫描")
 	case errors.Is(err, ErrActiveApprovalRequired):
 		httpx.Unprocessable(c, "主动扫描需要第二人审批，且审批人不能是发起人")
 	case errors.Is(err, ErrTaskTypeUnsupported):

@@ -19,6 +19,7 @@ import (
 )
 
 type fakeRepo struct {
+	ipNetwork         map[string]IPNetworkAttribution
 	scopes            map[uint64]map[uint64]*Scope
 	targets           map[uint64]map[uint64][]*ScopeTarget
 	clearCount        int
@@ -343,6 +344,17 @@ func (r *fakeRepo) CreateTaskRun(ctx context.Context, in CreateTaskRunParams) (u
 		UpdatedBy:         in.ActorID,
 	}
 	return id, nil
+}
+
+// ListIPNetworkAttribution serves the attribution a test seeds in ipNetwork.
+func (r *fakeRepo) ListIPNetworkAttribution(_ context.Context, _ uint64, values []string) ([]IPNetworkAttribution, error) {
+	out := []IPNetworkAttribution{}
+	for _, value := range values {
+		if item, ok := r.ipNetwork[value]; ok {
+			out = append(out, item)
+		}
+	}
+	return out, nil
 }
 
 // GetTaskRunForUpdate has no locking to model in memory; it reads like GetTaskRun.

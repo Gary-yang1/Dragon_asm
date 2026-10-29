@@ -69,6 +69,25 @@ export type AssetSummary = {
     low_confidence: number;
     low_confidence_below: number;
   };
+  /** CDN edges are excluded from every other figure; shared IPs are only labelled. */
+  network?: {
+    cdn_edge: number;
+    shared_ip: number;
+    shared_ip_min_names: number;
+  };
+};
+
+/** Where an asset sits on the network. No role means unknown, not "own origin". */
+export type AssetNetworkInfo = {
+  asset_id: number;
+  role?: 'cdn_edge' | 'cdn_served';
+  provider?: string;
+  evidence?: string;
+  rule_version?: string;
+  source_run_id?: number;
+  observed_at?: string;
+  resolved_by: number;
+  shared: boolean;
 };
 
 export type AssetGraphNode = {
@@ -106,7 +125,7 @@ export type AssetListQuery = {
   pageSize: number;
   pageNumber: number;
   assetType?: string;
-  category?: 'domains' | 'ips' | 'web' | 'external';
+  category?: 'domains' | 'ips' | 'cdn_edges' | 'web' | 'external';
   status?: string;
   keyword?: string;
 };
@@ -178,6 +197,13 @@ export function updateAsset(projectId: number, assetId: number, input: AssetUpda
 
 export function getAssetSummary(projectId: number) {
   return getJSON<AssetSummary>(`/projects/${projectId}/assets/summary`);
+}
+
+/** Network attribution for up to 100 assets in one request (one list page). */
+export async function getAssetNetwork(projectId: number, assetIds: number[]) {
+  if (assetIds.length === 0) return [];
+  const result = await getJSON<{ items: AssetNetworkInfo[] }>(`/projects/${projectId}/assets/network`, { asset_ids: assetIds.join(',') });
+  return result.items;
 }
 
 export function getAssetGraph(projectId: number, assetId: number) {

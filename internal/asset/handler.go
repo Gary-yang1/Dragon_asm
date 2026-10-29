@@ -68,6 +68,7 @@ func (h *Handler) RegisterRoutes(protected *gin.RouterGroup) {
 	g.GET("", h.list)
 	g.GET("/summary", h.summary)
 	g.GET("/web-results", h.webResults)
+	g.GET("/network", h.network)
 	g.GET("/:id", h.detail)
 	g.GET("/:id/graph", h.graph)
 	g.POST("/import", h.importAssets)
