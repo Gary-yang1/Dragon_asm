@@ -27,5 +27,6 @@ afterEach(async () => {
   });
   server.resetHandlers();
   localStorage.clear();
+  sessionStorage.clear();
 });
 afterAll(() => server.close());

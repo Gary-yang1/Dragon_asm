@@ -305,8 +305,8 @@ func exposureChanged(before *Exposure, after IngestInput) bool {
 		before.CertSubject != after.CertSubject ||
 		before.CertIssuer != after.CertIssuer ||
 		before.CertSerial != after.CertSerial ||
-		!before.CertNotBefore.Equal(after.CertNotBefore) ||
-		!before.CertNotAfter.Equal(after.CertNotAfter) ||
+		!certTimeForDB(before.CertNotBefore).Equal(certTimeForDB(after.CertNotBefore)) ||
+		!certTimeForDB(before.CertNotAfter).Equal(certTimeForDB(after.CertNotAfter)) ||
 		!stringSlicesEqual(before.CertSANs, after.CertSANs) ||
 		before.EvidenceHash != after.EvidenceHash
 }

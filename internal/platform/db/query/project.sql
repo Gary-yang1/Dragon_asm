@@ -180,6 +180,19 @@ UPDATE project
 SET status = ?, updated_by = ?
 WHERE id = ? AND status = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
+-- name: CountActiveProjectTaskRuns :one
+SELECT COUNT(*) FROM task_run
+WHERE project_id = ?
+  AND status IN ('pending', 'running')
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: SoftDeleteProject :execresult
+UPDATE project
+SET deleted_at = CURRENT_TIMESTAMP(3), updated_by = ?
+WHERE id = ?
+  AND status = 'archived'
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
 -- name: ClearPrimaryProjectSubjects :exec
 UPDATE project_subject SET is_primary = FALSE, updated_by = ?
 WHERE project_id = ? AND is_primary = TRUE AND deleted_at = '1970-01-01 00:00:00.000';
@@ -243,6 +256,19 @@ WHERE pdp.project_id = ?
   AND a.deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY pdp.is_primary DESC, pdp.id;
 
+-- Ownership lookup for the active-scanning gate. It matches the domain itself or
+-- any subdomain of it, because proving control of example.com is what authorises
+-- probing api.example.com — requiring a separate proof per subdomain would make
+-- the control unusable.
+-- name: CountVerifiedDomainOwnership :one
+SELECT COUNT(*) FROM project_domain_profile pdp
+INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id
+WHERE pdp.project_id = ?
+  AND pdp.ownership_status = 'verified'
+  AND pdp.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.deleted_at = '1970-01-01 00:00:00.000'
+  AND (a.value = sqlc.arg(domain) OR sqlc.arg(domain) LIKE CONCAT('%.', a.value));
+
 -- name: UpdateProjectDomainProfile :exec
 UPDATE project_domain_profile
 SET subject_id = ?, is_primary = ?, ownership_status = ?, source = ?,
@@ -304,3 +330,24 @@ SELECT
         AND EXISTS (SELECT 1 FROM scope_target st WHERE st.project_id = s.project_id
             AND st.scope_id = s.id AND st.match_mode = 'include'
             AND st.deleted_at = '1970-01-01 00:00:00.000')) AS valid_scope_count;
+
+-- name: GetProjectSubjectByKey :one
+SELECT * FROM project_subject
+WHERE project_id = ? AND subject_key = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: GetICPFilingByNo :one
+SELECT * FROM icp_filing
+WHERE project_id = ? AND filing_no = ? AND deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: GetProjectDomainProfileByDomain :one
+SELECT pdp.* FROM project_domain_profile pdp
+INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id
+WHERE pdp.project_id = ?
+  AND a.value = ?
+  AND pdp.deleted_at = '1970-01-01 00:00:00.000'
+  AND a.deleted_at = '1970-01-01 00:00:00.000';
+
+-- name: LinkICPFilingDomainIfAbsent :execresult
+INSERT IGNORE INTO icp_filing_domain (
+    tenant_id, org_id, project_id, filing_id, domain_profile_id, created_by, updated_by
+) VALUES (?, ?, ?, ?, ?, ?, ?);

@@ -37,10 +37,22 @@ export function parseCSV(input: string): string[][] {
   return rows;
 }
 
+// Leading characters a spreadsheet treats as the start of a formula. Exported
+// rows carry scan-derived text (asset keys, server-side error strings) that an
+// external target controls, so a cell can arrive as "=HYPERLINK(...)" and execute
+// when the analyst opens the file (CWE-1236).
+const formulaPrefixes = '=+-@\t\r';
+
 export function serializeCSV(rows: Array<Array<string | number | undefined>>) {
   return rows
     .map((row) => row.map((value) => {
-      const text = String(value ?? '');
+      // Numbers are formatted as-is so a negative value stays machine-readable;
+      // only text is prefixed.
+      const isText = typeof value !== 'number';
+      let text = String(value ?? '');
+      if (isText && text !== '' && formulaPrefixes.includes(text[0])) {
+        text = `'${text}`;
+      }
       return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
     }).join(','))
     .join('\r\n');

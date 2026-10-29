@@ -42,7 +42,7 @@ describe('operations pages', () => {
         HttpResponse.json({
           request_id: 'req-tickets',
           data: {
-            items: [{ id: 501, title: 'Fix admin panel', status: 'open', assignee: 'bob', risk_count: 2, sla_due_at: '2026-07-10T00:00:00Z', available_actions: ['start_fixing'] }],
+            items: [{ id: 501, title: 'Fix admin panel', status: 'open', assignee: 'bob', priority: 'high', due_at: '2026-07-10T00:00:00Z', available_actions: ['start'] }],
             total: 1,
             page_size: 20,
             page_number: 1
@@ -57,10 +57,12 @@ describe('operations pages', () => {
             title: 'Fix admin panel',
             status: 'open',
             assignee: 'bob',
-            risk_count: 2,
-            available_actions: ['start_fixing'],
-            risks: [{ id: 101, title: 'Public admin panel', severity: 'critical' }],
-            comments: [{ id: 1, actor: 'alice', content: 'created', created_at: '2026-07-08T00:00:00Z' }]
+            priority: 'high',
+            business_unit: 'platform',
+            description: 'Public admin panel',
+            due_at: '2026-07-10T00:00:00Z',
+            available_actions: ['start'],
+            created_at: '2026-07-08T00:00:00Z'
           }
         })
       ),
@@ -74,10 +76,12 @@ describe('operations pages', () => {
             title: 'Fix admin panel',
             status,
             assignee: 'bob',
-            risk_count: 2,
-            available_actions: body.action === 'submit_retest' ? ['resolve'] : ['submit_retest'],
-            risks: [{ id: 101, title: 'Public admin panel', severity: 'critical' }],
-            comments: [{ id: 2, actor: 'alice', content: body.action, created_at: '2026-07-08T01:00:00Z' }]
+            priority: 'high',
+            business_unit: 'platform',
+            description: 'Public admin panel',
+            due_at: '2026-07-10T00:00:00Z',
+            available_actions: body.action === 'submit_retest' ? ['retest_pass'] : ['submit_retest'],
+            created_at: '2026-07-08T00:00:00Z'
           }
         });
       }),
@@ -133,16 +137,18 @@ describe('operations pages', () => {
     await userEvent.click(await screen.findByText('Fix admin panel'));
 
     expect(await screen.findByText('Public admin panel')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'start_fixing' }));
-    expect(await screen.findByText('in_progress')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: '提交复测' }));
-    expect(await screen.findByText('pending_retest')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '开始处理' }));
+    expect((await screen.findAllByText('处理中')).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole('button', { name: /^提交复测$/ }));
+    expect((await screen.findAllByText('待复测')).length).toBeGreaterThan(0);
   });
 
   it('renders report dashboard and creates export task', async () => {
     renderRoute('/reports');
+    // The duplicate summary strip was removed; the metric card is now the only
+    // place the headline figures appear.
     expect(
-      await screen.findByText('风险总量', { selector: '.page-summary-stat .ant-typography-secondary' })
+      await screen.findByText('风险总量', { selector: '.metric-card-label' })
     ).toBeInTheDocument();
     expect(screen.getByTestId('report-chart')).toBeInTheDocument();
     expect(await screen.findByText('risk.csv')).toBeInTheDocument();
@@ -154,13 +160,16 @@ describe('operations pages', () => {
   it('saves SLA and notification settings', async () => {
     renderRoute('/settings');
     expect(await screen.findByText('platform')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '添加 SLA 策略' }));
     await userEvent.click(screen.getByRole('button', { name: '保存 SLA' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '保存 SLA' })).not.toBeInTheDocument());
 
     await userEvent.click(screen.getByRole('tab', { name: '通知规则' }));
     expect(await screen.findByText('Critical risk')).toBeInTheDocument();
-    const panel = screen.getByRole('tabpanel', { name: '通知规则' });
+    await userEvent.click(screen.getByRole('button', { name: '添加通知规则' }));
+    const panel = screen.getByRole('dialog');
     await userEvent.type(within(panel).getByLabelText('名称'), 'SLA due soon');
-    await userEvent.type(within(panel).getByLabelText('收件人'), 'ops@example.com');
+    await userEvent.type(within(panel).getByLabelText('接收地址'), 'https://notify.example.com/hook{enter}');
     await userEvent.click(screen.getByRole('button', { name: '保存通知' }));
 
     await waitFor(() => expect(screen.getByText('Critical risk')).toBeInTheDocument());

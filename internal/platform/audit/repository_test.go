@@ -3,7 +3,9 @@ package audit_test
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -105,6 +107,38 @@ func TestRepoInsertNilJsonFields(t *testing.T) {
 	err := repo.Insert(context.Background(), audit.Event{
 		Action: "login",
 	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A legal near-64-KiB template config is serialized again as a string field in
+// audit snapshots. The resulting escaped document exceeds a MySQL TEXT column;
+// migration 35 widens both the live and archived snapshots to MEDIUMTEXT.
+func TestRepoInsertPreservesLargeEscapedTemplateSnapshots(t *testing.T) {
+	targets := make([]map[string]string, 1000)
+	for i := range targets {
+		targets[i] = map[string]string{"type": "url", "value": fmt.Sprintf("https://service%04d.example.com:443", i)}
+	}
+	config, err := json.Marshal(map[string]any{"targets": targets, "options": map[string]any{"nopoc": true}})
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(config), 65536, "fixture must remain a valid-size task-template config")
+	type templateSnapshot struct {
+		Config string `json:"config"`
+		Token  string `json:"access_token"`
+	}
+	snapshot := templateSnapshot{Config: string(config), Token: "sensitive-fixture-value"}
+	expected, err := json.Marshal(map[string]any{"config": string(config), "access_token": "[REDACTED]"})
+	require.NoError(t, err)
+	require.Greater(t, len(expected), 65535, "fixture must reproduce the TEXT overflow")
+	require.Less(t, len(expected), 16777216, "MEDIUMTEXT must fit the complete snapshot")
+	t.Logf("template config %d bytes becomes a %d-byte audit snapshot", len(config), len(expected))
+
+	mock, repo := newMockRepo(t)
+	args := anyArgs17()
+	// Exact byte matching catches truncation or accidental removal of config.
+	args[12], args[13] = string(expected), string(expected)
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_log")).WithArgs(args...).WillReturnResult(sqlmock.NewResult(1, 1))
+	err = repo.Insert(context.Background(), audit.Event{Action: "discovery.template.update", Before: snapshot, After: snapshot})
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

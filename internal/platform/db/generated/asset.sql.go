@@ -8,6 +8,7 @@ package dbgen
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,59 @@ WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 
 func (q *Queries) CountAssetsByProject(ctx context.Context, projectID uint64) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countAssetsByProject, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countAssetsByProjectFiltered = `-- name: CountAssetsByProjectFiltered :one
+SELECT COUNT(*) FROM asset
+WHERE project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (? = '' OR asset_type = ?)
+  AND (
+      ? = ''
+      OR (? = 'domains' AND asset_type IN ('domain', 'subdomain'))
+      OR (? = 'ips' AND asset_type = 'ip')
+      OR (? = 'web' AND asset_type = 'web')
+      OR (? = 'external' AND asset_type IN ('cloud_resource', 'third_party'))
+  )
+  AND (? = '' OR status = ?)
+  AND (
+      ? = ''
+      OR display_name LIKE CONCAT('%', ?, '%')
+      OR value LIKE CONCAT('%', ?, '%')
+      OR owner LIKE CONCAT('%', ?, '%')
+      OR business_unit LIKE CONCAT('%', ?, '%')
+  )
+`
+
+type CountAssetsByProjectFilteredParams struct {
+	ProjectID uint64      `db:"project_id" json:"project_id"`
+	AssetType string      `db:"asset_type" json:"asset_type"`
+	Category  interface{} `db:"category" json:"category"`
+	Status    string      `db:"status" json:"status"`
+	Keyword   interface{} `db:"keyword" json:"keyword"`
+}
+
+func (q *Queries) CountAssetsByProjectFiltered(ctx context.Context, arg CountAssetsByProjectFilteredParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countAssetsByProjectFiltered,
+		arg.ProjectID,
+		arg.AssetType,
+		arg.AssetType,
+		arg.Category,
+		arg.Category,
+		arg.Category,
+		arg.Category,
+		arg.Category,
+		arg.Status,
+		arg.Status,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -129,6 +183,98 @@ func (q *Queries) GetAssetByKey(ctx context.Context, arg GetAssetByKeyParams) (A
 	return i, err
 }
 
+const getAssetSummary = `-- name: GetAssetSummary :one
+SELECT
+    COUNT(*) AS total,
+    COUNT(CASE WHEN status <> 'ignored' THEN 1 END) AS managed_total,
+    COUNT(CASE WHEN status = 'active' THEN 1 END) AS active,
+    COUNT(CASE WHEN status = 'inactive' THEN 1 END) AS inactive,
+    COUNT(CASE WHEN status = 'ignored' THEN 1 END) AS ignored,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'domain' THEN 1 END) AS domain_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'subdomain' THEN 1 END) AS subdomain_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'ip' THEN 1 END) AS ip_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'port' THEN 1 END) AS port_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'service' THEN 1 END) AS service_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'web' THEN 1 END) AS web_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'certificate' THEN 1 END) AS certificate_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'cloud_resource' THEN 1 END) AS cloud_resource_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'third_party' THEN 1 END) AS third_party_count,
+    COUNT(CASE WHEN status <> 'ignored' AND first_seen >= ? THEN 1 END) AS new_24h,
+    COUNT(CASE WHEN status <> 'ignored' AND last_seen >= ? THEN 1 END) AS observed_24h,
+    COUNT(CASE WHEN status <> 'ignored' AND last_seen < ? THEN 1 END) AS stale_30d,
+    COUNT(CASE WHEN status <> 'ignored' AND owner = '' THEN 1 END) AS unowned,
+    COUNT(CASE WHEN status <> 'ignored' AND business_unit = '' THEN 1 END) AS unassigned_business_unit,
+    COUNT(CASE WHEN status <> 'ignored' AND confidence < ? THEN 1 END) AS low_confidence
+FROM asset
+WHERE project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type GetAssetSummaryParams struct {
+	NewSince           time.Time `db:"new_since" json:"new_since"`
+	ObservedSince      time.Time `db:"observed_since" json:"observed_since"`
+	StaleBefore        time.Time `db:"stale_before" json:"stale_before"`
+	LowConfidenceBelow uint8     `db:"low_confidence_below" json:"low_confidence_below"`
+	ProjectID          uint64    `db:"project_id" json:"project_id"`
+}
+
+type GetAssetSummaryRow struct {
+	Total                  int64 `db:"total" json:"total"`
+	ManagedTotal           int64 `db:"managed_total" json:"managed_total"`
+	Active                 int64 `db:"active" json:"active"`
+	Inactive               int64 `db:"inactive" json:"inactive"`
+	Ignored                int64 `db:"ignored" json:"ignored"`
+	DomainCount            int64 `db:"domain_count" json:"domain_count"`
+	SubdomainCount         int64 `db:"subdomain_count" json:"subdomain_count"`
+	IpCount                int64 `db:"ip_count" json:"ip_count"`
+	PortCount              int64 `db:"port_count" json:"port_count"`
+	ServiceCount           int64 `db:"service_count" json:"service_count"`
+	WebCount               int64 `db:"web_count" json:"web_count"`
+	CertificateCount       int64 `db:"certificate_count" json:"certificate_count"`
+	CloudResourceCount     int64 `db:"cloud_resource_count" json:"cloud_resource_count"`
+	ThirdPartyCount        int64 `db:"third_party_count" json:"third_party_count"`
+	New24h                 int64 `db:"new_24h" json:"new_24h"`
+	Observed24h            int64 `db:"observed_24h" json:"observed_24h"`
+	Stale30d               int64 `db:"stale_30d" json:"stale_30d"`
+	Unowned                int64 `db:"unowned" json:"unowned"`
+	UnassignedBusinessUnit int64 `db:"unassigned_business_unit" json:"unassigned_business_unit"`
+	LowConfidence          int64 `db:"low_confidence" json:"low_confidence"`
+}
+
+func (q *Queries) GetAssetSummary(ctx context.Context, arg GetAssetSummaryParams) (GetAssetSummaryRow, error) {
+	row := q.db.QueryRowContext(ctx, getAssetSummary,
+		arg.NewSince,
+		arg.ObservedSince,
+		arg.StaleBefore,
+		arg.LowConfidenceBelow,
+		arg.ProjectID,
+	)
+	var i GetAssetSummaryRow
+	err := row.Scan(
+		&i.Total,
+		&i.ManagedTotal,
+		&i.Active,
+		&i.Inactive,
+		&i.Ignored,
+		&i.DomainCount,
+		&i.SubdomainCount,
+		&i.IpCount,
+		&i.PortCount,
+		&i.ServiceCount,
+		&i.WebCount,
+		&i.CertificateCount,
+		&i.CloudResourceCount,
+		&i.ThirdPartyCount,
+		&i.New24h,
+		&i.Observed24h,
+		&i.Stale30d,
+		&i.Unowned,
+		&i.UnassignedBusinessUnit,
+		&i.LowConfidence,
+	)
+	return i, err
+}
+
 const listAssetsByProject = `-- name: ListAssetsByProject :many
 SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
@@ -144,6 +290,175 @@ type ListAssetsByProjectParams struct {
 
 func (q *Queries) ListAssetsByProject(ctx context.Context, arg ListAssetsByProjectParams) ([]Asset, error) {
 	rows, err := q.db.QueryContext(ctx, listAssetsByProject, arg.ProjectID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Asset{}
+	for rows.Next() {
+		var i Asset
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.AssetType,
+			&i.AssetKey,
+			&i.DisplayName,
+			&i.Value,
+			&i.Source,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.Confidence,
+			&i.Status,
+			&i.FirstSeen,
+			&i.LastSeen,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+			&i.MissCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAssetsByProjectFiltered = `-- name: ListAssetsByProjectFiltered :many
+SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset
+WHERE project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (? = '' OR asset_type = ?)
+  AND (
+      ? = ''
+      OR (? = 'domains' AND asset_type IN ('domain', 'subdomain'))
+      OR (? = 'ips' AND asset_type = 'ip')
+      OR (? = 'web' AND asset_type = 'web')
+      OR (? = 'external' AND asset_type IN ('cloud_resource', 'third_party'))
+  )
+  AND (? = '' OR status = ?)
+  AND (
+      ? = ''
+      OR display_name LIKE CONCAT('%', ?, '%')
+      OR value LIKE CONCAT('%', ?, '%')
+      OR owner LIKE CONCAT('%', ?, '%')
+      OR business_unit LIKE CONCAT('%', ?, '%')
+  )
+ORDER BY id
+LIMIT ? OFFSET ?
+`
+
+type ListAssetsByProjectFilteredParams struct {
+	ProjectID uint64      `db:"project_id" json:"project_id"`
+	AssetType string      `db:"asset_type" json:"asset_type"`
+	Category  interface{} `db:"category" json:"category"`
+	Status    string      `db:"status" json:"status"`
+	Keyword   interface{} `db:"keyword" json:"keyword"`
+	Limit     int32       `db:"limit" json:"limit"`
+	Offset    int32       `db:"offset" json:"offset"`
+}
+
+// Filtered variants. The API accepted asset_type/status/keyword and ignored them,
+// so the console could only narrow the rows already on screen. An empty argument
+// means "no filter" so one query serves every combination.
+func (q *Queries) ListAssetsByProjectFiltered(ctx context.Context, arg ListAssetsByProjectFilteredParams) ([]Asset, error) {
+	rows, err := q.db.QueryContext(ctx, listAssetsByProjectFiltered,
+		arg.ProjectID,
+		arg.AssetType,
+		arg.AssetType,
+		arg.Category,
+		arg.Category,
+		arg.Category,
+		arg.Category,
+		arg.Category,
+		arg.Status,
+		arg.Status,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Asset{}
+	for rows.Next() {
+		var i Asset
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.AssetType,
+			&i.AssetKey,
+			&i.DisplayName,
+			&i.Value,
+			&i.Source,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.Confidence,
+			&i.Status,
+			&i.FirstSeen,
+			&i.LastSeen,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+			&i.MissCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAssetsByProjectIDs = `-- name: ListAssetsByProjectIDs :many
+SELECT id, tenant_id, org_id, project_id, asset_type, asset_key, display_name, value, source, owner, business_unit, confidence, status, first_seen, last_seen, created_at, updated_at, created_by, updated_by, deleted_at, miss_count FROM asset
+WHERE project_id = ?
+  AND id IN (/*SLICE:ids*/?)
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id
+`
+
+type ListAssetsByProjectIDsParams struct {
+	ProjectID uint64   `db:"project_id" json:"project_id"`
+	Ids       []uint64 `db:"ids" json:"ids"`
+}
+
+func (q *Queries) ListAssetsByProjectIDs(ctx context.Context, arg ListAssetsByProjectIDsParams) ([]Asset, error) {
+	query := listAssetsByProjectIDs
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ProjectID)
+	if len(arg.Ids) > 0 {
+		for _, v := range arg.Ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(arg.Ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
 	if err != nil {
 		return nil, err
 	}

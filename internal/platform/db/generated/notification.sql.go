@@ -8,7 +8,6 @@ package dbgen
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"time"
 )
 
@@ -24,18 +23,18 @@ INSERT INTO notification_rule (
 `
 
 type CreateNotificationRuleParams struct {
-	TenantID       string          `db:"tenant_id" json:"tenant_id"`
-	OrgID          string          `db:"org_id" json:"org_id"`
-	ProjectID      uint64          `db:"project_id" json:"project_id"`
-	Name           string          `db:"name" json:"name"`
-	TriggerName    string          `db:"trigger_name" json:"trigger_name"`
-	ConditionJson  json.RawMessage `db:"condition_json" json:"condition_json"`
-	Channel        string          `db:"channel" json:"channel"`
-	RecipientsJson json.RawMessage `db:"recipients_json" json:"recipients_json"`
-	ThrottleWindow uint32          `db:"throttle_window" json:"throttle_window"`
-	Enabled        bool            `db:"enabled" json:"enabled"`
-	CreatedBy      string          `db:"created_by" json:"created_by"`
-	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
+	TenantID       string `db:"tenant_id" json:"tenant_id"`
+	OrgID          string `db:"org_id" json:"org_id"`
+	ProjectID      uint64 `db:"project_id" json:"project_id"`
+	Name           string `db:"name" json:"name"`
+	TriggerName    string `db:"trigger_name" json:"trigger_name"`
+	ConditionJson  []byte `db:"condition_json" json:"condition_json"`
+	Channel        string `db:"channel" json:"channel"`
+	RecipientsJson []byte `db:"recipients_json" json:"recipients_json"`
+	ThrottleWindow uint32 `db:"throttle_window" json:"throttle_window"`
+	Enabled        bool   `db:"enabled" json:"enabled"`
+	CreatedBy      string `db:"created_by" json:"created_by"`
+	UpdatedBy      string `db:"updated_by" json:"updated_by"`
 }
 
 // sqlc queries for notification rules and delivery ledger.
@@ -101,18 +100,18 @@ INSERT INTO notification_delivery (
 `
 
 type InsertNotificationDeliveryParams struct {
-	TenantID    string          `db:"tenant_id" json:"tenant_id"`
-	OrgID       string          `db:"org_id" json:"org_id"`
-	ProjectID   uint64          `db:"project_id" json:"project_id"`
-	RuleID      uint64          `db:"rule_id" json:"rule_id"`
-	TriggerName string          `db:"trigger_name" json:"trigger_name"`
-	Channel     string          `db:"channel" json:"channel"`
-	ThrottleKey string          `db:"throttle_key" json:"throttle_key"`
-	DedupeKey   string          `db:"dedupe_key" json:"dedupe_key"`
-	Status      string          `db:"status" json:"status"`
-	Subject     string          `db:"subject" json:"subject"`
-	PayloadJson json.RawMessage `db:"payload_json" json:"payload_json"`
-	SentAt      time.Time       `db:"sent_at" json:"sent_at"`
+	TenantID    string    `db:"tenant_id" json:"tenant_id"`
+	OrgID       string    `db:"org_id" json:"org_id"`
+	ProjectID   uint64    `db:"project_id" json:"project_id"`
+	RuleID      uint64    `db:"rule_id" json:"rule_id"`
+	TriggerName string    `db:"trigger_name" json:"trigger_name"`
+	Channel     string    `db:"channel" json:"channel"`
+	ThrottleKey string    `db:"throttle_key" json:"throttle_key"`
+	DedupeKey   string    `db:"dedupe_key" json:"dedupe_key"`
+	Status      string    `db:"status" json:"status"`
+	Subject     string    `db:"subject" json:"subject"`
+	PayloadJson []byte    `db:"payload_json" json:"payload_json"`
+	SentAt      time.Time `db:"sent_at" json:"sent_at"`
 }
 
 func (q *Queries) InsertNotificationDelivery(ctx context.Context, arg InsertNotificationDeliveryParams) (sql.Result, error) {

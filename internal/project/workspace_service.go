@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strings"
@@ -25,10 +26,12 @@ const (
 	ActionProjectCreate        = "project.create"
 	ActionProjectUpdate        = "project.update"
 	ActionProjectTransition    = "project.transition"
+	ActionProjectDelete        = "project.delete"
 	ActionSubjectCreate        = "project.subject.create"
 	ActionSubjectUpdate        = "project.subject.update"
 	ActionDomainSave           = "project.domain.save"
 	ActionDomainUpdate         = "project.domain.update"
+	ActionDomainVerify         = "project.domain.verify"
 	ActionICPCreate            = "project.icp.create"
 	ActionICPUpdate            = "project.icp.update"
 	ResourceTypeProject        = "project"
@@ -40,13 +43,24 @@ const (
 
 // Project workspace service errors.
 var (
-	ErrWorkspaceUnavailable = errors.New("project: workspace repository unavailable")
-	ErrInvalidInput         = errors.New("project: invalid input")
-	ErrInvalidStatus        = errors.New("project: invalid status transition")
-	ErrNotReady             = errors.New("project: not ready to activate")
-	ErrCrossTenantOwner     = errors.New("project: owner is outside tenant or organization")
-	ErrInvalidRootDomain    = errors.New("project: invalid registrable root domain")
-	ErrInvalidProfile       = errors.New("project: invalid profile")
+	ErrWorkspaceUnavailable  = errors.New("project: workspace repository unavailable")
+	ErrInvalidInput          = errors.New("project: invalid input")
+	ErrInvalidStatus         = errors.New("project: invalid status transition")
+	ErrDeleteRequiresArchive = errors.New("project: project must be archived before deletion")
+	ErrProjectHasActiveJobs  = errors.New("project: active discovery jobs must finish before deletion")
+	ErrDeleteConfirmation    = errors.New("project: delete confirmation does not match project name")
+	ErrNotReady              = errors.New("project: not ready to activate")
+	ErrCrossTenantOwner      = errors.New("project: owner is outside tenant or organization")
+	ErrInvalidRootDomain     = errors.New("project: invalid managed domain")
+	ErrInvalidProfile        = errors.New("project: invalid profile")
+	// ErrOwnershipNotSelfAssertable rejects a caller-supplied "verified" ownership.
+	ErrOwnershipNotSelfAssertable = errors.New("project: ownership must be proven by a verification challenge")
+	// ErrOwnershipChallengeFailed marks a challenge whose expected TXT record was
+	// not found at the domain.
+	ErrOwnershipChallengeFailed = errors.New("project: ownership challenge not satisfied")
+	// ErrOwnershipVerificationUnavailable marks a deployment with no challenge
+	// secret configured; verification fails closed rather than accepting anything.
+	ErrOwnershipVerificationUnavailable = errors.New("project: ownership verification is not configured")
 )
 
 var projectCodePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -270,6 +284,48 @@ func (s *Service) TransitionProject(ctx context.Context, in TransitionProjectInp
 	return s.repo.GetByID(ctx, in.ProjectID)
 }
 
+// DeleteProject soft-deletes an archived project after verifying that no
+// discovery work is still in flight. Child records remain available for
+// retention and audit purposes but are unreachable through the live project
+// access boundary.
+func (s *Service) DeleteProject(ctx context.Context, in DeleteProjectInput) error {
+	before, err := s.repo.GetByID(ctx, in.ProjectID)
+	if err != nil {
+		return err
+	}
+	in.Confirmation = strings.TrimSpace(in.Confirmation)
+	in.Reason = strings.TrimSpace(in.Reason)
+	if in.Confirmation != before.Name {
+		return ErrDeleteConfirmation
+	}
+	if in.Reason == "" || len(in.Reason) > 512 {
+		return ErrInvalidInput
+	}
+	if before.Status != StatusArchived {
+		return ErrDeleteRequiresArchive
+	}
+
+	return s.runWorkspaceTx(ctx, func(ctx context.Context, _ Repository, ws WorkspaceRepository, sink auditRecorder) error {
+		activeRuns, err := ws.CountActiveTaskRuns(ctx, in.ProjectID)
+		if err != nil {
+			return err
+		}
+		if activeRuns > 0 {
+			return ErrProjectHasActiveJobs
+		}
+		deleted, err := ws.SoftDeleteProject(ctx, in.ProjectID, in.ActorID)
+		if err != nil {
+			return err
+		}
+		if !deleted {
+			return ErrDeleteRequiresArchive
+		}
+		return recordProjectAudit(ctx, sink, before, in.ActorID, ActionProjectDelete, ResourceTypeProject,
+			fmt.Sprint(in.ProjectID), before, map[string]any{"deleted": true, "status": before.Status},
+			in.Meta, map[string]any{"reason": in.Reason})
+	})
+}
+
 // OnboardingStatus evaluates the activation prerequisites for a project.
 func (s *Service) OnboardingStatus(ctx context.Context, projectID uint64) (OnboardingStatus, error) {
 	counts, err := s.workspace.OnboardingCounts(ctx, projectID)
@@ -365,13 +421,14 @@ func (s *Service) ListSubjects(ctx context.Context, projectID uint64) ([]*Subjec
 	return s.workspace.ListSubjects(ctx, projectID)
 }
 
-// CreateDomain materializes a root domain asset and saves its project profile.
+// CreateDomain materializes a registrable root or delegated subdomain asset and
+// saves its project profile. Scan authorization remains a separate boundary.
 func (s *Service) CreateDomain(ctx context.Context, in DomainInput) (*DomainProfile, error) {
 	p, err := s.repo.GetByID(ctx, in.ProjectID)
 	if err != nil {
 		return nil, err
 	}
-	domain, err := normalizeRootDomain(in.Domain)
+	domain, assetType, err := normalizeManagedDomain(in.Domain)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +444,7 @@ func (s *Service) CreateDomain(ctx context.Context, in DomainInput) (*DomainProf
 	var assetID uint64
 	err = s.runWorkspaceTx(ctx, func(ctx context.Context, _ Repository, ws WorkspaceRepository, sink auditRecorder) error {
 		var err error
-		assetID, err = ws.UpsertRootDomainAsset(ctx, p, domain, in.ActorID)
+		assetID, err = ws.UpsertManagedDomainAsset(ctx, p, domain, assetType, in.ActorID)
 		if err != nil {
 			return err
 		}
@@ -404,6 +461,65 @@ func (s *Service) CreateDomain(ctx context.Context, in DomainInput) (*DomainProf
 		return nil, err
 	}
 	return s.workspace.GetDomainProfileByAsset(ctx, in.ProjectID, assetID)
+}
+
+// DomainOwnershipChallenge returns the DNS record an operator must publish to
+// prove control of a project domain.
+func (s *Service) DomainOwnershipChallenge(ctx context.Context, projectID, domainProfileID uint64) (OwnershipChallenge, error) {
+	if len(s.ownershipSecret) == 0 {
+		return OwnershipChallenge{}, ErrOwnershipVerificationUnavailable
+	}
+	profile, err := s.workspace.GetDomainProfile(ctx, projectID, domainProfileID)
+	if err != nil {
+		return OwnershipChallenge{}, err
+	}
+	return BuildOwnershipChallenge(s.ownershipSecret, projectID, profile.Domain), nil
+}
+
+// VerifyDomainOwnership resolves the challenge record and, only if the expected
+// token is present, marks the profile verified.
+//
+// This is the sole path to the "verified" status: the write API refuses it, so a
+// domain is verified because the platform checked DNS, never because someone
+// said so.
+func (s *Service) VerifyDomainOwnership(ctx context.Context, in DomainInput) (*DomainProfile, error) {
+	if len(s.ownershipSecret) == 0 || s.txtResolver == nil {
+		return nil, ErrOwnershipVerificationUnavailable
+	}
+	p, err := s.repo.GetByID(ctx, in.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	before, err := s.workspace.GetDomainProfile(ctx, in.ProjectID, in.DomainProfileID)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckOwnershipTXT(ctx, s.txtResolver, s.ownershipSecret, in.ProjectID, before.Domain); err != nil {
+		return nil, err
+	}
+
+	verified := DomainInput{
+		ProjectID: in.ProjectID, DomainProfileID: in.DomainProfileID, Domain: before.Domain,
+		SubjectID: before.SubjectID, IsPrimary: before.IsPrimary,
+		OwnershipStatus: VerificationVerified, Source: "dns_txt_challenge",
+		EvidenceSummary: "TXT " + ownershipTXTPrefix + "." + before.Domain + " matched the issued token",
+		ActorID:         in.ActorID, Meta: in.Meta,
+	}
+	err = s.runWorkspaceTx(ctx, func(ctx context.Context, _ Repository, ws WorkspaceRepository, sink auditRecorder) error {
+		if err := ws.UpdateDomainProfile(ctx, verified); err != nil {
+			return err
+		}
+		after, err := ws.GetDomainProfile(ctx, in.ProjectID, in.DomainProfileID)
+		if err != nil {
+			return err
+		}
+		return recordProjectAudit(ctx, sink, p, in.ActorID, ActionDomainVerify, ResourceTypeDomain,
+			fmt.Sprint(in.DomainProfileID), before, after, in.Meta, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.workspace.GetDomainProfile(ctx, in.ProjectID, in.DomainProfileID)
 }
 
 // UpdateDomain updates mutable domain profile metadata without changing the asset fact.
@@ -594,25 +710,32 @@ func normalizeSubject(in *SubjectInput) (string, error) {
 	return in.SubjectType + ":" + keyPart, nil
 }
 
-func normalizeRootDomain(raw string) (string, error) {
+func normalizeManagedDomain(raw string) (string, string, error) {
 	raw = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
 	if raw == "" || len(raw) > 253 || strings.ContainsAny(raw, "/:*") {
-		return "", ErrInvalidRootDomain
+		return "", "", ErrInvalidRootDomain
 	}
 	ascii, err := idna.Lookup.ToASCII(raw)
 	if err != nil {
-		return "", ErrInvalidRootDomain
+		return "", "", ErrInvalidRootDomain
+	}
+	if net.ParseIP(ascii) != nil {
+		return "", "", ErrInvalidRootDomain
 	}
 	registrable, err := publicsuffix.EffectiveTLDPlusOne(ascii)
-	if err != nil || registrable != ascii {
-		return "", ErrInvalidRootDomain
+	if err != nil {
+		return "", "", ErrInvalidRootDomain
 	}
 	for _, r := range ascii {
 		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return "", ErrInvalidRootDomain
+			return "", "", ErrInvalidRootDomain
 		}
 	}
-	return ascii, nil
+	assetType := "domain"
+	if registrable != ascii {
+		assetType = "subdomain"
+	}
+	return ascii, assetType, nil
 }
 
 func normalizeDomainInput(in *DomainInput) error {
@@ -622,6 +745,15 @@ func normalizeDomainInput(in *DomainInput) error {
 	if (in.OwnershipStatus != VerificationUnverified && in.OwnershipStatus != VerificationVerified && in.OwnershipStatus != VerificationMismatch) ||
 		len(in.Source) > 64 || len(in.EvidenceSummary) > 1024 {
 		return ErrInvalidProfile
+	}
+	// "verified" is a claim about the outside world, so it cannot be asserted by
+	// the caller — it is the one status only a completed DNS challenge may set
+	// (see VerifyDomainOwnership). Accepting it from the request body made
+	// ownership self-declared, which is no evidence at all: a project owner could
+	// mark any domain verified and, once active scanning is enabled, that is the
+	// only thing standing between the platform and scanning someone else's estate.
+	if in.OwnershipStatus == VerificationVerified {
+		return ErrOwnershipNotSelfAssertable
 	}
 	return nil
 }

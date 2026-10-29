@@ -189,12 +189,22 @@ func (s *Service) CountExports(ctx context.Context, projectID uint64) (int64, er
 }
 
 func (s *Service) ProcessNextExport(ctx context.Context) (*ExportJob, error) {
-	job, err := s.repo.ClaimPendingExport(ctx)
-	if err != nil {
-		return nil, err
-	}
-	now := s.now()
-	if err := s.repo.MarkExportRunning(ctx, job.ProjectID, job.ID, now); err != nil {
+	// Claiming and marking the job running must share one transaction. Previously
+	// both ran on the pool in autocommit, so the SELECT ... FOR UPDATE lock was
+	// released immediately and two workers could claim the same export; the loser
+	// only discovered it at MarkExportRunning and surfaced a misleading not-found.
+	var job *ExportJob
+	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository) error {
+		claimed, err := repo.ClaimPendingExport(ctx)
+		if err != nil {
+			return err
+		}
+		if err := repo.MarkExportRunning(ctx, claimed.ProjectID, claimed.ID, s.now()); err != nil {
+			return err
+		}
+		job = claimed
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	path, rows, err := s.writeExport(ctx, job)
@@ -404,9 +414,31 @@ func projectRow(row map[string]any, fields []string, redacted bool) map[string]a
 func projectCSV(row map[string]any, fields []string, redacted bool) []string {
 	out := make([]string, 0, len(fields))
 	for _, field := range fields {
-		out = append(out, fmt.Sprint(redactedValue(field, row[field], redacted)))
+		value := redactedValue(field, row[field], redacted)
+		out = append(out, sanitizeCSVCell(value))
 	}
 	return out
+}
+
+// csvFormulaPrefixes are the leading bytes a spreadsheet treats as the start of
+// a formula. ASM exports carry scan-derived text (subdomains, HTTP titles,
+// certificate subjects) that an external target controls, so a cell may arrive
+// as "=HYPERLINK(...)" and execute when an analyst opens the file.
+const csvFormulaPrefixes = "=+-@\t\r"
+
+// sanitizeCSVCell renders one export cell, neutralising spreadsheet formula
+// injection (CWE-1236). Only string values are prefixed: numeric and time
+// columns are formatted by fmt and stay machine-readable, so a negative score
+// like -3 is never quoted.
+func sanitizeCSVCell(value any) string {
+	s, ok := value.(string)
+	if !ok {
+		return fmt.Sprint(value)
+	}
+	if s != "" && strings.ContainsRune(csvFormulaPrefixes, rune(s[0])) {
+		return "'" + s
+	}
+	return s
 }
 
 func redactedValue(field string, value any, redacted bool) any {

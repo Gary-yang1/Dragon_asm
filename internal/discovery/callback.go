@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/Gary-yang1/Dragon_asm/internal/webview"
 	"io"
 	"strconv"
 	"strings"
@@ -35,10 +36,16 @@ const (
 	callbackMaxSkew         = 5 * time.Minute
 	callbackMaxBodyBytes    = 4 << 20
 	callbackMaxAssets       = 1000
+	callbackMaxOrgs         = 500
+	callbackMaxFilings      = 500
+	callbackMaxFilingDomain = 50
+	callbackMaxCompanyName  = 255
+	callbackMaxFilingNo     = 128
 	callbackMaxRelations    = 1000
 	callbackMaxExposures    = 1000
 	callbackMaxFacts        = 2000
 	callbackMaxProviderErrs = 100
+	callbackMaxSeq          = 10000
 	callbackMaxRefLen       = 512
 	callbackMaxSourceLen    = 64
 	callbackMaxAssetValue   = 2048
@@ -53,18 +60,45 @@ type CallbackEnqueuer interface {
 }
 
 type callbackPayload struct {
-	SchemaVersion  string                  `json:"schema_version"`
-	RunID          uint64                  `json:"run_id"`
-	Seq            uint64                  `json:"seq"`
-	Phase          string                  `json:"phase"`
-	Status         string                  `json:"status"`
-	ResultCount    uint64                  `json:"result_count"`
-	ObservedAt     time.Time               `json:"observed_at"`
-	Assets         []callbackAssetV1       `json:"assets"`
-	Relations      []callbackRelation      `json:"relations"`
-	Exposures      []callbackExposureV1    `json:"exposures"`
+	StageProgress *StageProgress       `json:"stage_progress,omitempty"`
+	SchemaVersion string               `json:"schema_version"`
+	RunID         uint64               `json:"run_id"`
+	Seq           uint64               `json:"seq"`
+	Phase         string               `json:"phase"`
+	Status        string               `json:"status"`
+	ResultCount   uint64               `json:"result_count"`
+	ObservedAt    time.Time            `json:"observed_at"`
+	Assets        []callbackAssetV1    `json:"assets"`
+	Relations     []callbackRelation   `json:"relations"`
+	Exposures     []callbackExposureV1 `json:"exposures"`
+	// Organizations and Filings are optional: an engine that does not collect
+	// enterprise data omits them entirely, so nil here is valid where nil for
+	// the other arrays is not.
+	Organizations  []callbackOrganization  `json:"organizations"`
+	Filings        []callbackFiling        `json:"filings"`
 	ProviderErrors []callbackProviderError `json:"provider_errors"`
 	ErrorSummary   string                  `json:"error_summary"`
+}
+
+// callbackOrganization is one legal entity reported by enterprise collection.
+type callbackOrganization struct {
+	callbackFactMeta
+	Name             string                `json:"name"`
+	SubjectType      string                `json:"subject_type"`
+	RegistrationCode string                `json:"registration_code"`
+	Parent           callbackFactReference `json:"parent"`
+	EquityRatio      float64               `json:"equity_ratio"`
+	Relation         string                `json:"relation"`
+}
+
+// callbackFiling is one ICP filing and the domains it covers.
+type callbackFiling struct {
+	callbackFactMeta
+	Organization callbackFactReference `json:"organization"`
+	FilingNo     string                `json:"filing_no"`
+	FilingType   string                `json:"filing_type"`
+	WebsiteName  string                `json:"website_name"`
+	Domains      []string              `json:"domains"`
 }
 
 type callbackFactMeta struct {
@@ -100,9 +134,11 @@ type callbackRelation struct {
 }
 
 type callbackExposureV1 struct {
+	Web *webview.Observation `json:"web_observation,omitempty"`
 	callbackFactMeta
 	Parent       callbackFactReference `json:"parent"`
 	ExposureType string                `json:"exposure_type"`
+	Name         string                `json:"name,omitempty"`
 	Value        string                `json:"value"`
 	Protocol     string                `json:"protocol"`
 	Port         uint32                `json:"port"`
@@ -128,14 +164,19 @@ func (s *Service) RecoverPendingCallbacks(ctx context.Context, limit int32) (int
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	items, err := s.repo.ListPendingDiscoveryCallbacks(ctx, limit)
+	// Identifiers only: the queue payload is {project_id, run_id, seq}, so reading
+	// the stored payloads here loaded up to 100 rows of 4 MiB (~400 MB) into the
+	// worker on every 30s tick for nothing.
+	refs, err := s.repo.ListPendingDiscoveryCallbackRefs(ctx, limit)
 	if err != nil {
 		return 0, err
 	}
 	recovered := 0
 	var recoveryErrors []error
-	for _, item := range items {
-		if err := s.enqueueStoredCallback(ctx, item); err != nil {
+	for _, ref := range refs {
+		if err := s.enqueueStoredCallback(ctx, &DiscoveryCallback{
+			ProjectID: ref.ProjectID, RunID: ref.RunID, Seq: ref.Seq,
+		}); err != nil {
 			recoveryErrors = append(recoveryErrors, err)
 			continue
 		}
@@ -145,7 +186,10 @@ func (s *Service) RecoverPendingCallbacks(ctx context.Context, limit int32) (int
 }
 
 func (s *Service) HandleCallback(ctx context.Context, in HandleCallbackInput) (HandleCallbackResult, error) {
-	if in.ProjectID == 0 || in.RunID == 0 || in.Seq == 0 || len(in.RawBody) == 0 {
+	// seq is bounded as well as non-zero: it indexes the run's inbox, and an
+	// unbounded value both inflates the table and (before finalisation was made
+	// tolerant) could hold a run open. No real run produces this many callbacks.
+	if in.ProjectID == 0 || in.RunID == 0 || in.Seq == 0 || in.Seq > callbackMaxSeq || len(in.RawBody) == 0 {
 		return HandleCallbackResult{}, s.recordCallbackReject(ctx, in, ErrInvalidCallbackPayload, nil)
 	}
 	if len(in.RawBody) > callbackMaxBodyBytes {
@@ -372,6 +416,9 @@ func parseCallbackPayload(raw []byte) (callbackPayload, error) {
 }
 
 func validateCallbackPayload(payload callbackPayload) error {
+	if payload.StageProgress != nil && !validStageProgress(*payload.StageProgress) {
+		return ErrInvalidCallbackPayload
+	}
 	if payload.RunID == 0 || payload.Seq == 0 || payload.ObservedAt.IsZero() || len(payload.ErrorSummary) > callbackMaxErrorLen ||
 		payload.Assets == nil || payload.Relations == nil || payload.Exposures == nil || payload.ProviderErrors == nil {
 		return ErrInvalidCallbackPayload
@@ -393,10 +440,15 @@ func validateCallbackPayload(payload callbackPayload) error {
 		return ErrInvalidCallbackPayload
 	}
 	if len(payload.Assets) > callbackMaxAssets || len(payload.Relations) > callbackMaxRelations ||
-		len(payload.Exposures) > callbackMaxExposures || len(payload.ProviderErrors) > callbackMaxProviderErrs {
+		len(payload.Exposures) > callbackMaxExposures || len(payload.ProviderErrors) > callbackMaxProviderErrs ||
+		len(payload.Organizations) > callbackMaxOrgs || len(payload.Filings) > callbackMaxFilings {
 		return ErrInvalidCallbackPayload
 	}
-	factCount := len(payload.Assets) + len(payload.Relations) + len(payload.Exposures)
+	if err := validateCallbackOrgFacts(payload); err != nil {
+		return err
+	}
+	factCount := len(payload.Assets) + len(payload.Relations) + len(payload.Exposures) +
+		len(payload.Organizations) + len(payload.Filings)
 	if factCount > callbackMaxFacts || payload.ResultCount != uint64(factCount) {
 		return ErrInvalidCallbackPayload
 	}
@@ -420,7 +472,7 @@ func validateCallbackPayload(payload callbackPayload) error {
 	for _, item := range payload.Exposures {
 		if !validCallbackMeta(item.callbackFactMeta) || !validFactReference(item.Parent) ||
 			!validExposureType(item.ExposureType) || len(strings.TrimSpace(item.Value)) == 0 || len(item.Value) > callbackMaxValueLen ||
-			len(item.Protocol) > 16 || item.Port > 65535 || len(item.Service) > 128 || len(item.Version) > 128 ||
+			len(item.Name) > 255 || len(item.Protocol) > 16 || item.Port > 65535 || len(item.Service) > 128 || len(item.Version) > 128 ||
 			len(item.URL) > 2048 || len(item.Fingerprint) > 512 {
 			return ErrInvalidCallbackPayload
 		}
@@ -506,4 +558,38 @@ func validExposureType(value string) bool {
 func callbackPayloadHash(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// validSubjectTypes mirrors the project_subject CHECK constraint. Rejecting an
+// unknown value here turns a would-be database error into a clear protocol
+// error, and stops one bad fact from failing the whole ingest transaction.
+var validSubjectTypes = map[string]bool{
+	"company": true, "government": true, "institution": true, "individual": true, "other": true,
+}
+
+func validateCallbackOrgFacts(payload callbackPayload) error {
+	for _, item := range payload.Organizations {
+		name := strings.TrimSpace(item.Name)
+		if !validCallbackMeta(item.callbackFactMeta) || name == "" || len(item.Name) > callbackMaxCompanyName ||
+			!validSubjectTypes[item.SubjectType] || len(item.RegistrationCode) > 64 ||
+			item.EquityRatio < 0 || item.EquityRatio > 100 ||
+			len(item.Parent.ClientRef) > callbackMaxRefLen || len(item.Parent.NaturalKey) > callbackMaxRefLen {
+			return ErrInvalidCallbackPayload
+		}
+	}
+	for _, item := range payload.Filings {
+		filingNo := strings.TrimSpace(item.FilingNo)
+		if !validCallbackMeta(item.callbackFactMeta) || filingNo == "" || len(item.FilingNo) > callbackMaxFilingNo ||
+			(item.FilingType != "filing" && item.FilingType != "license") ||
+			len(item.WebsiteName) > 255 || len(item.Domains) > callbackMaxFilingDomain ||
+			len(item.Organization.ClientRef) > callbackMaxRefLen || len(item.Organization.NaturalKey) > callbackMaxRefLen {
+			return ErrInvalidCallbackPayload
+		}
+		for _, domain := range item.Domains {
+			if len(strings.TrimSpace(domain)) == 0 || len(domain) > callbackMaxAssetValue {
+				return ErrInvalidCallbackPayload
+			}
+		}
+	}
+	return nil
 }

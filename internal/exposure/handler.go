@@ -130,12 +130,12 @@ func (h *Handler) list(c *gin.Context) {
 	}
 	rows, err := h.svc.List(c.Request.Context(), pid, limit, int32(offset)) //nolint:gosec // G115: guarded above.
 	if err != nil {
-		httpx.Internal(c)
+		httpx.InternalError(c, err)
 		return
 	}
 	total, err := h.svc.Count(c.Request.Context(), pid)
 	if err != nil {
-		httpx.Internal(c)
+		httpx.InternalError(c, err)
 		return
 	}
 	items := make([]response, 0, len(rows))

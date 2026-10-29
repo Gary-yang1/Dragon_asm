@@ -34,8 +34,8 @@ export function WorkItemsPage() {
 
   return (
     <section className="page-surface">
+      <PageHeader title="我的待办" subtitle="从可访问项目进入风险研判与工单处置" />
       <StateView loading={loading} error={error} empty={!loading && projects.length === 0} emptyText="尚未分配可处理项目" onRetry={load}>
-        <PageHeader title="我的待办" subtitle="从可访问项目进入风险研判与工单处置" />
         {summary ? <div className="metric-grid metric-grid--4">
           <StatCard label="开放风险" value={summary.risks.open} icon={<ShieldAlert size={18} />} tone={summary.risks.open ? 'high' : 'good'} />
           <StatCard label="高危风险" value={summary.risks.critical_high} icon={<TimerReset size={18} />} tone={summary.risks.critical_high ? 'critical' : 'good'} />

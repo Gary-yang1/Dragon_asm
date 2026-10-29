@@ -37,6 +37,7 @@ func (h *Handler) RegisterRoutes(protected *gin.RouterGroup) {
 	project.Use(auth.ProjectIDFromParam("project_id"))
 	project.GET("", h.detail)
 	project.PATCH("", h.update)
+	project.DELETE("", h.delete)
 	project.POST("/transitions", h.transition)
 	project.GET("/onboarding-status", h.onboardingStatus)
 	project.GET("/capabilities", h.capabilities)
@@ -48,6 +49,10 @@ func (h *Handler) RegisterRoutes(protected *gin.RouterGroup) {
 	project.GET("/domains", h.listDomains)
 	project.POST("/domains", h.createDomain)
 	project.PATCH("/domains/:id", h.updateDomain)
+	// Ownership is proven, not declared: GET issues the challenge record, POST
+	// resolves it and is the only path that can mark a domain verified.
+	project.GET("/domains/:id/ownership-challenge", h.domainOwnershipChallenge)
+	project.POST("/domains/:id/ownership-verifications", h.verifyDomainOwnership)
 
 	project.GET("/icp-filings", h.listICPs)
 	project.POST("/icp-filings", h.createICP)
@@ -102,6 +107,11 @@ type updateProjectRequest struct {
 type transitionRequest struct {
 	Status string `json:"status" binding:"required,oneof=active suspended archived"`
 	Reason string `json:"reason" binding:"omitempty,max=512"`
+}
+
+type deleteProjectRequest struct {
+	Confirmation string `json:"confirmation" binding:"required,max=255"`
+	Reason       string `json:"reason" binding:"required,max=512"`
 }
 
 type subjectRequest struct {
@@ -257,6 +267,26 @@ func (h *Handler) transition(c *gin.Context) {
 	httpx.OK(c, projectDTO(p))
 }
 
+func (h *Handler) delete(c *gin.Context) {
+	p, _, ok := h.access(c, asmcasbin.PermProjectDelete)
+	if !ok {
+		return
+	}
+	var req deleteProjectRequest
+	if c.ShouldBindJSON(&req) != nil {
+		httpx.BadRequest(c, "invalid project deletion request")
+		return
+	}
+	if err := h.svc.DeleteProject(c.Request.Context(), DeleteProjectInput{
+		ProjectID: p.ID, Confirmation: req.Confirmation, Reason: req.Reason,
+		ActorID: c.GetString(auth.CtxUserID), Meta: handlerMeta(c),
+	}); err != nil {
+		writeProjectErr(c, err)
+		return
+	}
+	httpx.NoContent(c)
+}
+
 func (h *Handler) onboardingStatus(c *gin.Context) {
 	p, _, ok := h.access(c, asmcasbin.PermProjectRead)
 	if !ok {
@@ -374,6 +404,43 @@ func (h *Handler) createDomain(c *gin.Context) {
 		return
 	}
 	httpx.Created(c, item)
+}
+
+func (h *Handler) domainOwnershipChallenge(c *gin.Context) {
+	p, _, ok := h.access(c, asmcasbin.PermProjectRead)
+	if !ok {
+		return
+	}
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	challenge, err := h.svc.DomainOwnershipChallenge(c.Request.Context(), p.ID, id)
+	if err != nil {
+		writeProjectErr(c, err)
+		return
+	}
+	httpx.OK(c, challenge)
+}
+
+func (h *Handler) verifyDomainOwnership(c *gin.Context) {
+	p, _, ok := h.access(c, asmcasbin.PermProjectWrite)
+	if !ok {
+		return
+	}
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	item, err := h.svc.VerifyDomainOwnership(c.Request.Context(), DomainInput{
+		ProjectID: p.ID, DomainProfileID: id,
+		ActorID: c.GetString(auth.CtxUserID), Meta: handlerMeta(c),
+	})
+	if err != nil {
+		writeProjectErr(c, err)
+		return
+	}
+	httpx.OK(c, item)
 }
 
 func (h *Handler) updateDomain(c *gin.Context) {
@@ -514,12 +581,28 @@ func writeProjectErr(c *gin.Context, err error) {
 	case errors.Is(err, ErrNotReady):
 		httpx.Fail(c, http.StatusUnprocessableEntity, httpx.ErrCodeProjectNotReady, "project onboarding is incomplete")
 	case errors.Is(err, ErrInvalidRootDomain):
-		httpx.Fail(c, http.StatusUnprocessableEntity, httpx.ErrCodeInvalidRootDomain, "domain must be a registrable root domain")
+		httpx.Fail(c, http.StatusUnprocessableEntity, httpx.ErrCodeInvalidRootDomain,
+			"域名必须是合法的公共根域名或委派子域，例如 example.com 或 cn.example.com")
 	case errors.Is(err, ErrInvalidStatus):
 		httpx.Fail(c, http.StatusConflict, httpx.ErrCodeInvalidTransition, "invalid project state transition")
+	case errors.Is(err, ErrDeleteRequiresArchive):
+		httpx.Fail(c, http.StatusConflict, httpx.ErrCodeProjectDeleteRequiresArchive, "project must be archived before deletion")
+	case errors.Is(err, ErrProjectHasActiveJobs):
+		httpx.Fail(c, http.StatusConflict, httpx.ErrCodeProjectHasActiveJobs, "project has pending or running discovery jobs")
+	case errors.Is(err, ErrDeleteConfirmation):
+		httpx.Fail(c, http.StatusUnprocessableEntity, httpx.ErrCodeProjectDeleteConfirmation, "project name confirmation does not match")
+	case errors.Is(err, ErrOwnershipNotSelfAssertable):
+		httpx.Unprocessable(c, "所有权状态不可自行声明，请通过 DNS TXT 校验")
+	case errors.Is(err, ErrOwnershipChallengeFailed):
+		// 422 rather than 404: the request was well-formed, the proof simply is not
+		// published yet, and the operator is expected to retry after publishing it.
+		httpx.Unprocessable(c, "域名所有权校验未通过：未找到匹配的 TXT 记录")
+	case errors.Is(err, ErrOwnershipVerificationUnavailable):
+		httpx.Fail(c, http.StatusServiceUnavailable, "OWNERSHIP_VERIFICATION_UNAVAILABLE",
+			"域名所有权校验未配置")
 	case errors.Is(err, ErrInvalidInput), errors.Is(err, ErrInvalidProfile), errors.Is(err, ErrCrossTenantOwner), errors.Is(err, ErrInvalidActor):
 		httpx.Unprocessable(c, err.Error())
 	default:
-		httpx.Internal(c)
+		httpx.InternalError(c, err)
 	}
 }

@@ -31,6 +31,8 @@ type Repository interface {
 	GetRiskByKey(ctx context.Context, projectID uint64, riskKey string) (*Risk, error)
 	ListRisks(ctx context.Context, projectID uint64, limit, offset int32) ([]*Risk, error)
 	CountRisks(ctx context.Context, projectID uint64) (int64, error)
+	ListRisksFiltered(ctx context.Context, in ListFilter) ([]*Risk, error)
+	CountRisksFiltered(ctx context.Context, in ListFilter) (int64, error)
 	RefreshRisk(ctx context.Context, in UpsertRiskParams) error
 	ReopenRisk(ctx context.Context, in UpsertRiskParams) error
 	UpdateRiskScore(ctx context.Context, in ScoreUpdateParams) error
@@ -42,6 +44,8 @@ type Repository interface {
 	CreateSuppressionRule(ctx context.Context, in CreateSuppressionRuleParams) (uint64, error)
 	GetSuppressionRuleByID(ctx context.Context, projectID, id uint64) (*SuppressionRule, error)
 	ListActiveSuppressionRules(ctx context.Context, projectID uint64, now time.Time) ([]*SuppressionRule, error)
+	ListSuppressionRules(ctx context.Context, projectID uint64, limit, offset int32) ([]*SuppressionRule, error)
+	CountSuppressionRules(ctx context.Context, projectID uint64) (int64, error)
 	SetSuppressionRuleEnabled(ctx context.Context, projectID, id uint64, enabled bool, actorID string) error
 	InsertRiskDecision(ctx context.Context, in RiskDecisionParams) error
 	ListRiskDecisions(ctx context.Context, projectID, riskID uint64) ([]*RiskDecision, error)
@@ -424,6 +428,28 @@ func (r *sqlcRepository) CountRisks(ctx context.Context, projectID uint64) (int6
 	return r.q.CountRisksByProject(ctx, projectID)
 }
 
+func (r *sqlcRepository) ListRisksFiltered(ctx context.Context, in ListFilter) ([]*Risk, error) {
+	rows, err := r.q.ListRisksByProjectFiltered(ctx, dbgen.ListRisksByProjectFilteredParams{
+		ProjectID: in.ProjectID, Severity: in.Severity, Status: in.Status,
+		Owner: in.Owner, AssetID: in.AssetID, Keyword: in.Keyword, Limit: in.Limit, Offset: in.Offset,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Risk, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toRisk(row))
+	}
+	return out, nil
+}
+
+func (r *sqlcRepository) CountRisksFiltered(ctx context.Context, in ListFilter) (int64, error) {
+	return r.q.CountRisksByProjectFiltered(ctx, dbgen.CountRisksByProjectFilteredParams{
+		ProjectID: in.ProjectID, Severity: in.Severity, Status: in.Status,
+		Owner: in.Owner, AssetID: in.AssetID, Keyword: in.Keyword,
+	})
+}
+
 func (r *sqlcRepository) RefreshRisk(ctx context.Context, in UpsertRiskParams) error {
 	res, err := r.q.RefreshRisk(ctx, dbgen.RefreshRiskParams{
 		Title:             in.Title,
@@ -584,6 +610,24 @@ func (r *sqlcRepository) ListActiveSuppressionRules(ctx context.Context, project
 		out = append(out, toSuppressionRule(row))
 	}
 	return out, nil
+}
+
+func (r *sqlcRepository) ListSuppressionRules(ctx context.Context, projectID uint64, limit, offset int32) ([]*SuppressionRule, error) {
+	rows, err := r.q.ListSuppressionRulesByProject(ctx, dbgen.ListSuppressionRulesByProjectParams{
+		ProjectID: projectID, Limit: limit, Offset: offset,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*SuppressionRule, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toSuppressionRule(row))
+	}
+	return out, nil
+}
+
+func (r *sqlcRepository) CountSuppressionRules(ctx context.Context, projectID uint64) (int64, error) {
+	return r.q.CountSuppressionRulesByProject(ctx, projectID)
 }
 
 func (r *sqlcRepository) SetSuppressionRuleEnabled(ctx context.Context, projectID, id uint64, enabled bool, actorID string) error {

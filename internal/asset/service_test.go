@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,6 +83,149 @@ func (f *fakeRepo) List(_ context.Context, projectID uint64, _, _ int32) ([]*ass
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeRepo) ListByIDs(_ context.Context, projectID uint64, ids []uint64) ([]*asset.Asset, error) {
+	wanted := make(map[uint64]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	var out []*asset.Asset
+	for _, a := range f.rows {
+		if a.ProjectID == projectID {
+			if _, ok := wanted[a.ID]; ok {
+				out = append(out, cloneAsset(a))
+			}
+		}
+	}
+	return out, nil
+}
+
+// matchesFilter mirrors the SQL: an empty argument means "no filter".
+func matchesFilter(a *asset.Asset, in asset.ListFilter) bool {
+	if a.ProjectID != in.ProjectID {
+		return false
+	}
+	if in.AssetType != "" && a.AssetType != in.AssetType {
+		return false
+	}
+	switch in.Category {
+	case "":
+	case asset.CategoryDomains:
+		if a.AssetType != asset.TypeDomain && a.AssetType != asset.TypeSubdomain {
+			return false
+		}
+	case asset.CategoryIPs:
+		if a.AssetType != asset.TypeIP {
+			return false
+		}
+	case asset.CategoryWeb:
+		if a.AssetType != asset.TypeWeb {
+			return false
+		}
+	case asset.CategoryExternal:
+		if a.AssetType != asset.TypeCloudResource && a.AssetType != asset.TypeThirdParty {
+			return false
+		}
+	default:
+		return false
+	}
+	if in.Status != "" && a.Status != in.Status {
+		return false
+	}
+	if in.Keyword != "" {
+		haystack := a.DisplayName + " " + a.Value + " " + a.Owner + " " + a.BusinessUnit
+		if !strings.Contains(haystack, in.Keyword) {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *fakeRepo) ListFiltered(_ context.Context, in asset.ListFilter) ([]*asset.Asset, error) {
+	var out []*asset.Asset
+	for _, a := range f.rows {
+		if matchesFilter(a, in) {
+			out = append(out, cloneAsset(a))
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeRepo) CountFiltered(_ context.Context, in asset.ListFilter) (int64, error) {
+	var n int64
+	for _, a := range f.rows {
+		if matchesFilter(a, in) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeRepo) Summary(
+	_ context.Context,
+	projectID uint64,
+	newSince, observedSince, staleBefore time.Time,
+	lowConfidenceBelow uint8,
+) (*asset.AssetSummary, error) {
+	summary := &asset.AssetSummary{}
+	summary.Governance.LowConfidenceBelow = lowConfidenceBelow
+	for _, a := range f.rows {
+		if a.ProjectID != projectID {
+			continue
+		}
+		summary.Inventory.Total++
+		if a.Status == asset.StatusIgnored {
+			summary.Inventory.Ignored++
+			continue
+		}
+		summary.Inventory.ManagedTotal++
+		switch a.Status {
+		case asset.StatusActive:
+			summary.Inventory.Active++
+		case asset.StatusInactive:
+			summary.Inventory.Inactive++
+		}
+		switch a.AssetType {
+		case asset.TypeDomain:
+			summary.ByType.Domain++
+		case asset.TypeSubdomain:
+			summary.ByType.Subdomain++
+		case asset.TypeIP:
+			summary.ByType.IP++
+		case asset.TypePort:
+			summary.ByType.Port++
+		case asset.TypeService:
+			summary.ByType.Service++
+		case asset.TypeWeb:
+			summary.ByType.Web++
+		case asset.TypeCertificate:
+			summary.ByType.Certificate++
+		case asset.TypeCloudResource:
+			summary.ByType.CloudResource++
+		case asset.TypeThirdParty:
+			summary.ByType.ThirdParty++
+		}
+		if !a.FirstSeen.Before(newSince) {
+			summary.Freshness.New24H++
+		}
+		if !a.LastSeen.Before(observedSince) {
+			summary.Freshness.Observed24H++
+		}
+		if a.LastSeen.Before(staleBefore) {
+			summary.Freshness.Stale30D++
+		}
+		if a.Owner == "" {
+			summary.Governance.Unowned++
+		}
+		if a.BusinessUnit == "" {
+			summary.Governance.UnassignedBusinessUnit++
+		}
+		if a.Confidence < lowConfidenceBelow {
+			summary.Governance.LowConfidence++
+		}
+	}
+	return summary, nil
 }
 
 // cloneAsset returns a shallow copy so callers (and audit before/after snapshots)

@@ -87,6 +87,37 @@ WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 LIMIT ? OFFSET ?;
 
+-- Filtered variants; see the note on ListAssetsByProjectFiltered.
+-- name: ListRisksByProjectFiltered :many
+SELECT * FROM risk
+WHERE project_id = sqlc.arg(project_id)
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (sqlc.arg(severity) = '' OR severity = sqlc.arg(severity))
+  AND (sqlc.arg(status) = '' OR status = sqlc.arg(status))
+  AND (sqlc.arg(owner) = '' OR owner = sqlc.arg(owner))
+  AND (sqlc.arg(asset_id) = 0 OR asset_id = sqlc.arg(asset_id))
+  AND (
+      sqlc.arg(keyword) = ''
+      OR title LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR business_unit LIKE CONCAT('%', sqlc.arg(keyword), '%')
+  )
+ORDER BY id
+LIMIT ? OFFSET ?;
+
+-- name: CountRisksByProjectFiltered :one
+SELECT COUNT(*) FROM risk
+WHERE project_id = sqlc.arg(project_id)
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (sqlc.arg(severity) = '' OR severity = sqlc.arg(severity))
+  AND (sqlc.arg(status) = '' OR status = sqlc.arg(status))
+  AND (sqlc.arg(owner) = '' OR owner = sqlc.arg(owner))
+  AND (sqlc.arg(asset_id) = 0 OR asset_id = sqlc.arg(asset_id))
+  AND (
+      sqlc.arg(keyword) = ''
+      OR title LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR business_unit LIKE CONCAT('%', sqlc.arg(keyword), '%')
+  );
+
 -- name: CountRisksByProject :one
 SELECT COUNT(*) FROM risk
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
@@ -212,6 +243,19 @@ WHERE project_id = ?
   AND deleted_at = '1970-01-01 00:00:00.000'
   AND (expires_at = '1970-01-01 00:00:00.000' OR expires_at > ?)
 ORDER BY id;
+
+-- Management listing: unlike ListActiveSuppressionRules this returns disabled and
+-- expired rules too, because the console has to show what exists in order to let
+-- an operator re-enable or review it.
+-- name: ListSuppressionRulesByProject :many
+SELECT * FROM suppression_rule
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id DESC
+LIMIT ? OFFSET ?;
+
+-- name: CountSuppressionRulesByProject :one
+SELECT COUNT(*) FROM suppression_rule
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
 -- name: SetSuppressionRuleEnabled :execresult
 UPDATE suppression_rule

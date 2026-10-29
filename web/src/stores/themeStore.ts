@@ -11,7 +11,7 @@ function getInitialMode(): ThemeMode {
   const stored = localStorage.getItem('asm.theme');
   if (stored === 'light' || stored === 'dark') return stored;
   if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
-  return 'dark';
+  return 'light';
 }
 
 function applyTheme(mode: ThemeMode) {

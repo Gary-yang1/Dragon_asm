@@ -32,6 +32,11 @@ var (
 	ErrOwnerRequired           = errors.New("risk: owner required")
 	ErrSLARequired             = errors.New("risk: sla due_at required")
 	ErrApprovedByRequired      = errors.New("risk: approved_by required")
+	// ErrSelfApprovalForbidden guards separation of duties on risk decisions.
+	// approved_by is not resolved to a real account yet (see the follow-up note in
+	// the review), so this blocks the degenerate self-approval case rather than
+	// proving a distinct human signed off.
+	ErrSelfApprovalForbidden   = errors.New("risk: approver must differ from the actor")
 	ErrReviewRequiredAtMissing = errors.New("risk: review_required_at required")
 	ErrInvalidSLAHours         = errors.New("risk: invalid sla hours")
 	ErrDefinitionDisabled      = errors.New("risk: vulnerability definition disabled")
@@ -205,6 +210,27 @@ func (s *Service) CreateSuppressionRule(ctx context.Context, in CreateSuppressio
 		return nil, err
 	}
 	return s.repo.GetSuppressionRuleByID(ctx, in.ProjectID, id)
+}
+
+// ListSuppressionRules returns one page of a project's suppression rules,
+// including disabled and expired ones so the console can show what exists.
+func (s *Service) ListSuppressionRules(ctx context.Context, projectID uint64, limit, offset int32) ([]*SuppressionRule, int64, error) {
+	if projectID == 0 {
+		return nil, 0, ErrInvalidProjectID
+	}
+	limit = clampLimit(limit)
+	if offset < 0 {
+		offset = 0
+	}
+	items, err := s.repo.ListSuppressionRules(ctx, projectID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountSuppressionRules(ctx, projectID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
 }
 
 func (s *Service) SetSuppressionRuleEnabled(ctx context.Context, projectID, id uint64, enabled bool, actorID string) error {
@@ -444,6 +470,46 @@ func (s *Service) List(ctx context.Context, projectID uint64, limit, offset int3
 		offset = 0
 	}
 	return s.repo.ListRisks(ctx, projectID, limit, offset)
+}
+
+// maxKeywordLen bounds the LIKE pattern; the search is a leading-wildcard scan
+// within one project, so an unbounded term is pointless work.
+const maxKeywordLen = 128
+
+// ListFiltered returns one page of risks narrowed by severity, status, owner and
+// keyword, plus the matching total. Enum filters are validated so an unknown
+// value is a client error rather than an empty page that reads as "no risks".
+func (s *Service) ListFiltered(ctx context.Context, in ListFilter) ([]*Risk, int64, error) {
+	if in.ProjectID == 0 {
+		return nil, 0, ErrInvalidProjectID
+	}
+	in.Severity = strings.TrimSpace(in.Severity)
+	if in.Severity != "" && !validSeverity(in.Severity) {
+		return nil, 0, ErrInvalidSeverity
+	}
+	in.Status = strings.TrimSpace(in.Status)
+	if in.Status != "" && !validRiskStatus(in.Status) {
+		return nil, 0, ErrInvalidStatusAction
+	}
+	in.Owner = strings.TrimSpace(in.Owner)
+	in.Keyword = strings.TrimSpace(in.Keyword)
+	if len(in.Owner) > 64 || len(in.Keyword) > maxKeywordLen {
+		return nil, 0, ErrFieldTooLong
+	}
+	in.Limit = clampLimit(in.Limit)
+	if in.Offset < 0 {
+		in.Offset = 0
+	}
+
+	items, err := s.repo.ListRisksFiltered(ctx, in)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountRisksFiltered(ctx, in)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
 }
 
 func (s *Service) Count(ctx context.Context, projectID uint64) (int64, error) {
@@ -882,6 +948,48 @@ func nextRiskStatus(action, current string) (string, error) {
 	return "", ErrInvalidStatusTransition
 }
 
+// allStatusActions is the transition vocabulary, ordered so the first entry a
+// given status offers is its natural forward step — the UI renders the leading
+// action as the primary button.
+var allStatusActions = []string{
+	StatusActionConfirm,
+	StatusActionAssign,
+	StatusActionStartFix,
+	StatusActionMarkFixed,
+	StatusActionReopen,
+	StatusActionAccept,
+	StatusActionFalsePositive,
+}
+
+// AvailableStatusActions returns the actions the transition table accepts from
+// current. It is derived from nextRiskStatus rather than a second hand-written
+// table, so the two can never disagree.
+//
+// This is advisory display data only: the transition endpoint re-derives the
+// target status and re-checks permissions on every call, so a caller who invents
+// an action still gets rejected.
+func AvailableStatusActions(current string) []string {
+	actions := make([]string, 0, len(allStatusActions))
+	for _, action := range allStatusActions {
+		if _, err := nextRiskStatus(action, current); err == nil {
+			actions = append(actions, action)
+		}
+	}
+	return actions
+}
+
+// validRiskStatus reports whether v is a known risk status, used to reject a
+// filter value that would otherwise match nothing.
+func validRiskStatus(v string) bool {
+	switch v {
+	case StatusNew, StatusConfirmed, StatusAssigned, StatusFixing,
+		StatusRiskAccepted, StatusFalsePositive, StatusFixed, StatusReopened:
+		return true
+	default:
+		return false
+	}
+}
+
 func validStatusAction(action string) bool {
 	switch action {
 	case StatusActionConfirm, StatusActionAssign, StatusActionStartFix, StatusActionMarkFixed,
@@ -903,8 +1011,15 @@ func validateTransitionInput(in StatusTransitionInput, next string) error {
 			return ErrReasonRequired
 		}
 		if isDecisionStatus(next) {
-			if strings.TrimSpace(in.ApprovedBy) == "" {
+			approver := strings.TrimSpace(in.ApprovedBy)
+			if approver == "" {
 				return ErrApprovedByRequired
+			}
+			// Separation of duties: accepting a risk or writing it off as a false
+			// positive is the one place the platform requires a second person, so the
+			// actor cannot name themselves as the approver.
+			if strings.EqualFold(approver, strings.TrimSpace(in.ActorID)) {
+				return ErrSelfApprovalForbidden
 			}
 			if in.ExpiresAt.IsZero() && in.ReviewRequiredAt.IsZero() {
 				return ErrReviewRequiredAtMissing

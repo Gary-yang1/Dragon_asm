@@ -11,15 +11,25 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/netguard"
 )
 
 var (
-	ErrInvalidProjectID       = errors.New("discovery: invalid project id")
-	ErrInvalidName            = errors.New("discovery: invalid name")
-	ErrInvalidActorID         = errors.New("discovery: invalid actor id")
-	ErrInvalidAuthorizedBy    = errors.New("discovery: invalid authorized_by")
-	ErrInvalidStatus          = errors.New("discovery: invalid status")
-	ErrInvalidTaskType        = errors.New("discovery: invalid task type")
+	ErrInvalidProjectID    = errors.New("discovery: invalid project id")
+	ErrInvalidName         = errors.New("discovery: invalid name")
+	ErrInvalidActorID      = errors.New("discovery: invalid actor id")
+	ErrInvalidAuthorizedBy = errors.New("discovery: invalid authorized_by")
+	ErrInvalidStatus       = errors.New("discovery: invalid status")
+	// ErrScopeWindowTooLong marks an authorisation window beyond MaxScopeWindow.
+	ErrScopeWindowTooLong = errors.New("discovery: authorization window exceeds the maximum")
+	ErrInvalidTaskType    = errors.New("discovery: invalid task type")
+	// ErrTaskTypeUnsupported marks a known task type with no engine implementation.
+	// It is distinct from ErrInvalidTaskType so the API can say "not supported yet"
+	// rather than "invalid", which is the difference between an operator waiting
+	// for a feature and one believing the scan already ran.
+	ErrTaskTypeUnsupported    = errors.New("discovery: task type not supported by the configured engine")
 	ErrInvalidTaskStatus      = errors.New("discovery: invalid task status")
 	ErrInvalidTemplate        = errors.New("discovery: invalid task template")
 	ErrInvalidTaskSchedule    = errors.New("discovery: invalid task schedule")
@@ -32,6 +42,8 @@ var (
 	ErrDispatchTargetDenied   = errors.New("discovery: dispatch target denied")
 	ErrInvalidTargetType      = errors.New("discovery: invalid target type")
 	ErrInvalidMatchMode       = errors.New("discovery: invalid match mode")
+	ErrInvalidCoverageMode    = errors.New("discovery: invalid coverage mode")
+	ErrInvalidDefaultScope    = errors.New("discovery: default scope must be active")
 	ErrInvalidScopeID         = errors.New("discovery: invalid scope id")
 	ErrInvalidTarget          = errors.New("discovery: invalid target")
 	ErrTargetTooLong          = errors.New("discovery: target too long")
@@ -51,7 +63,7 @@ const (
 	maxAuthorizedLen     = 64
 	maxDomainLen         = 255
 	maxTemplateName      = 128
-	maxTemplateConfigLen = 8192
+	maxTemplateConfigLen = 65536
 	maxTaskScheduleLen   = 255
 )
 
@@ -74,6 +86,8 @@ var validTaskTypes = map[string]bool{
 	TaskTypeCloudSync:    true,
 	TaskTypePassiveIntel: true,
 	TaskTypeImport:       true,
+	TaskTypeDirScan:      true,
+	TaskTypeOrgIntel:     true,
 }
 
 var validTaskStatuses = map[string]bool{
@@ -86,10 +100,11 @@ var validTaskStatuses = map[string]bool{
 }
 
 var validTargetTypes = map[string]bool{
-	TargetTypeDomain: true,
-	TargetTypeIP:     true,
-	TargetTypeCIDR:   true,
-	TargetTypeURL:    true,
+	TargetTypeDomain:  true,
+	TargetTypeIP:      true,
+	TargetTypeCIDR:    true,
+	TargetTypeURL:     true,
+	TargetTypeCompany: true,
 }
 
 var validMatchModes = map[string]bool{
@@ -126,10 +141,30 @@ func validateStatus(raw string) (string, error) {
 	return raw, nil
 }
 
+// dispatchableTaskTypes is the single definition of task types with an actual
+// engine implementation. Active types still require the service-level
+// ActiveDispatchPolicy to be explicitly enabled; keeping capability and release
+// policy separate lets templates remain fail-closed by default without lying to
+// the active adapter about what it can execute.
+var dispatchableTaskTypes = map[string]bool{
+	TaskTypePassiveIntel: true,
+	TaskTypeDNS:          true,
+	TaskTypeOrgIntel:     true,
+	TaskTypePortProbe:    true,
+	TaskTypeWebProbe:     true,
+	TaskTypeFingerprint:  true,
+}
+
+// IsDispatchableTaskType reports whether the configured engine can run this type.
+func IsDispatchableTaskType(v string) bool { return dispatchableTaskTypes[v] }
+
 func validateTaskType(raw string) (string, error) {
 	v := strings.TrimSpace(raw)
 	if !validTaskTypes[v] {
 		return "", ErrInvalidTaskType
+	}
+	if !dispatchableTaskTypes[v] {
+		return "", ErrTaskTypeUnsupported
 	}
 	return v, nil
 }
@@ -251,7 +286,44 @@ func validateTemplateSchedule(raw string) error {
 }
 
 func validateSensitiveConfig(raw string) error {
-	lower := strings.ToLower(strings.TrimSpace(raw))
+	// Inspect decoded JSON, but do not mistake words in validated hostnames
+	// (e.g. tokenhub.example.com) for credentials. Keep checking every key,
+	// non-target value and URL path/query; only the target hostname is exempt.
+	var document map[string]any
+	if err := json.Unmarshal([]byte(raw), &document); err != nil {
+		return ErrInvalidTaskConfig
+	}
+	if targets, ok := document["targets"].([]any); ok {
+		for _, entry := range targets {
+			target, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			kind, _ := target["type"].(string)
+			value, ok := target["value"].(string)
+			if !ok {
+				continue
+			}
+			if _, err := normalizeTargetValue(kind, value); err != nil {
+				continue
+			}
+			switch kind {
+			case TargetTypeDomain, TargetTypeIP, TargetTypeCIDR:
+				target["value"] = "validated-target"
+			case TargetTypeURL:
+				parsed, err := url.Parse(value)
+				if err == nil && parsed.User == nil {
+					parsed.Host = "validated-host"
+					target["value"] = parsed.String()
+				}
+			}
+		}
+	}
+	checked, err := json.Marshal(document)
+	if err != nil {
+		return ErrInvalidTaskConfig
+	}
+	lower := strings.ToLower(string(checked))
 	if strings.Contains(lower, "password") ||
 		strings.Contains(lower, "token") ||
 		strings.Contains(lower, "secret") ||
@@ -278,12 +350,21 @@ func validateTaskLimits(timeoutSeconds, rateLimit, concurrency, retryLimit int) 
 	return nil
 }
 
+// MaxScopeWindow bounds how long one authorisation can run before it has to be
+// renewed. Scanning authorisation is a statement someone made on a date; without
+// a ceiling a scope could be authorised until the year 9999 and nobody would ever
+// revisit whether the permission still holds.
+const MaxScopeWindow = 365 * 24 * time.Hour
+
 func validateScopeWindow(validFrom, validUntil time.Time) error {
 	if validFrom.IsZero() || validUntil.IsZero() {
 		return ErrInvalidTimeRange
 	}
 	if validUntil.Before(validFrom) {
 		return ErrInvalidTimeRange
+	}
+	if validUntil.Sub(validFrom) > MaxScopeWindow {
+		return ErrScopeWindowTooLong
 	}
 	return nil
 }
@@ -328,18 +409,38 @@ func normalizeScopeTarget(in ScopeTargetInput, actorID string) (ScopeTarget, err
 	if !isValidMatchMode(in.MatchMode) {
 		return ScopeTarget{}, ErrInvalidMatchMode
 	}
+	coverageMode := strings.TrimSpace(in.CoverageMode)
+	if coverageMode == "" {
+		coverageMode = CoverageModeExact
+	}
+	if coverageMode != CoverageModeExact &&
+		(in.TargetType != TargetTypeDomain || coverageMode != CoverageModeSubdomains) {
+		return ScopeTarget{}, ErrInvalidCoverageMode
+	}
 
-	value, err := normalizeTargetValue(in.TargetType, in.Value)
+	if in.URLRule != nil && in.TargetType != TargetTypeURL {
+		return ScopeTarget{}, ErrInvalidURLAuthorization
+	}
+	var rule *URLAuthorizationRule
+	var value string
+	var err error
+	if in.TargetType == TargetTypeURL {
+		value, rule, err = normalizeURLAuthorization(in.Value, in.URLRule)
+	} else {
+		value, err = normalizeTargetValue(in.TargetType, in.Value)
+	}
 	if err != nil {
 		return ScopeTarget{}, err
 	}
 
 	return ScopeTarget{
-		TargetType: in.TargetType,
-		MatchMode:  in.MatchMode,
-		Value:      value,
-		CreatedBy:  actorID,
-		UpdatedBy:  actorID,
+		URLRule:      rule,
+		TargetType:   in.TargetType,
+		MatchMode:    in.MatchMode,
+		CoverageMode: coverageMode,
+		Value:        value,
+		CreatedBy:    actorID,
+		UpdatedBy:    actorID,
 	}, nil
 }
 
@@ -355,6 +456,8 @@ func normalizeTargetValue(targetType, raw string) (string, error) {
 	switch targetType {
 	case TargetTypeDomain:
 		return normalizeDomain(raw)
+	case TargetTypeCompany:
+		return normalizeCompanyName(raw)
 	case TargetTypeIP:
 		addr, err := parseIP(raw)
 		if err != nil {
@@ -406,7 +509,33 @@ func normalizeDomain(raw string) (string, error) {
 			return "", err
 		}
 	}
+
+	// A scope target must be a fully qualified, globally resolvable DNS name.
+	// This is what keeps non-canonical IP literals out of the domain path: the
+	// resolver expands "127.1", "2130706433", "010.0.0.1" and "0" to loopback or
+	// RFC1918 addresses, but netip.ParseAddr rejects all of them, so they reach
+	// normalizeDomain and would sail past the IP denylist entirely. Rejecting
+	// single-label names also stops hex forms ("0x7f000001") and bare internal
+	// hostnames ("instance-data", "consul").
+	if len(parts) < 2 {
+		return "", ErrInvalidTarget
+	}
+	if isAllDigits(parts[len(parts)-1]) {
+		return "", ErrInvalidTarget
+	}
 	return value, nil
+}
+
+func isAllDigits(label string) bool {
+	if label == "" {
+		return false
+	}
+	for _, c := range label {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateDomainLabel(label string) error {
@@ -456,11 +585,30 @@ func parseCIDR(raw string) (netip.Prefix, error) {
 }
 
 type parsedTarget struct {
-	kind   string
-	value  string
-	scheme string
-	domain string
-	ip     netip.Addr
+	port    int
+	kind    string
+	value   string
+	scheme  string
+	domain  string
+	company string
+	ip      netip.Addr
+}
+
+// parseTypedTarget parses a target whose type the caller already knows.
+//
+// parseTarget infers the type from the string, which works for addresses but
+// cannot work for a company name — that is just text, and guessing would either
+// reject it or mistake it for a domain. Everything except company keeps the
+// existing inference so behaviour there is unchanged.
+func parseTypedTarget(targetType, raw string) (parsedTarget, error) {
+	if targetType != TargetTypeCompany {
+		return parseTarget(raw)
+	}
+	company, err := normalizeCompanyName(raw)
+	if err != nil {
+		return parsedTarget{}, err
+	}
+	return parsedTarget{kind: TargetTypeCompany, value: company, company: company}, nil
 }
 
 func parseTarget(raw string) (parsedTarget, error) {
@@ -530,6 +678,9 @@ func parseURL(raw string) (parsedTarget, error) {
 		kind:   TargetTypeURL,
 		scheme: u.Scheme,
 	}
+	if u.Port() != "" {
+		parsed.port, _ = strconv.Atoi(u.Port())
+	}
 	if ip, err := parseIP(host); err == nil {
 		parsed.ip = ip
 		parsed.domain = ip.String()
@@ -558,90 +709,58 @@ func isDangerousHost(p parsedTarget) bool {
 	return isDangerousDomain(p.domain)
 }
 
-func isDangerousDomain(raw string) bool {
-	v := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
-	return v == "localhost" || strings.HasSuffix(v, ".localhost")
+// specialUseDomainSuffixes are names reserved by the IETF/ICANN for local or
+// non-resolvable use. They are never a legitimate external attack surface, and
+// several resolve to infrastructure a scan must never reach — ".internal" in
+// particular covers metadata.google.internal.
+//
+// Names in common private use but not reserved (".corp", ".lan", ".intranet")
+// are deliberately absent: an operator inventorying an internal estate has a
+// legitimate need for them, and the reserved list above is the defensible floor.
+var specialUseDomainSuffixes = []string{
+	".localhost",
+	".local",
+	".localdomain",
+	".internal",
+	".home.arpa",
+	".alt",
+	".invalid",
+	".test",
+	".example",
 }
 
-func isDangerousCIDR(prefix netip.Prefix) bool {
-	if isDangerousIP(prefix.Addr()) {
+func isDangerousDomain(raw string) bool {
+	v := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if v == "localhost" {
 		return true
 	}
-	for _, r := range reservedCIDRsV4 {
-		if prefix.Overlaps(r) {
-			return true
-		}
-	}
-	for _, r := range reservedCIDRsV6 {
-		if prefix.Overlaps(r) {
+	for _, suffix := range specialUseDomainSuffixes {
+		if strings.HasSuffix(v, suffix) {
 			return true
 		}
 	}
 	return false
+}
+
+// isDangerousCIDR and isDangerousIP delegate to platform/netguard so the scan
+// denylist and the outbound-HTTP denylist can never drift apart.
+func isDangerousCIDR(prefix netip.Prefix) bool {
+	return netguard.IsDangerousPrefix(prefix)
 }
 
 func isDangerousIP(addr netip.Addr) bool {
-	if addr.Is4In6() {
-		addr = addr.Unmap()
-	}
-	if !addr.IsValid() {
-		return true
-	}
-	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || addr.IsUnspecified() {
-		return true
-	}
-	// global- unicast excludes link-local and private for both v4/v6 in practice.
-	if !addr.IsGlobalUnicast() {
-		return true
-	}
-	if isCloudMetadata(addr) {
-		return true
-	}
-
-	for _, r := range reservedCIDRsV4 {
-		if r.Addr().Is4() && addr.Is4() && r.Contains(addr) {
-			return true
-		}
-	}
-	for _, r := range reservedCIDRsV6 {
-		if r.Addr().Is6() && addr.Is6() && r.Contains(addr) {
-			return true
-		}
-	}
-	return false
+	return netguard.IsDangerousAddr(addr)
 }
-
-var reservedCIDRsV4 = []netip.Prefix{
-	mustPrefix("0.0.0.0/8"),
-	mustPrefix("10.0.0.0/8"),
-	mustPrefix("100.64.0.0/10"),
-	mustPrefix("127.0.0.0/8"),
-	mustPrefix("169.254.0.0/16"),
-	mustPrefix("172.16.0.0/12"),
-	mustPrefix("192.0.0.0/24"),
-	mustPrefix("192.168.0.0/16"),
-	mustPrefix("198.18.0.0/15"),
-	mustPrefix("192.0.2.0/24"),
-	mustPrefix("198.51.100.0/24"),
-	mustPrefix("203.0.113.0/24"),
-	mustPrefix("240.0.0.0/4"),
-	mustPrefix("255.255.255.255/32"),
-}
-
-var reservedCIDRsV6 = []netip.Prefix{
-	mustPrefix("::/128"),
-	mustPrefix("::1/128"),
-	mustPrefix("fc00::/7"),
-	mustPrefix("fe80::/10"),
-	mustPrefix("ff00::/8"),
-	mustPrefix("2001:db8::/32"),
-}
-
-var cloudMetadataIPv4 = netip.MustParseAddr("169.254.169.254")
 
 func parseScopeTargetForMatch(raw ScopeTarget) (parsedTarget, error) {
 	s := parsedTarget{kind: raw.TargetType, value: raw.Value}
 	switch raw.TargetType {
+	case TargetTypeCompany:
+		company, err := normalizeCompanyName(raw.Value)
+		if err != nil {
+			return parsedTarget{}, err
+		}
+		s.company = company
 	case TargetTypeDomain:
 		domain, err := normalizeDomain(raw.Value)
 		if err != nil {
@@ -678,14 +797,29 @@ func matchTarget(target *ScopeTarget, candidate parsedTarget) bool {
 	if target == nil {
 		return false
 	}
+	if target.TargetType == TargetTypeURL && target.URLRule != nil {
+		return matchURLAuthorization(target, candidate)
+	}
 	t, err := parseScopeTargetForMatch(*target)
 	if err != nil {
 		return false
 	}
 
 	switch target.TargetType {
+	case TargetTypeCompany:
+		// Legal names are matched exactly. A prefix or substring rule would let a
+		// scope authorising one company reach an unrelated one that happens to
+		// share a name fragment, which is common in Chinese company names.
+		return candidate.company != "" && t.company == candidate.company
 	case TargetTypeDomain:
-		return candidate.domain != "" && strings.EqualFold(t.domain, candidate.domain)
+		if candidate.domain == "" {
+			return false
+		}
+		if strings.EqualFold(t.domain, candidate.domain) {
+			return true
+		}
+		return target.CoverageMode == CoverageModeSubdomains &&
+			strings.HasSuffix(strings.ToLower(candidate.domain), "."+strings.ToLower(t.domain))
 	case TargetTypeIP:
 		return candidate.ip.IsValid() && t.ip == candidate.ip
 	case TargetTypeCIDR:
@@ -704,14 +838,29 @@ func matchTarget(target *ScopeTarget, candidate parsedTarget) bool {
 	}
 }
 
-func mustPrefix(v string) netip.Prefix {
-	p, err := netip.ParsePrefix(v)
-	if err != nil {
-		panic(err)
-	}
-	return p
-}
+// maxCompanyNameLen bounds a registered legal name. The longest Chinese company
+// names run well under this; anything longer is not a company name.
+const maxCompanyNameLen = 200
 
-func isCloudMetadata(addr netip.Addr) bool {
-	return addr == cloudMetadataIPv4
+// normalizeCompanyName accepts a registered legal entity name.
+//
+// It is not an address and is never resolved or connected to, so the checks are
+// about keeping junk out of the database and out of a tool's argv rather than
+// about network safety: no control characters, no leading dash that could be
+// read as a flag downstream, and a bounded length.
+func normalizeCompanyName(raw string) (string, error) {
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, raw)
+	cleaned = strings.TrimSpace(strings.ReplaceAll(cleaned, "　", " "))
+	if cleaned == "" || utf8.RuneCountInString(cleaned) > maxCompanyNameLen {
+		return "", ErrInvalidTarget
+	}
+	if strings.HasPrefix(cleaned, "-") {
+		return "", ErrInvalidTarget
+	}
+	return cleaned, nil
 }

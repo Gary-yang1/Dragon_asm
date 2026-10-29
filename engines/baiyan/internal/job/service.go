@@ -68,10 +68,16 @@ func (s *Service) Start(workers int) error {
 		record.Progress = 0
 		record.ErrorSummary = ""
 		record.UpdatedAt = s.now()
+		// Both failure paths must tear down the workers started above; returning
+		// bare left them running against a Service the caller believes never started.
 		if err := s.store.Save(record); err != nil {
+			s.cancel()
+			s.wg.Wait()
 			return err
 		}
 		if err := s.enqueue(record.JobID); err != nil {
+			s.cancel()
+			s.wg.Wait()
 			return err
 		}
 	}
@@ -184,18 +190,55 @@ func (s *Service) worker() {
 		case <-s.rootCtx.Done():
 			return
 		case jobID := <-s.queue:
-			s.run(jobID)
+			s.runGuarded(jobID)
 		}
 	}
 }
 
-func (s *Service) run(jobID string) {
+// runGuarded stops one bad job from taking down the engine. Without it, a panic in
+// an executor, a provider, or the store unwinds the worker goroutine and
+// terminates the whole baiyan-engine process, losing every in-flight job and
+// leaving the ASM side waiting on callbacks that will never arrive.
+func (s *Service) runGuarded(jobID string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.failPanicked(jobID, recovered)
+		}
+	}()
+	s.run(jobID)
+}
+
+// failPanicked records the panic on the job so the failure is visible to the ASM
+// side instead of the run hanging until the reconcile worker times it out. The
+// panic value is bounded and never interpolated into anything but this field.
+func (s *Service) failPanicked(jobID string, recovered any) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.active, jobID)
+	record, err := s.store.Get(jobID)
+	if err != nil {
+		return
+	}
+	if record.Status == StatusCancelled {
+		return
+	}
+	record.Status = StatusFailed
+	record.Progress = 100
+	record.UpdatedAt = s.now()
+	record.ErrorSummary = boundedSummary(fmt.Sprintf("job panicked: %v", recovered))
+	_ = s.store.Save(record)
+}
+
+// beginRun claims the job and marks it running. It unlocks via defer so a panic in
+// the store cannot leave the mutex held, which would deadlock failPanicked.
+func (s *Service) beginRun(jobID string) (Record, context.Context, context.CancelFunc, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.queued[jobID] = false
 	record, err := s.store.Get(jobID)
 	if err != nil || record.Status == StatusCancelled {
-		s.mu.Unlock()
-		return
+		return Record{}, nil, nil, false
 	}
 	timeout := time.Duration(record.Request.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
@@ -207,7 +250,14 @@ func (s *Service) run(jobID string) {
 	record.Progress = 10
 	record.UpdatedAt = s.now()
 	_ = s.store.Save(record)
-	s.mu.Unlock()
+	return record, ctx, cancel, true
+}
+
+func (s *Service) run(jobID string) {
+	record, ctx, cancel, ok := s.beginRun(jobID)
+	if !ok {
+		return
+	}
 
 	result, execErr := s.executor.Execute(ctx, record.Request)
 	ctxErr := ctx.Err()

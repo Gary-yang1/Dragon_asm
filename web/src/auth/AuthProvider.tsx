@@ -1,6 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { changePasswordRequest, loginRequest, meRequest, permissionsRequest, refreshRequest } from '../api/auth';
+import { sessionRefreshedEvent } from '../api/http';
 import { Permission, Role } from './permissions';
 import { sanitizeDisplayName } from '../utils/text';
 
@@ -36,11 +37,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState(() => readSnapshot());
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(snapshot === null);
+  const verifiedIdentity = useRef<string | null>(null);
 
   const persistSnapshot = useCallback((next: StoredSnapshot | null) => {
     if (next) {
       localStorage.setItem(storageKey, JSON.stringify(next));
     } else {
+      verifiedIdentity.current = null;
       localStorage.removeItem(storageKey);
     }
     setSnapshot(next);
@@ -56,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const data = await loginRequest(username, password);
       const next = normalizeAuthPayload(data);
+      verifiedIdentity.current = null;
       persistSnapshot(next);
       setReady(true);
       return next.user;
@@ -78,8 +82,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     if (!snapshot?.refreshToken) return;
     const data = await refreshRequest(snapshot.refreshToken);
-    const next = { ...snapshot, accessToken: data.access_token };
+    // The server rotates the refresh token too; keeping the old one would break
+    // the next refresh once rotation is enforced server-side.
+    const next = {
+      ...snapshot,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token ?? snapshot.refreshToken
+    };
     persistSnapshot(next);
+    globalThis.dispatchEvent(new Event(sessionRefreshedEvent));
   }, [persistSnapshot, snapshot]);
 
   const refreshPermissions = useCallback(async () => {
@@ -98,18 +109,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => globalThis.removeEventListener('asm:unauthorized', handleUnauthorized);
   }, [persistSnapshot]);
 
+  // The http layer refreshes the access token silently on 401 and writes it to
+  // storage; adopt it so React state and storage do not diverge.
+  useEffect(() => {
+    const handleRefreshed = () => setSnapshot(readSnapshot());
+    globalThis.addEventListener(sessionRefreshedEvent, handleRefreshed);
+    return () => globalThis.removeEventListener(sessionRefreshedEvent, handleRefreshed);
+  }, []);
+
   const accessToken = snapshot?.accessToken;
+  const sessionIdentity = snapshot?.user.id ?? null;
 
   useEffect(() => {
     if (!accessToken) {
+      verifiedIdentity.current = null;
       setReady(true);
       return;
     }
     let active = true;
-    setReady(false);
+    // A rotated token for an already verified identity must not unmount active
+    // forms and discard mutation callbacks. Permissions still refresh below.
+    if (!sessionIdentity || verifiedIdentity.current !== sessionIdentity) setReady(false);
     void Promise.all([permissionsRequest(), meRequest()])
       .then(([permissionData, me]) => {
         if (!active) return;
+        verifiedIdentity.current = sessionIdentity;
         setSnapshot((current) => {
           if (!current || current.accessToken !== accessToken) return current;
           const next = {
@@ -141,7 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [accessToken]);
+  }, [accessToken, sessionIdentity]);
 
   const permissions = useMemo(() => snapshot?.permissions ?? [], [snapshot?.permissions]);
   const value = useMemo<AuthState>(

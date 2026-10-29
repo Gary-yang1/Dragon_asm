@@ -176,6 +176,6 @@ describe('auth routing', () => {
     });
 
     expect(await screen.findByText('暴露面工作台')).toBeInTheDocument();
-    expect(screen.getByText('平台管理')).toBeInTheDocument();
+    expect(screen.getByText('系统设置')).toBeInTheDocument();
   });
 });

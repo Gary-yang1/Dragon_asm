@@ -1,5 +1,5 @@
 import type { PageData } from './assets';
-import { getJSON, patchJSON, postJSON } from './http';
+import { deleteJSON, getJSON, patchJSON, postJSON } from './http';
 
 export type ProjectStatus = 'draft' | 'active' | 'suspended' | 'archived';
 
@@ -70,6 +70,7 @@ export type OnboardingStatus = {
 export type ProjectCapabilities = {
   role: string;
   permissions: string[];
+  project_status: ProjectStatus;
   can_activate: boolean;
   onboarding_missing: string[];
 };
@@ -96,6 +97,10 @@ export function updateProject(projectId: number, input: Partial<CreateProjectInp
 
 export function transitionProject(projectId: number, status: Exclude<ProjectStatus, 'draft'>, reason = '') {
   return postJSON<Project>(`/projects/${projectId}/transitions`, { status, reason });
+}
+
+export function deleteProject(projectId: number, confirmation: string, reason: string) {
+  return deleteJSON<void>(`/projects/${projectId}`, { confirmation, reason });
 }
 
 export function getOnboardingStatus(projectId: number) {

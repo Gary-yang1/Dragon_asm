@@ -20,3 +20,23 @@ sql:
         emit_pointers_for_null_types: true
         emit_enum_valid_method: true
         emit_all_enum_values: true
+        # MySQL JSON columns default to json.RawMessage, which database/sql cannot
+        # scan a NULL into ("unsupported Scan, storing driver.Value type <nil>").
+        # Every nullable JSON column therefore made its whole list endpoint 500 as
+        # soon as one row left it empty — a port exposure with no certificate SANs
+        # took out the exposure page, an unscored risk took out the risk page.
+        # []byte is what database/sql handles natively (NULL becomes nil), and it
+        # is assignable to json.RawMessage in both directions, so callers are
+        # unaffected.
+        overrides:
+          - db_type: "json"
+            go_type:
+              type: "byte"
+              slice: true
+          # The nullable variant resolves separately, and it is the one that was
+          # actually breaking.
+          - db_type: "json"
+            nullable: true
+            go_type:
+              type: "byte"
+              slice: true

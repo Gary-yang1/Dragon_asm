@@ -31,13 +31,10 @@ function deltaColor(trend: StatCardDelta['trend']) {
   return '#94a3b8';
 }
 
-export function StatCard({ label, value, icon, tone = 'neutral', suffix, delta, hint }: StatCardProps) {
+export function StatCard({ label, value, tone = 'neutral', suffix, delta, hint }: StatCardProps) {
   return (
     <article className={`metric-card ${toneClass[tone]}`}>
-      <div className="metric-card-head">
-        <span className="metric-card-icon">{icon}</span>
-        {delta ? <Badge count={delta.text} style={{ backgroundColor: deltaColor(delta.trend) }} /> : null}
-      </div>
+      {delta ? <Badge count={delta.text} style={{ backgroundColor: deltaColor(delta.trend) }} /> : null}
       <div className="metric-card-body">
         <div className="metric-card-value">
           {value}

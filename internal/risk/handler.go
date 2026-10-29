@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/casbin/casbin/v2"
@@ -40,6 +41,15 @@ func (h *Handler) RegisterRoutes(protected *gin.RouterGroup) {
 	g.GET("", h.list)
 	g.GET("/:id", h.detail)
 	g.POST("/:id/status-transitions", h.transitionStatus)
+
+	// Suppression rules: the service, matching logic and table already existed —
+	// applySuppression marks matching risks suppressed on write — but there was no
+	// HTTP surface, so the feature was unreachable and the console's calls 404'd.
+	sup := protected.Group("/projects/:project_id/risk-suppressions")
+	sup.Use(auth.ProjectIDFromParam("project_id"))
+	sup.GET("", h.listSuppressionRules)
+	sup.POST("", h.createSuppressionRule)
+	sup.PATCH("/:id/enabled", h.setSuppressionRuleEnabled)
 
 	sla := protected.Group("/projects/:project_id/sla-policies")
 	sla.Use(auth.ProjectIDFromParam("project_id"))
@@ -81,6 +91,9 @@ type response struct {
 	UpdatedAt         string          `json:"updated_at"`
 	CreatedBy         string          `json:"created_by"`
 	UpdatedBy         string          `json:"updated_by"`
+	// AvailableActions is derived from the status-transition table so the client
+	// need not duplicate it. Advisory only — the transition endpoint re-checks.
+	AvailableActions []string `json:"available_actions"`
 }
 
 type transitionRequest struct {
@@ -129,6 +142,24 @@ func toResponse(r *Risk) response {
 		ConfirmedAt: formatTime(r.ConfirmedAt), FixedAt: formatTime(r.FixedAt),
 		CreatedAt: formatTime(r.CreatedAt), UpdatedAt: formatTime(r.UpdatedAt),
 		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy,
+		AvailableActions: AvailableStatusActions(r.Status),
+	}
+}
+
+// writeListErr maps filter-validation failures to 400 rather than 500 or an
+// empty page.
+func writeListErr(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrInvalidSeverity):
+		httpx.BadRequest(c, "invalid severity")
+	case errors.Is(err, ErrInvalidStatusAction):
+		httpx.BadRequest(c, "invalid status")
+	case errors.Is(err, ErrFieldTooLong):
+		httpx.BadRequest(c, "filter value too long")
+	case errors.Is(err, ErrInvalidProjectID):
+		httpx.BadRequest(c, "invalid project_id")
+	default:
+		httpx.InternalError(c, err)
 	}
 }
 
@@ -155,19 +186,35 @@ func (h *Handler) list(c *gin.Context) {
 		httpx.BadRequest(c, "page_number out of range")
 		return
 	}
-	rows, err := h.svc.List(c.Request.Context(), pid, limit, int32(offset)) //nolint:gosec // guarded above.
-	if err != nil {
-		httpx.Internal(c)
-		return
+	// severity / status / owner / keyword were accepted and dropped, so the console
+	// could only filter the rows already loaded. total reflects the filtered set so
+	// pagination stays consistent with what is shown.
+	var assetID uint64
+	if raw := c.Query("asset_id"); raw != "" {
+		parsed, parseErr := strconv.ParseUint(raw, 10, 64)
+		if parseErr != nil || parsed == 0 {
+			httpx.BadRequest(c, "invalid asset_id")
+			return
+		}
+		assetID = parsed
 	}
-	total, err := h.svc.Count(c.Request.Context(), pid)
+	rows, total, err := h.svc.ListFiltered(c.Request.Context(), ListFilter{
+		ProjectID: pid,
+		Severity:  c.Query("severity"),
+		Status:    c.Query("status"),
+		Owner:     c.Query("owner"),
+		Keyword:   c.Query("keyword"),
+		AssetID:   assetID,
+		Limit:     limit,
+		Offset:    int32(offset), //nolint:gosec // guarded above.
+	})
 	if err != nil {
-		httpx.Internal(c)
+		writeListErr(c, err)
 		return
 	}
 	items := make([]response, 0, len(rows))
 	for _, r := range rows {
-		items = append(items, toResponse(r))
+		items = append(items, h.withPermittedActions(c, role, pid, toResponse(r)))
 	}
 	httpx.OK(c, httpx.PageData[response]{Items: items, Total: total, PageSize: pq.PageSize, PageNumber: pq.PageNumber})
 }
@@ -193,7 +240,151 @@ func (h *Handler) detail(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	httpx.OK(c, toResponse(r))
+	httpx.OK(c, h.withPermittedActions(c, role, pid, toResponse(r)))
+}
+
+type suppressionRuleRequest struct {
+	Name      string `json:"name"`
+	RiskType  string `json:"risk_type"`
+	RuleID    string `json:"rule_id"`
+	AssetID   uint64 `json:"asset_id"`
+	Reason    string `json:"reason"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+type suppressionRuleResponse struct {
+	ID        uint64 `json:"id"`
+	ProjectID uint64 `json:"project_id"`
+	Name      string `json:"name"`
+	RiskType  string `json:"risk_type"`
+	RuleID    string `json:"rule_id"`
+	AssetID   uint64 `json:"asset_id,omitempty"`
+	Reason    string `json:"reason"`
+	ExpiresAt string `json:"expires_at"`
+	Enabled   bool   `json:"enabled"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	CreatedBy string `json:"created_by"`
+	UpdatedBy string `json:"updated_by"`
+}
+
+func toSuppressionRuleResponse(r *SuppressionRule) suppressionRuleResponse {
+	return suppressionRuleResponse{
+		ID: r.ID, ProjectID: r.ProjectID, Name: r.Name, RiskType: r.RiskType,
+		RuleID: r.RuleID, AssetID: r.AssetID, Reason: r.Reason,
+		ExpiresAt: formatTime(r.ExpiresAt), Enabled: r.Enabled,
+		CreatedAt: formatTime(r.CreatedAt), UpdatedAt: formatTime(r.UpdatedAt),
+		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy,
+	}
+}
+
+func (h *Handler) listSuppressionRules(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	_, role, ok := h.access(c, pid)
+	if !ok {
+		return
+	}
+	// Reading which risks are being suppressed is part of triage, so it follows
+	// risk:read; changing them needs the dedicated risk:suppress permission.
+	if !h.permit(c, role, pid, asmcasbin.PermRiskRead) {
+		return
+	}
+	pq, ok := httpx.BindPageQuery(c)
+	if !ok {
+		return
+	}
+	const maxInt32 = 1<<31 - 1
+	offset := pq.Offset()
+	if offset > maxInt32 {
+		httpx.BadRequest(c, "page_number out of range")
+		return
+	}
+	rows, total, err := h.svc.ListSuppressionRules(c.Request.Context(), pid,
+		int32(pq.Limit()), int32(offset)) //nolint:gosec // bounded by BindPageQuery.
+	if err != nil {
+		writeListErr(c, err)
+		return
+	}
+	items := make([]suppressionRuleResponse, 0, len(rows))
+	for _, r := range rows {
+		items = append(items, toSuppressionRuleResponse(r))
+	}
+	httpx.OK(c, httpx.PageData[suppressionRuleResponse]{
+		Items: items, Total: total, PageSize: pq.PageSize, PageNumber: pq.PageNumber,
+	})
+}
+
+func (h *Handler) createSuppressionRule(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	p, role, ok := h.access(c, pid)
+	if !ok {
+		return
+	}
+	if !h.permit(c, role, pid, asmcasbin.PermRiskSuppress) {
+		return
+	}
+	var req suppressionRuleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, "invalid json body")
+		return
+	}
+	var expiresAt time.Time
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		parsed, err := parseRequestTime(req.ExpiresAt)
+		if err != nil {
+			httpx.BadRequest(c, "invalid expires_at")
+			return
+		}
+		expiresAt = parsed
+	}
+	// Tenant and org derive from the resolved project, never from the body.
+	rule, err := h.svc.CreateSuppressionRule(c.Request.Context(), CreateSuppressionRuleInput{
+		TenantID: p.TenantID, OrgID: p.OrgID, ProjectID: pid,
+		Name: req.Name, RiskType: req.RiskType, RuleID: req.RuleID, AssetID: req.AssetID,
+		Reason: req.Reason, ExpiresAt: expiresAt, ActorID: c.GetString(auth.CtxUserID),
+	})
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	httpx.Created(c, toSuppressionRuleResponse(rule))
+}
+
+func (h *Handler) setSuppressionRuleEnabled(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	_, role, ok := h.access(c, pid)
+	if !ok {
+		return
+	}
+	if !h.permit(c, role, pid, asmcasbin.PermRiskSuppress) {
+		return
+	}
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, "invalid json body")
+		return
+	}
+	if err := h.svc.SetSuppressionRuleEnabled(c.Request.Context(), pid, id, req.Enabled,
+		c.GetString(auth.CtxUserID)); err != nil {
+		writeErr(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"updated": true})
 }
 
 func (h *Handler) listSLAPolicies(c *gin.Context) {
@@ -270,6 +461,13 @@ func (h *Handler) transitionStatus(c *gin.Context) {
 		httpx.BadRequest(c, "invalid json body")
 		return
 	}
+	// risk:write covers ordinary triage. Retiring a risk without fixing it needs a
+	// second, dedicated permission on top — see elevatedPermissionForAction.
+	if perm := elevatedPermissionForAction(req.Action); perm != "" {
+		if !h.permit(c, role, pid, perm) {
+			return
+		}
+	}
 	var slaDueAt time.Time
 	if req.SLADueAt != "" {
 		var err error
@@ -307,7 +505,30 @@ func (h *Handler) transitionStatus(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	httpx.OK(c, toResponse(r))
+	httpx.OK(c, h.withPermittedActions(c, role, pid, toResponse(r)))
+}
+
+// elevatedPermissionForAction returns the extra permission an action requires on
+// top of risk:write, or "" when risk:write alone is enough.
+//
+// accept and false_positive are the two transitions that retire a risk without it
+// being fixed — the states CLAUDE.md §4.4 singles out for approval. The role
+// matrix already declares risk:accept and risk:suppress and withholds them from
+// security_ops, developer, and viewer; before this check those permissions were
+// declared but enforced nowhere, so risk:write alone reached risk_accepted.
+//
+// Which roles hold these stays a policy question answered by the seed matrix in
+// platform/auth/casbin/seed.go; this function only decides which permission the
+// action needs.
+func elevatedPermissionForAction(action string) string {
+	switch action {
+	case StatusActionAccept:
+		return asmcasbin.PermRiskAccept
+	case StatusActionFalsePositive:
+		return asmcasbin.PermRiskSuppress
+	default:
+		return ""
+	}
 }
 
 func (h *Handler) access(c *gin.Context, pid uint64) (*project.Project, string, bool) {
@@ -326,12 +547,35 @@ func (h *Handler) access(c *gin.Context, pid uint64) (*project.Project, string, 
 	return nil, "", false
 }
 
-func (h *Handler) permit(c *gin.Context, role string, pid uint64, perm string) bool {
+// rolePermits checks one permission without writing a response, so callers can
+// combine checks or filter a list of candidate actions.
+func (h *Handler) rolePermits(c *gin.Context, role string, pid uint64, perm string) bool {
 	if role != "" && h.enforcer.HasPolicy(role, asmcasbin.GlobalDomain, perm, "allow") {
 		return true
 	}
 	userID := c.GetString(auth.CtxUserID)
-	if ok, err := h.enforcer.Enforce(userID, strconv.FormatUint(pid, 10), perm, "allow"); err == nil && ok {
+	ok, err := h.enforcer.Enforce(userID, strconv.FormatUint(pid, 10), perm, "allow")
+	return err == nil && ok
+}
+
+// withPermittedActions narrows a response's AvailableActions to what this caller
+// may actually perform. AvailableStatusActions answers "what does the state
+// machine allow"; without this filter the UI would offer an accept button to a
+// caller who lacks risk:accept and the click would 403.
+func (h *Handler) withPermittedActions(c *gin.Context, role string, pid uint64, resp response) response {
+	allowed := make([]string, 0, len(resp.AvailableActions))
+	for _, action := range resp.AvailableActions {
+		perm := elevatedPermissionForAction(action)
+		if perm == "" || h.rolePermits(c, role, pid, perm) {
+			allowed = append(allowed, action)
+		}
+	}
+	resp.AvailableActions = allowed
+	return resp
+}
+
+func (h *Handler) permit(c *gin.Context, role string, pid uint64, perm string) bool {
+	if h.rolePermits(c, role, pid, perm) {
 		return true
 	}
 	httpx.Forbidden(c)
@@ -364,7 +608,7 @@ func writeErr(c *gin.Context, err error) {
 		httpx.BadRequest(c, "invalid project_id")
 	case errors.Is(err, ErrInvalidStatusTransition):
 		httpx.Conflict(c, httpx.ErrCodeInvalidTransition, "invalid risk status transition")
-	case errors.Is(err, ErrInvalidStatusAction), errors.Is(err, ErrReasonRequired), errors.Is(err, ErrOwnerRequired), errors.Is(err, ErrSLARequired), errors.Is(err, ErrApprovedByRequired), errors.Is(err, ErrReviewRequiredAtMissing), errors.Is(err, ErrInvalidSeverity), errors.Is(err, ErrInvalidSLAHours):
+	case errors.Is(err, ErrInvalidStatusAction), errors.Is(err, ErrReasonRequired), errors.Is(err, ErrOwnerRequired), errors.Is(err, ErrSLARequired), errors.Is(err, ErrApprovedByRequired), errors.Is(err, ErrSelfApprovalForbidden), errors.Is(err, ErrReviewRequiredAtMissing), errors.Is(err, ErrInvalidSeverity), errors.Is(err, ErrInvalidSLAHours):
 		httpx.BadRequest(c, err.Error())
 	default:
 		httpx.Internal(c)

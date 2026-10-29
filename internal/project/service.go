@@ -37,6 +37,27 @@ type Service struct {
 	enforcer    *casbin.Enforcer
 	db          *sql.DB
 	auditSink   auditRecorder
+	// Domain ownership verification. Without a secret the challenge cannot be
+	// issued, so verification fails closed rather than accepting any token.
+	txtResolver     TXTResolver
+	ownershipSecret []byte
+}
+
+// WithOwnershipVerification enables the DNS ownership challenge. The secret must
+// be stable across restarts and replicas, otherwise a published token stops
+// matching; it is the same class of material as the JWT secrets.
+func WithOwnershipVerification(secret []byte, resolver TXTResolver) ServiceOption {
+	return func(s *Service) {
+		if len(secret) == 0 {
+			return
+		}
+		s.ownershipSecret = secret
+		if resolver != nil {
+			s.txtResolver = resolver
+		} else {
+			s.txtResolver = NewSystemTXTResolver()
+		}
+	}
 }
 
 type actorScopeResolver interface {

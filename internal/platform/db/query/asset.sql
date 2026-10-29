@@ -21,6 +21,86 @@ WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 LIMIT ? OFFSET ?;
 
+-- name: ListAssetsByProjectIDs :many
+SELECT * FROM asset
+WHERE project_id = sqlc.arg(project_id)
+  AND id IN (sqlc.slice('ids'))
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id;
+
+-- Filtered variants. The API accepted asset_type/status/keyword and ignored them,
+-- so the console could only narrow the rows already on screen. An empty argument
+-- means "no filter" so one query serves every combination.
+-- name: ListAssetsByProjectFiltered :many
+SELECT * FROM asset
+WHERE project_id = sqlc.arg(project_id)
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (sqlc.arg(asset_type) = '' OR asset_type = sqlc.arg(asset_type))
+  AND (
+      sqlc.arg(category) = ''
+      OR (sqlc.arg(category) = 'domains' AND asset_type IN ('domain', 'subdomain'))
+      OR (sqlc.arg(category) = 'ips' AND asset_type = 'ip')
+      OR (sqlc.arg(category) = 'web' AND asset_type = 'web')
+      OR (sqlc.arg(category) = 'external' AND asset_type IN ('cloud_resource', 'third_party'))
+  )
+  AND (sqlc.arg(status) = '' OR status = sqlc.arg(status))
+  AND (
+      sqlc.arg(keyword) = ''
+      OR display_name LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR value LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR owner LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR business_unit LIKE CONCAT('%', sqlc.arg(keyword), '%')
+  )
+ORDER BY id
+LIMIT ? OFFSET ?;
+
+-- name: CountAssetsByProjectFiltered :one
+SELECT COUNT(*) FROM asset
+WHERE project_id = sqlc.arg(project_id)
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (sqlc.arg(asset_type) = '' OR asset_type = sqlc.arg(asset_type))
+  AND (
+      sqlc.arg(category) = ''
+      OR (sqlc.arg(category) = 'domains' AND asset_type IN ('domain', 'subdomain'))
+      OR (sqlc.arg(category) = 'ips' AND asset_type = 'ip')
+      OR (sqlc.arg(category) = 'web' AND asset_type = 'web')
+      OR (sqlc.arg(category) = 'external' AND asset_type IN ('cloud_resource', 'third_party'))
+  )
+  AND (sqlc.arg(status) = '' OR status = sqlc.arg(status))
+  AND (
+      sqlc.arg(keyword) = ''
+      OR display_name LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR value LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR owner LIKE CONCAT('%', sqlc.arg(keyword), '%')
+      OR business_unit LIKE CONCAT('%', sqlc.arg(keyword), '%')
+  );
+
+-- name: GetAssetSummary :one
+SELECT
+    COUNT(*) AS total,
+    COUNT(CASE WHEN status <> 'ignored' THEN 1 END) AS managed_total,
+    COUNT(CASE WHEN status = 'active' THEN 1 END) AS active,
+    COUNT(CASE WHEN status = 'inactive' THEN 1 END) AS inactive,
+    COUNT(CASE WHEN status = 'ignored' THEN 1 END) AS ignored,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'domain' THEN 1 END) AS domain_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'subdomain' THEN 1 END) AS subdomain_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'ip' THEN 1 END) AS ip_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'port' THEN 1 END) AS port_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'service' THEN 1 END) AS service_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'web' THEN 1 END) AS web_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'certificate' THEN 1 END) AS certificate_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'cloud_resource' THEN 1 END) AS cloud_resource_count,
+    COUNT(CASE WHEN status <> 'ignored' AND asset_type = 'third_party' THEN 1 END) AS third_party_count,
+    COUNT(CASE WHEN status <> 'ignored' AND first_seen >= sqlc.arg(new_since) THEN 1 END) AS new_24h,
+    COUNT(CASE WHEN status <> 'ignored' AND last_seen >= sqlc.arg(observed_since) THEN 1 END) AS observed_24h,
+    COUNT(CASE WHEN status <> 'ignored' AND last_seen < sqlc.arg(stale_before) THEN 1 END) AS stale_30d,
+    COUNT(CASE WHEN status <> 'ignored' AND owner = '' THEN 1 END) AS unowned,
+    COUNT(CASE WHEN status <> 'ignored' AND business_unit = '' THEN 1 END) AS unassigned_business_unit,
+    COUNT(CASE WHEN status <> 'ignored' AND confidence < sqlc.arg(low_confidence_below) THEN 1 END) AS low_confidence
+FROM asset
+WHERE project_id = sqlc.arg(project_id)
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
 -- name: FindProjectRootDomainAsset :one
 SELECT a.id FROM project_domain_profile pdp
 INNER JOIN asset a ON a.id = pdp.asset_id AND a.project_id = pdp.project_id

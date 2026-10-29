@@ -2,9 +2,11 @@ package capability
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestHTTPPassiveProviderDoesNotFollowRedirects(t *testing.T) {
@@ -56,5 +58,39 @@ func assertProviderRedirectRejected(t *testing.T, request func(string, *http.Cli
 	}
 	if redirected {
 		t.Fatal("provider client followed redirect")
+	}
+}
+
+func TestNXDOMAINIsNoRecordRatherThanSourceFailure(t *testing.T) {
+	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, err := listener.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n < 12 {
+				continue
+			}
+			reply := append([]byte{}, buf[:n]...)
+			reply[2] = 0x81
+			reply[3] = 0x83
+			for i := 6; i < 12; i++ {
+				reply[i] = 0
+			}
+			listener.WriteTo(reply, addr)
+		}
+	}()
+	resolver := NewNetResolver(&net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "udp", listener.LocalAddr().String())
+	}}, time.Second)
+	results, err := resolver.Resolve(context.Background(), []string{"missing.example.test"}, 1, immediateGate{})
+	if err != nil || len(results) != 1 || results[0].Status != "no_records" {
+		t.Fatalf("NXDOMAIN misclassified: %+v %v", results, err)
 	}
 }

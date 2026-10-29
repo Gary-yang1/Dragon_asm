@@ -22,6 +22,46 @@ tags:
   - name: jobs
     description: Asynchronous engine job control.
 paths:
+  /management/configuration:
+    get:
+      summary: Export provider settings to the authenticated ASM configuration service.
+      description: Service-to-service only; contains secrets and must never be exposed to browser clients or logs. Uses the engine Bearer credential, no-store, and should use TLS across untrusted networks.
+      responses:
+        "200": { description: ProviderConfiguration JSON object. }
+        "401": { description: Invalid engine authentication. }
+  /management/configurations/{version}:
+    put:
+      summary: Persist an immutable encrypted provider configuration version.
+      parameters:
+        - { name: version, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                subfinder_disabled: { type: boolean }
+                quake_enabled: { type: boolean }
+                quake_key: { type: string, writeOnly: true }
+                hunter_enabled: { type: boolean }
+                hunter_key: { type: string, writeOnly: true }
+                fofa_enabled: { type: boolean }
+                fofa_email: { type: string, writeOnly: true }
+                fofa_key: { type: string, writeOnly: true }
+                fofa_max_results: { type: integer, minimum: 1, maximum: 1000 }
+                provider_name: { type: string }
+                provider_url: { type: string }
+                provider_token: { type: string, writeOnly: true }
+                provider_max_results: { type: integer, minimum: 1, maximum: 1000 }
+                dns_url: { type: string }
+                dns_token: { type: string, writeOnly: true }
+                dns_max_results: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        "200": { description: Persisted version, idempotent for the same payload. }
+        "401": { description: Invalid engine authentication. }
+        "409": { description: Invalid configuration or conflicting immutable version. }
   /scan:
     post:
       tags: [jobs]
@@ -285,6 +325,11 @@ components:
         - callback_url
         - options
       properties:
+        configuration_version:
+          type: integer
+          minimum: 0
+          description: Immutable provider configuration version. Zero/omitted uses the preserved legacy baseline; nonzero versions must be provisioned before dispatch.
+
         schema_version:
           $ref: "#/components/schemas/SchemaVersion"
         run_id:
@@ -346,7 +391,7 @@ components:
           uniqueItems: true
           items:
             type: string
-            enum: [subfinder, fofa, quake, hunter, certificate_transparency]
+            enum: [auto, subfinder, fofa, quake, hunter, certificate_transparency]
         max_results:
           type: integer
           minimum: 1
@@ -400,6 +445,21 @@ components:
         error_summary:
           type: string
           maxLength: 1024
+    StageProgress:
+      type: object
+      additionalProperties: false
+      required: [stage, provider, target, status, discovered, completed, total, failed, no_records]
+      properties:
+        stage: { type: string, enum: [collect, dns] }
+        provider: { type: string, minLength: 1, maxLength: 64 }
+        target: { type: string, maxLength: 253 }
+        status: { type: string, enum: [queued, running, success, partial, failed, skipped] }
+        discovered: { type: integer, minimum: 0, maximum: 1000000 }
+        completed: { type: integer, minimum: 0, maximum: 1000000 }
+        total: { type: integer, minimum: 0, maximum: 1000000 }
+        failed: { type: integer, minimum: 0, maximum: 1000000 }
+        no_records: { type: integer, minimum: 0, maximum: 1000000 }
+        message: { type: string, maxLength: 512 }
     CallbackBatchV1:
       type: object
       additionalProperties: false
@@ -417,6 +477,7 @@ components:
         - provider_errors
         - error_summary
       properties:
+        stage_progress: { $ref: "#/components/schemas/StageProgress" }
         schema_version:
           $ref: "#/components/schemas/SchemaVersion"
         run_id:

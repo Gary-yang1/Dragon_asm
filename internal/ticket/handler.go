@@ -81,11 +81,18 @@ type response struct {
 	UpdatedAt        string `json:"updated_at"`
 	CreatedBy        string `json:"created_by"`
 	UpdatedBy        string `json:"updated_by"`
+	// AvailableActions is derived from the transition table so the client need not
+	// duplicate it. Advisory only — the transition endpoint re-checks.
+	AvailableActions []string `json:"available_actions"`
 }
 
 func (h *Handler) create(c *gin.Context) {
 	pid, ok := h.projectID(c)
-	if !ok || !h.accessAndPermit(c, pid, asmcasbin.PermTicketWrite) {
+	if !ok {
+		return
+	}
+	role, permitted := h.accessAndPermit(c, pid, asmcasbin.PermTicketWrite)
+	if !permitted {
 		return
 	}
 	var req createRequest
@@ -108,12 +115,16 @@ func (h *Handler) create(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	httpx.Created(c, toResponse(t))
+	httpx.Created(c, h.withPermittedActions(c, role, pid, toResponse(t)))
 }
 
 func (h *Handler) list(c *gin.Context) {
 	pid, ok := h.projectID(c)
-	if !ok || !h.accessAndPermit(c, pid, asmcasbin.PermTicketRead) {
+	if !ok {
+		return
+	}
+	role, permitted := h.accessAndPermit(c, pid, asmcasbin.PermTicketRead)
+	if !permitted {
 		return
 	}
 	pq, ok := httpx.BindPageQuery(c)
@@ -128,24 +139,28 @@ func (h *Handler) list(c *gin.Context) {
 	}
 	rows, err := h.svc.List(c.Request.Context(), pid, int32(pq.Limit()), int32(offset)) //nolint:gosec // bounds checked.
 	if err != nil {
-		httpx.Internal(c)
+		httpx.InternalError(c, err)
 		return
 	}
 	total, err := h.svc.Count(c.Request.Context(), pid)
 	if err != nil {
-		httpx.Internal(c)
+		httpx.InternalError(c, err)
 		return
 	}
 	items := make([]response, 0, len(rows))
 	for _, t := range rows {
-		items = append(items, toResponse(t))
+		items = append(items, h.withPermittedActions(c, role, pid, toResponse(t)))
 	}
 	httpx.OK(c, httpx.PageData[response]{Items: items, Total: total, PageSize: pq.PageSize, PageNumber: pq.PageNumber})
 }
 
 func (h *Handler) detail(c *gin.Context) {
 	pid, ok := h.projectID(c)
-	if !ok || !h.accessAndPermit(c, pid, asmcasbin.PermTicketRead) {
+	if !ok {
+		return
+	}
+	role, permitted := h.accessAndPermit(c, pid, asmcasbin.PermTicketRead)
+	if !permitted {
 		return
 	}
 	id, ok := parseID(c)
@@ -157,12 +172,16 @@ func (h *Handler) detail(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	httpx.OK(c, toResponse(t))
+	httpx.OK(c, h.withPermittedActions(c, role, pid, toResponse(t)))
 }
 
 func (h *Handler) transition(c *gin.Context) {
 	pid, ok := h.projectID(c)
-	if !ok || !h.accessAndPermit(c, pid, asmcasbin.PermTicketWrite) {
+	if !ok {
+		return
+	}
+	role, permitted := h.accessAndPermit(c, pid, asmcasbin.PermTicketWrite)
+	if !permitted {
 		return
 	}
 	id, ok := parseID(c)
@@ -173,6 +192,20 @@ func (h *Handler) transition(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.BadRequest(c, "invalid json body")
 		return
+	}
+	// ticket:write covers ordinary progression. Approving a retest, and any action
+	// that reaches into the linked risk, each need a further permission.
+	for _, perm := range []string{
+		ticketPermissionForAction(req.Action),
+		riskPermissionForTicketAction(req.Action),
+	} {
+		if perm == "" {
+			continue
+		}
+		if !h.rolePermits(c, role, pid, perm) {
+			httpx.Forbidden(c)
+			return
+		}
 	}
 	dueAt, err := parseOptionalTime(req.DueAt)
 	if err != nil {
@@ -198,7 +231,7 @@ func (h *Handler) transition(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	httpx.OK(c, toResponse(t))
+	httpx.OK(c, h.withPermittedActions(c, role, pid, toResponse(t)))
 }
 
 func (h *Handler) projectID(c *gin.Context) (uint64, bool) {
@@ -210,29 +243,94 @@ func (h *Handler) projectID(c *gin.Context) (uint64, bool) {
 	return pid, true
 }
 
-func (h *Handler) accessAndPermit(c *gin.Context, pid uint64, perm string) bool {
+// accessAndPermit resolves the caller's project access and checks perm. It
+// returns the caller's project role so a handler can test a second,
+// action-specific permission without re-querying membership.
+func (h *Handler) accessAndPermit(c *gin.Context, pid uint64, perm string) (string, bool) {
 	userID := c.GetString(auth.CtxUserID)
 	_, role, err := h.projects.Access(c.Request.Context(), userID, pid)
 	switch {
 	case err == nil:
 	case errors.Is(err, project.ErrNotFound):
 		httpx.NotFound(c, httpx.ErrCodeProjectNotFound, "project not found")
-		return false
+		return "", false
 	case errors.Is(err, project.ErrForbidden):
 		httpx.Forbidden(c)
-		return false
+		return "", false
 	default:
 		httpx.Internal(c)
-		return false
+		return "", false
 	}
+	if h.rolePermits(c, role, pid, perm) {
+		return role, true
+	}
+	httpx.Forbidden(c)
+	return "", false
+}
+
+// rolePermits checks one permission against an already-resolved role without
+// writing a response, so callers can combine several checks.
+func (h *Handler) rolePermits(c *gin.Context, role string, pid uint64, perm string) bool {
 	if role != "" && h.enforcer.HasPolicy(role, asmcasbin.GlobalDomain, perm, "allow") {
 		return true
 	}
-	if ok, err := h.enforcer.Enforce(userID, strconv.FormatUint(pid, 10), perm, "allow"); err == nil && ok {
-		return true
+	userID := c.GetString(auth.CtxUserID)
+	ok, err := h.enforcer.Enforce(userID, strconv.FormatUint(pid, 10), perm, "allow")
+	return err == nil && ok
+}
+
+// withPermittedActions narrows a response's AvailableActions to what this caller
+// may actually perform. AvailableActions answers "what does the transition table
+// allow"; without this filter the UI would offer an accept_risk button to a
+// caller who lacks risk:accept and the click would 403.
+func (h *Handler) withPermittedActions(c *gin.Context, role string, pid uint64, resp response) response {
+	allowed := make([]string, 0, len(resp.AvailableActions))
+	for _, action := range resp.AvailableActions {
+		permitted := true
+		for _, perm := range []string{ticketPermissionForAction(action), riskPermissionForTicketAction(action)} {
+			if perm != "" && !h.rolePermits(c, role, pid, perm) {
+				permitted = false
+				break
+			}
+		}
+		if permitted {
+			allowed = append(allowed, action)
+		}
 	}
-	httpx.Forbidden(c)
-	return false
+	resp.AvailableActions = allowed
+	return resp
+}
+
+// riskPermissionForTicketAction returns the risk-domain permission a ticket
+// action needs because of what it does to the linked risk, or "" when the action
+// stays inside the ticket domain.
+//
+// Service.Transition drives the linked risk directly (ticket/service.go
+// transitionLinkedRisk): accept_risk maps to the risk accept transition and
+// false_positive to the risk false-positive transition. Gating these only on
+// ticket:write let a developer — who holds ticket:write but only risk:read —
+// move a risk into risk_accepted through the ticket endpoint, bypassing the
+// risk-domain permissions entirely.
+func riskPermissionForTicketAction(action string) string {
+	switch action {
+	case ActionAcceptRisk:
+		return asmcasbin.PermRiskAccept
+	case ActionFalsePositive:
+		return asmcasbin.PermRiskSuppress
+	default:
+		return ""
+	}
+}
+
+// ticketPermissionForAction returns the extra ticket-domain permission an action
+// needs on top of ticket:write. Passing a retest closes the ticket on the
+// strength of the reviewer's judgement, which is what ticket:approve exists for;
+// it was declared but enforced nowhere.
+func ticketPermissionForAction(action string) string {
+	if action == ActionRetestPass {
+		return asmcasbin.PermTicketApprove
+	}
+	return ""
 }
 
 func parseID(c *gin.Context) (uint64, bool) {
@@ -276,6 +374,7 @@ func toResponse(t *Ticket) response {
 		ExternalTicketID: t.ExternalTicketID, ClosedAt: formatTime(t.ClosedAt),
 		CreatedAt: formatTime(t.CreatedAt), UpdatedAt: formatTime(t.UpdatedAt),
 		CreatedBy: t.CreatedBy, UpdatedBy: t.UpdatedBy,
+		AvailableActions: AvailableActions(t.Status),
 	}
 }
 

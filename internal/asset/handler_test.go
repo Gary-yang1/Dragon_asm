@@ -231,6 +231,58 @@ func TestHandlerList(t *testing.T) {
 	assert.Len(t, page.Items, 2)
 }
 
+func TestHandlerListByBusinessCategory(t *testing.T) {
+	env := newTestEnv(t, 1)
+	body := map[string]any{"rows": []map[string]any{
+		{"asset_type": "domain", "value": "example.com"},
+		{"asset_type": "subdomain", "value": "www.example.com"},
+		{"asset_type": "ip", "value": "203.0.113.10"},
+	}}
+	w := do(t, env.engine, http.MethodPost, "/api/v1/projects/1/assets/import", body)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = do(t, env.engine, http.MethodGet, "/api/v1/projects/1/assets?category=domains", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	var page struct {
+		Items []struct {
+			AssetType string `json:"asset_type"`
+		} `json:"items"`
+		Total int64 `json:"total"`
+	}
+	unwrap(t, w, &page)
+	assert.Equal(t, int64(2), page.Total)
+	for _, item := range page.Items {
+		assert.Contains(t, []string{asset.TypeDomain, asset.TypeSubdomain}, item.AssetType)
+	}
+
+	w = do(t, env.engine, http.MethodGet, "/api/v1/projects/1/assets?category=unknown", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandlerAssetSummaryUsesProjectWideCounts(t *testing.T) {
+	env := newTestEnv(t, 1)
+	seedAsset(env.assetRepo, 10, 1, "domain:example.com", asset.StatusActive)
+	env.assetRepo.rows[key(1, "ip:203.0.113.10")] = &asset.Asset{
+		ID: 11, ProjectID: 1, AssetType: asset.TypeIP, AssetKey: "ip:203.0.113.10",
+		Value: "203.0.113.10", Status: asset.StatusInactive,
+	}
+	seedAsset(env.assetRepo, 12, 1, "domain:ignored.example", asset.StatusIgnored)
+	seedAsset(env.assetRepo, 13, 2, "domain:other.example", asset.StatusActive)
+
+	w := do(t, env.engine, http.MethodGet, "/api/v1/projects/1/assets/summary", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	var summary asset.AssetSummary
+	unwrap(t, w, &summary)
+	assert.Equal(t, int64(3), summary.Inventory.Total)
+	assert.Equal(t, int64(2), summary.Inventory.ManagedTotal)
+	assert.Equal(t, int64(1), summary.Inventory.Active)
+	assert.Equal(t, int64(1), summary.Inventory.Inactive)
+	assert.Equal(t, int64(1), summary.Inventory.Ignored)
+	assert.Equal(t, int64(1), summary.ByType.Domain)
+	assert.Equal(t, int64(1), summary.ByType.IP)
+	assert.Equal(t, uint8(50), summary.Governance.LowConfidenceBelow)
+}
+
 // Detail returns the asset; a missing asset is 404.
 func TestHandlerDetail(t *testing.T) {
 	env := newTestEnv(t, 1)
@@ -523,6 +575,39 @@ func TestHandlerListRelations(t *testing.T) {
 	require.Len(t, page.Items, 1)
 	assert.Equal(t, asset.DirectionIn, page.Items[0].Direction)
 	assert.Equal(t, fromID, page.Items[0].FromAssetID)
+}
+
+func TestHandlerAssetGraphReturnsReadableNodes(t *testing.T) {
+	env := newTestEnv(t, 1)
+	fromID, toID := importTwoAssets(t, env)
+	create := map[string]any{"to_asset_id": toID, "relation_type": "resolves_to", "source": "seed"}
+	w := do(t, env.engine, http.MethodPost, relPath(1, fromID), create)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	path := fmt.Sprintf("/api/v1/projects/1/assets/%d/graph", fromID)
+	w = do(t, env.engine, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	var graph struct {
+		Nodes []struct {
+			ID        uint64 `json:"id"`
+			AssetType string `json:"asset_type"`
+			Value     string `json:"value"`
+			Focus     bool   `json:"focus"`
+		} `json:"nodes"`
+		Edges []struct {
+			FromAssetID  uint64 `json:"from_asset_id"`
+			ToAssetID    uint64 `json:"to_asset_id"`
+			RelationType string `json:"relation_type"`
+		} `json:"edges"`
+	}
+	unwrap(t, w, &graph)
+	require.Len(t, graph.Nodes, 2)
+	require.Len(t, graph.Edges, 1)
+	assert.Equal(t, asset.RelationResolvesTo, graph.Edges[0].RelationType)
+	assert.Equal(t, fromID, graph.Edges[0].FromAssetID)
+	assert.Equal(t, toID, graph.Edges[0].ToAssetID)
+	assert.True(t, graph.Nodes[0].Focus || graph.Nodes[1].Focus)
+	assert.ElementsMatch(t, []string{"from.example.com", "1.2.3.4"}, []string{graph.Nodes[0].Value, graph.Nodes[1].Value})
 }
 
 // POST relations creates an edge (asset:write) and audits it.

@@ -414,6 +414,35 @@ func validateTransition(in TransitionInput, next string) error {
 	return nil
 }
 
+// allActions is the ticket transition vocabulary, ordered so the natural forward
+// step for a given status comes first; the UI renders the leading action as the
+// primary button.
+var allActions = []string{
+	ActionAssign,
+	ActionStart,
+	ActionSubmitRetest,
+	ActionRetestPass,
+	ActionClose,
+	ActionRetestReject,
+	ActionAcceptRisk,
+	ActionFalsePositive,
+	ActionExtend,
+	ActionCancel,
+}
+
+// AvailableActions returns the actions nextStatus accepts from current, derived
+// from the transition table itself so the two cannot drift apart. Advisory
+// display data only: the transition endpoint re-derives and re-authorizes.
+func AvailableActions(current string) []string {
+	actions := make([]string, 0, len(allActions))
+	for _, action := range allActions {
+		if _, err := nextStatus(action, current); err == nil {
+			actions = append(actions, action)
+		}
+	}
+	return actions
+}
+
 func nextStatus(action, current string) (string, error) {
 	switch action {
 	case ActionAssign:

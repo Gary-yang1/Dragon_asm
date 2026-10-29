@@ -14,6 +14,7 @@ import (
 	"github.com/Gary-yang1/Dragon_asm/internal/asset"
 	"github.com/Gary-yang1/Dragon_asm/internal/exposure"
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
+	"github.com/Gary-yang1/Dragon_asm/internal/risk"
 )
 
 var (
@@ -63,6 +64,7 @@ func (s *Service) ingestCallbackFactsWith(ctx context.Context, q *dbgen.Queries,
 	assetSvc := asset.NewService(assetRepo, asset.WithRelationRepository(relationRepo))
 	exposureRepo := exposure.NewRepository(q)
 	exposureSvc := exposure.NewService(exposureRepo)
+	riskSvc := risk.NewService(risk.NewRepository(q))
 	references := make(map[string]*asset.Asset, len(payload.Assets)*2)
 
 	for _, fact := range payload.Assets {
@@ -150,18 +152,41 @@ func (s *Service) ingestCallbackFactsWith(ctx context.Context, q *dbgen.Queries,
 		if err != nil {
 			return err
 		}
-		if _, err := exposureSvc.Ingest(ctx, exposure.IngestInput{
+		ingested, err := exposureSvc.Ingest(ctx, exposure.IngestInput{
 			TenantID: callback.TenantID, OrgID: callback.OrgID, ProjectID: callback.ProjectID, AssetID: parent.ID,
-			ExposureType: fact.ExposureType, Value: fact.Value, Name: fact.Value,
+			ExposureType: fact.ExposureType, Value: fact.Value, Name: defaultString(fact.Name, fact.Value),
 			Protocol: fact.Protocol, Port: fact.Port, Service: fact.Service, Version: fact.Version,
 			URL: fact.URL, Fingerprint: fact.Fingerprint, EvidenceHash: fact.EvidenceHash,
 			Source: "discovery", Confidence: derefConfidence(fact.Confidence), ActorID: "engine", DetectedAt: fact.ObservedAt,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
+		}
+		if derefBool(fact.ActiveProbe) {
+			if _, err := riskSvc.ApplyRules(ctx, callback.ProjectID, []risk.RuleTarget{{
+				TenantID: callback.TenantID, OrgID: callback.OrgID, ProjectID: callback.ProjectID,
+				AssetID: parent.ID, ExposureID: ingested.Exposure.ID,
+				ExposureType: ingested.Exposure.ExposureType,
+				Name:         ingested.Exposure.Name, Value: ingested.Exposure.Value,
+				Protocol: ingested.Exposure.Protocol, Port: ingested.Exposure.Port,
+				Service: ingested.Exposure.Service, Version: ingested.Exposure.Version,
+				URL: ingested.Exposure.URL, Fingerprint: ingested.Exposure.Fingerprint,
+				CPE: ingested.Exposure.CPE, EvidenceSummary: "active discovery exposure observation",
+				EvidenceRef: fact.EvidenceRef, Owner: parent.Owner, BusinessUnit: parent.BusinessUnit,
+				Source: activeResultSource, ObservedAt: fact.ObservedAt,
+			}}, "engine"); err != nil {
+				return err
+			}
 		}
 		if err := discoveryRepo.MarkDiscoveryObservationMaterialized(ctx, callback.ProjectID, observation.ID); err != nil {
 			return err
 		}
+	}
+
+	// After assets: a filing links to the domain profiles of domains that the
+	// asset pipeline has just materialised.
+	if err := s.ingestOrgFacts(ctx, q, callback, payload); err != nil {
+		return err
 	}
 
 	for _, providerErr := range payload.ProviderErrors {
@@ -193,6 +218,8 @@ func capabilityForTaskType(taskType string) string {
 		return "dns_enrich"
 	case TaskTypePassiveIntel:
 		return "subdomain_passive"
+	case TaskTypeOrgIntel:
+		return "org_intel"
 	default:
 		return strings.ToLower(strings.TrimSpace(taskType))
 	}

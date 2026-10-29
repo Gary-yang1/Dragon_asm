@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/assert"
@@ -59,7 +60,7 @@ func TestRegisterPeriodicTasksIsObservable(t *testing.T) {
 	assert.Equal(t, "@every 30s", registrar.registrations[0].cronspec)
 	assert.Equal(t, TaskTypeRecoverCallbacks, registrar.registrations[0].task.Type())
 	assert.Equal(t, "@every 1m", registrar.registrations[1].cronspec)
-	assert.Equal(t, TaskTypeReconcileTimedOutRun, registrar.registrations[1].task.Type())
+	assert.Equal(t, TaskTypeReconcileRunningRuns, registrar.registrations[1].task.Type())
 	for _, registration := range registrar.registrations {
 		values := map[asynq.OptionType]any{}
 		for _, option := range registration.opts {
@@ -68,4 +69,5 @@ func TestRegisterPeriodicTasksIsObservable(t *testing.T) {
 		assert.Equal(t, "critical", values[asynq.QueueOpt])
 		assert.Equal(t, 5, values[asynq.MaxRetryOpt])
 	}
+	assert.Equal(t, 2*time.Minute, registrar.registrations[1].opts[2].Value())
 }

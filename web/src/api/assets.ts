@@ -1,4 +1,4 @@
-import { getJSON, postJSON } from './http';
+import { getJSON, patchJSON, postJSON } from './http';
 
 export type PageData<T> = {
   items: T[];
@@ -39,11 +39,74 @@ export type AssetRelation = {
   direction?: 'in' | 'out';
 };
 
+export type AssetSummary = {
+  inventory: {
+    total: number;
+    managed_total: number;
+    active: number;
+    inactive: number;
+    ignored: number;
+  };
+  by_type: {
+    domain: number;
+    subdomain: number;
+    ip: number;
+    port: number;
+    service: number;
+    web: number;
+    certificate: number;
+    cloud_resource: number;
+    third_party: number;
+  };
+  freshness: {
+    new_24h: number;
+    observed_24h: number;
+    stale_30d: number;
+  };
+  governance: {
+    unowned: number;
+    unassigned_business_unit: number;
+    low_confidence: number;
+    low_confidence_below: number;
+  };
+};
+
+export type AssetGraphNode = {
+  id: number;
+  asset_type: string;
+  display_name: string;
+  value: string;
+  status: string;
+  source: string;
+  owner: string;
+  business_unit: string;
+  confidence: number;
+  last_seen: string;
+  focus: boolean;
+};
+
+export type AssetGraphEdge = {
+  id: number;
+  from_asset_id: number;
+  to_asset_id: number;
+  relation_type: string;
+  source: string;
+  confidence: number;
+  last_seen: string;
+};
+
+export type AssetGraphData = {
+  nodes: AssetGraphNode[];
+  edges: AssetGraphEdge[];
+  truncated: boolean;
+};
+
 export type AssetListQuery = {
   projectId: number;
   pageSize: number;
   pageNumber: number;
   assetType?: string;
+  category?: 'domains' | 'ips' | 'web' | 'external';
   status?: string;
   keyword?: string;
 };
@@ -96,6 +159,7 @@ export function listAssets(query: AssetListQuery) {
     page_size: query.pageSize,
     page_number: query.pageNumber,
     asset_type: query.assetType,
+    category: query.category,
     status: query.status,
     keyword: query.keyword
   });
@@ -103,6 +167,21 @@ export function listAssets(query: AssetListQuery) {
 
 export function getAsset(projectId: number, assetId: number) {
   return getJSON<Asset>(`/projects/${projectId}/assets/${assetId}`);
+}
+
+/** Fields the operator may edit; asset identity and discovery source stay read-only. */
+export type AssetUpdateInput = Partial<Pick<Asset, 'display_name' | 'owner' | 'business_unit' | 'status'>>;
+
+export function updateAsset(projectId: number, assetId: number, input: AssetUpdateInput) {
+  return patchJSON<Asset>(`/projects/${projectId}/assets/${assetId}`, input);
+}
+
+export function getAssetSummary(projectId: number) {
+  return getJSON<AssetSummary>(`/projects/${projectId}/assets/summary`);
+}
+
+export function getAssetGraph(projectId: number, assetId: number) {
+  return getJSON<AssetGraphData>(`/projects/${projectId}/assets/${assetId}/graph`);
 }
 
 export function listAssetRelations(projectId: number, assetId: number) {

@@ -163,6 +163,9 @@ func (s *FileStore) AcknowledgeCallback(runID, seq uint64) error {
 		return errors.New("baiyan job: callback acknowledgement mismatch")
 	}
 	record.LastCallbackSeq = seq
+	record.CallbackResultCount += record.PendingCallback.ResultCount
+	record.LastCallbackStatus = record.PendingCallback.Status
+	record.LastCallbackSummary = record.PendingCallback.ErrorSummary
 	record.PendingCallback = nil
 	return s.saveUnlocked(record)
 }
@@ -170,6 +173,9 @@ func (s *FileStore) AcknowledgeCallback(runID, seq uint64) error {
 func mergeCallbackCheckpoint(record *Record, existing Record) {
 	if existing.LastCallbackSeq > record.LastCallbackSeq {
 		record.LastCallbackSeq = existing.LastCallbackSeq
+		record.CallbackResultCount = existing.CallbackResultCount
+		record.LastCallbackStatus = existing.LastCallbackStatus
+		record.LastCallbackSummary = existing.LastCallbackSummary
 	}
 	if record.PendingCallback != nil && record.PendingCallback.Seq <= record.LastCallbackSeq {
 		record.PendingCallback = nil

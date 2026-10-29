@@ -4,6 +4,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 )
@@ -56,8 +57,18 @@ func (s *Service) CompleteDiscoveryCallbackIngest(ctx context.Context, projectID
 		if !processed {
 			return ErrCallbackIngestBusy
 		}
-		if err := repo.MarkRunCallbackReceived(ctx, projectID, runID, "engine", current.ResultCount, s.nowFn()); err != nil {
+		// The receipt bookkeeping (last_callback_at, result_count) is scoped to
+		// running rows, so it must be skipped once the run has closed — otherwise
+		// draining a leftover out-of-contract callback fails the whole transaction
+		// and the worker retries that row until its attempt budget is gone.
+		runBefore, err := repo.GetTaskRun(ctx, projectID, runID)
+		if err != nil {
 			return err
+		}
+		if runBefore.Status == TaskRunStatusRunning {
+			if err := repo.MarkRunCallbackReceived(ctx, projectID, runID, "engine", current.ResultCount, s.nowFn()); err != nil {
+				return err
+			}
 		}
 		result.Processed = true
 
@@ -74,6 +85,13 @@ func (s *Service) CompleteDiscoveryCallbackIngest(ctx context.Context, projectID
 			return err
 		}
 		if before.Status != TaskRunStatusRunning {
+			// A callback arriving after the run already closed. If the run is already
+			// in the state this callback implies there is nothing to do, and erroring
+			// would roll back the "processed" mark and make the worker retry the same
+			// callback until it exhausts its attempt budget.
+			if before.Status == finalStatus {
+				return nil
+			}
 			return ErrCallbackFinalTransition
 		}
 		if finalStatus == TaskRunStatusSuccess || finalStatus == TaskRunStatusPartial {
@@ -102,28 +120,69 @@ func (s *Service) CompleteDiscoveryCallbackIngest(ctx context.Context, projectID
 	return result, err
 }
 
+// callbackFinalState decides whether a run can be finalised from its inbox.
+//
+// The engine declares the end of a run by sending a final-phase callback. The rule
+// is therefore "every callback up to and including that marker has been ingested",
+// not "the whole list is dense" — a single callback numbered beyond the marker is a
+// protocol violation by the sender and must not hold the run open. Requiring
+// density over the entire list meant one injected seq (say 999999) left the run in
+// `running` until the reconcile worker eventually timed it out, so a successful
+// scan was recorded as a timeout and the asset lifecycle pass never ran.
 func callbackFinalState(callbacks []*DiscoveryCallback) (status, summary string, ready bool, err error) {
 	if len(callbacks) == 0 {
 		return "", "", false, nil
 	}
-	var previous uint64
-	for i, callback := range callbacks {
-		if callback == nil || callback.IngestStatus != CallbackIngestProcessed {
+
+	// The lowest-numbered final-phase callback is the authoritative end of the run.
+	// A later one contradicts a completion the engine already declared, so it is
+	// treated as out-of-contract like any other extra: the run closes on the first
+	// marker and the stray row stays in the inbox as evidence. Erroring instead
+	// would roll back the ingest and have the worker retry it until its attempt
+	// budget ran out, which is the wedge this function had to begin with.
+	var final *DiscoveryCallback
+	for _, callback := range callbacks {
+		if callback == nil {
 			return "", "", false, nil
 		}
-		if (i == 0 && callback.Seq != 1) || (i > 0 && callback.Seq != previous+1) {
-			return "", "", false, nil
-		}
-		previous = callback.Seq
-		if i < len(callbacks)-1 && isFinalCallbackPhase(callback.Phase) {
-			return "", "", false, ErrCallbackFinalSequence
+		if isFinalCallbackPhase(callback.Phase) && (final == nil || callback.Seq < final.Seq) {
+			final = callback
 		}
 	}
-	final := callbacks[len(callbacks)-1]
-	if !isFinalCallbackPhase(final.Phase) {
+	if final == nil {
 		return "", "", false, nil
 	}
+
+	seen := make(map[uint64]bool, len(callbacks))
+	for _, callback := range callbacks {
+		if callback.Seq > final.Seq {
+			continue
+		}
+		if callback.IngestStatus != CallbackIngestProcessed {
+			return "", "", false, nil
+		}
+		seen[callback.Seq] = true
+	}
+	// A real gap below the marker means facts are still missing: keep waiting.
+	for want := uint64(1); want <= final.Seq; want++ {
+		if !seen[want] {
+			return "", "", false, nil
+		}
+	}
 	summary = strings.TrimSpace(final.ErrorSummary)
+	if summary == "" {
+		var payload callbackPayload
+		if json.Unmarshal(final.Payload, &payload) == nil {
+			parts := []string{}
+			for _, e := range payload.ProviderErrors {
+				parts = append(parts, e.Provider+": "+e.Code)
+			}
+			summary = strings.Join(parts, "; ")
+			if len(summary) > 1000 {
+				summary = summary[:1000]
+			}
+		}
+	}
 	switch {
 	case final.Phase == CallbackPhaseCompleted && final.Status == TaskRunStatusSuccess:
 		return TaskRunStatusSuccess, summary, true, nil

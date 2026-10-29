@@ -101,12 +101,17 @@ LIMIT ? OFFSET ?;
 SELECT COUNT(*) FROM report_export
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
+-- Claims the oldest pending export. SKIP LOCKED lets a second worker take the
+-- next row instead of blocking on the one already being claimed. The caller must
+-- run this inside a transaction together with the status update: on the pool
+-- (autocommit) the FOR UPDATE lock is released at statement end, so two workers
+-- would claim the same job and the loser would fail later at MarkExportRunning.
 -- name: ClaimPendingReportExport :one
 SELECT * FROM report_export
 WHERE status = 'pending' AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 LIMIT 1
-FOR UPDATE;
+FOR UPDATE SKIP LOCKED;
 
 -- name: MarkReportExportRunning :execresult
 UPDATE report_export

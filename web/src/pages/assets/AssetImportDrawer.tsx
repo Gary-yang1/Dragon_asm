@@ -1,6 +1,6 @@
 import { Alert, Button, Drawer, Form, Input, InputNumber, Select, Space, Statistic, Table, Tabs, Upload, message } from 'antd';
 import { Download, FileUp, Upload as UploadIcon } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   dryRunImport,
@@ -9,6 +9,7 @@ import {
   type ImportReport,
   type ImportRow
 } from '../../api/assets';
+import { assetTypeMeta, assetStatusMeta, describe } from '../../utils/taxonomy';
 import { parseCSV, serializeCSV } from '../../utils/csv';
 
 const importFields = ['asset_type', 'value', 'display_name', 'source', 'owner', 'business_unit', 'confidence', 'status'] as const;
@@ -36,6 +37,9 @@ export function AssetImportDrawer({ projectId, open, onClose, onImported }: Asse
   const [pendingRows, setPendingRows] = useState<ImportRow[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const revision = useRef(0);
+  const [needsPreview, setNeedsPreview] = useState(false);
   const [form] = Form.useForm<ImportRow>();
 
   const fileHeaders = fileRows[0] ?? [];
@@ -48,7 +52,22 @@ export function AssetImportDrawer({ projectId, open, onClose, onImported }: Asse
     ['总数', preview.total], ['新增', preview.new], ['更新', preview.update], ['重复', preview.duplicate], ['失败', preview.failed]
   ] : [], [preview, result]);
 
+  useEffect(() => {
+    revision.current += 1;
+    setPreview(null);
+    setResult(null);
+    setPendingRows([]);
+    setError('');
+    setLoading(false);
+    setCommitting(false);
+    setNeedsPreview(false);
+    return () => { revision.current += 1; };
+  }, [projectId, open]);
+
   function resetReports() {
+    revision.current += 1;
+    setLoading(false);
+    setNeedsPreview(true);
     setPreview(null);
     setResult(null);
     setPendingRows([]);
@@ -63,49 +82,64 @@ export function AssetImportDrawer({ projectId, open, onClose, onImported }: Asse
   }
 
   async function runPreview() {
-    setLoading(true);
+    if (committing) return;
     resetReports();
+    const requestRevision = revision.current;
+    setLoading(true);
     try {
       const rows = await rowsForMode();
+      if (requestRevision !== revision.current) return;
+      const report = await dryRunImport(projectId, rows);
+      if (requestRevision !== revision.current) return;
       setPendingRows(rows);
-      setPreview(await dryRunImport(projectId, rows));
+      setPreview(report);
+      setNeedsPreview(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '导入预览失败');
+      if (requestRevision !== revision.current) return;
+      if (!(typeof err === 'object' && err !== null && 'errorFields' in err)) {
+        setError(err instanceof Error ? err.message : '导入预览失败');
+      }
     } finally {
-      setLoading(false);
+      if (requestRevision === revision.current) setLoading(false);
     }
   }
 
   async function commit() {
-    if (!pendingRows.length) return;
-    setLoading(true);
+    if (!pendingRows.length || !preview || loading || committing) return;
+    const requestRevision = revision.current;
+    setCommitting(true);
     setError('');
     try {
       const report = await importAssets(projectId, pendingRows);
+      if (requestRevision !== revision.current) return;
       setResult(report);
       setPreview(null);
+      setPendingRows([]);
       message.success(`已导入 ${report.success} 条资产`);
       onImported?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '资产导入失败');
+      if (requestRevision === revision.current) setError(err instanceof Error ? err.message : '资产导入失败');
     } finally {
-      setLoading(false);
+      if (requestRevision === revision.current) setCommitting(false);
     }
   }
 
   function readFile(file: globalThis.File) {
-    setLoading(true);
     resetReports();
+    const requestRevision = revision.current;
+    setLoading(true);
     void file.text().then((text) => {
+      if (requestRevision !== revision.current) return;
       const rows = parseCSV(text);
       if (rows.length < 2) throw new Error('CSV 至少需要表头和一行数据');
       setFileRows(rows);
       const headers = rows[0];
       setMapping(Object.fromEntries(importFields.map((field) => [field, headers.includes(field) ? field : undefined])) as Partial<Record<ImportField, string>>);
     }).catch((err: unknown) => {
+      if (requestRevision !== revision.current) return;
       setFileRows([]);
       setError(err instanceof Error ? err.message : 'CSV 文件读取失败');
-    }).finally(() => setLoading(false));
+    }).finally(() => { if (requestRevision === revision.current) setLoading(false); });
     return false;
   }
 
@@ -122,44 +156,45 @@ export function AssetImportDrawer({ projectId, open, onClose, onImported }: Asse
   }
 
   return (
-    <Drawer title="导入资产" open={open} onClose={onClose} width={820} destroyOnClose={false}>
+    <Drawer title="导入资产" open={open} onClose={() => { if (!committing) onClose(); }} width={820} destroyOnClose={false}>
       <Space direction="vertical" size={16} className="full-width">
         {error ? <Alert type="error" message={error} showIcon /> : null}
         <Tabs
           activeKey={mode}
-          onChange={(key) => { setMode(key as ImportMode); resetReports(); }}
+          onChange={(key) => { if (!committing) { setMode(key as ImportMode); resetReports(); } }}
           items={[
             {
               key: 'single', label: '单条录入', children: (
-                <Form form={form} layout="vertical" initialValues={{ asset_type: 'domain', source: 'manual', confidence: 90, status: 'active' }}>
+                <Form form={form} disabled={committing} onValuesChange={resetReports} layout="vertical" initialValues={{ asset_type: 'domain', source: 'manual', confidence: 90, status: 'active' }}>
                   <div className="asset-import-grid">
-                    <Form.Item name="asset_type" label="资产类型" rules={[{ required: true }]}><Select options={['domain', 'subdomain', 'ip', 'port', 'service', 'web', 'certificate', 'cloud_resource', 'third_party'].map((value) => ({ value, label: value }))} /></Form.Item>
+                    <Form.Item name="asset_type" label="资产类型" rules={[{ required: true }]}><Select options={['domain', 'subdomain', 'ip', 'port', 'service', 'web', 'certificate', 'cloud_resource', 'third_party'].map((value) => ({ value, label: describe(assetTypeMeta, value).label }))} /></Form.Item>
                     <Form.Item name="value" label="资产值" rules={[{ required: true }]}><Input /></Form.Item>
                     <Form.Item name="display_name" label="显示名称"><Input /></Form.Item>
                     <Form.Item name="source" label="来源"><Input /></Form.Item>
                     <Form.Item name="owner" label="负责人"><Input /></Form.Item>
                     <Form.Item name="business_unit" label="业务单元"><Input /></Form.Item>
                     <Form.Item name="confidence" label="置信度"><InputNumber min={0} max={100} className="full-width" /></Form.Item>
-                    <Form.Item name="status" label="状态"><Select options={['active', 'inactive', 'ignored'].map((value) => ({ value, label: value }))} /></Form.Item>
+                    <Form.Item name="status" label="状态"><Select options={['active', 'inactive', 'ignored'].map((value) => ({ value, label: describe(assetStatusMeta, value).label }))} /></Form.Item>
                   </div>
                 </Form>
               )
             },
-            { key: 'paste', label: '批量粘贴', children: <Input.TextArea aria-label="导入内容" value={raw} onChange={(event) => { setRaw(event.target.value); resetReports(); }} rows={10} /> },
+            { key: 'paste', label: '批量粘贴', children: <Input.TextArea disabled={committing} aria-label="导入内容" value={raw} onChange={(event) => { setRaw(event.target.value); resetReports(); }} rows={10} /> },
             {
               key: 'file', label: 'CSV 文件', children: <Space direction="vertical" className="full-width" size={14}>
-                <Upload.Dragger accept=".csv,text/csv" maxCount={1} beforeUpload={readFile} showUploadList={false}><FileUp size={24} /><div>选择 CSV 文件</div></Upload.Dragger>
-                {fileHeaders.length ? <div className="asset-field-mapping">{importFields.map((field) => <label key={field}><span>{field}</span><Select allowClear value={mapping[field]} options={fileHeaders.map((header) => ({ value: header, label: header }))} onChange={(value) => setMapping((current) => ({ ...current, [field]: value }))} /></label>)}</div> : null}
+                <Upload.Dragger disabled={committing} accept=".csv,text/csv" maxCount={1} beforeUpload={readFile} showUploadList={false}><FileUp size={24} /><div>选择 CSV 文件</div></Upload.Dragger>
+                {fileHeaders.length ? <div className="asset-field-mapping">{importFields.map((field) => <label key={field}><span>{field}</span><Select allowClear value={mapping[field]} options={fileHeaders.map((header) => ({ value: header, label: header }))} disabled={committing} onChange={(value) => { setMapping((current) => ({ ...current, [field]: value })); resetReports(); }} /></label>)}</div> : null}
               </Space>
             }
           ]}
           tabBarExtraContent={<Button icon={<Download size={15} />} onClick={downloadTemplate}>模板</Button>}
         />
         <Space>
-          <Button type="primary" icon={<UploadIcon size={15} />} onClick={() => void runPreview()} loading={loading}>预览</Button>
-          <Button type="primary" disabled={!preview || preview.failed === preview.total} onClick={() => void commit()} loading={loading}>确认导入</Button>
+          <Button type="primary" icon={<UploadIcon size={15} />} disabled={committing} onClick={() => void runPreview()} loading={loading}>预览</Button>
+          <Button type="primary" disabled={loading || committing || !preview || preview.failed === preview.total} onClick={() => void commit()} loading={committing}>确认导入</Button>
           {result ? <Button icon={<Download size={15} />} onClick={downloadResult}>结果</Button> : null}
         </Space>
+        {needsPreview && !loading && <span className="secondary-text" role="status">内容已修改，请重新预览后确认导入。</span>}
         {stats.length ? <div className="import-stats">{stats.map(([title, value]) => <Statistic key={title} title={title} value={value} />)}</div> : null}
         {reportRows.length ? <Table
           rowKey={(row) => `${row.index}-${row.status}`}

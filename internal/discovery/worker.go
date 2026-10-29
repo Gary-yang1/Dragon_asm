@@ -85,6 +85,7 @@ func (h *IngestHandler) Handle(ctx context.Context, task *asynq.Task) error {
 	}
 	stored, err := h.inbox.GetDiscoveryCallback(ctx, ref.ProjectID, ref.RunID, ref.Seq)
 	if err != nil {
+		h.logFailure("discovery callback lookup failed", ref, err)
 		return err
 	}
 	if stored.IngestStatus == CallbackIngestProcessed {
@@ -92,6 +93,7 @@ func (h *IngestHandler) Handle(ctx context.Context, task *asynq.Task) error {
 	}
 	claimed, err := h.inbox.ClaimDiscoveryCallbackIngest(ctx, ref.ProjectID, ref.RunID, ref.Seq)
 	if err != nil {
+		h.logFailure("discovery callback claim failed", ref, err)
 		return err
 	}
 	if !claimed {
@@ -103,14 +105,40 @@ func (h *IngestHandler) Handle(ctx context.Context, task *asynq.Task) error {
 	}
 	payload := callbackIngestPayload{Callback: *stored, RawBody: json.RawMessage(stored.Payload)}
 	if err := h.ingest(ctx, payload); err != nil {
+		h.logFailure("discovery callback ingest failed", ref, err)
 		_ = h.inbox.FailDiscoveryCallbackIngest(ctx, ref.ProjectID, ref.RunID, ref.Seq)
 		return err
 	}
-	_, err = h.inbox.CompleteDiscoveryCallbackIngest(ctx, ref.ProjectID, ref.RunID, ref.Seq)
-	return err
+	result, err := h.inbox.CompleteDiscoveryCallbackIngest(ctx, ref.ProjectID, ref.RunID, ref.Seq)
+	if err != nil {
+		// Completion failing leaves the row in `processing` — it is deliberately not
+		// marked failed, so the recovery sweep can retry it. Without this log the
+		// row simply stalls with an empty ingest_error and nothing explains why.
+		h.logFailure("discovery callback completion failed", ref, err)
+		return err
+	}
+	if h.logger != nil {
+		h.logger.Info("discovery callback ingested",
+			"project_id", ref.ProjectID, "run_id", ref.RunID, "seq", ref.Seq,
+			"phase", stored.Phase, "processed", result.Processed, "finalized", result.Finalized)
+	}
+	return nil
+}
+
+// logFailure records why a callback could not be ingested. Every return path in
+// Handle used to be silent, so a stalled callback left no trace at all.
+func (h *IngestHandler) logFailure(msg string, ref CallbackTaskPayload, err error) {
+	if h.logger == nil {
+		return
+	}
+	h.logger.Error(msg,
+		"project_id", ref.ProjectID, "run_id", ref.RunID, "seq", ref.Seq, "error", err)
 }
 
 func (h *IngestHandler) ingest(ctx context.Context, payload callbackIngestPayload) error {
+	// The fact ingester is the production path; it returns here, which is why the
+	// summary log further down never fired for a real deployment. Handle logs the
+	// outcome instead.
 	if h.facts != nil {
 		return h.facts.IngestCallbackFacts(ctx, payload.Callback)
 	}

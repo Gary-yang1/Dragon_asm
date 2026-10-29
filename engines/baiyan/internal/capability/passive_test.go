@@ -3,6 +3,7 @@ package capability
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +43,7 @@ func (r *fakeResolver) Resolve(ctx context.Context, hosts []string, _ int, gate 
 }
 
 type countingGate struct {
+	mu    sync.Mutex
 	calls int
 }
 
@@ -49,7 +51,9 @@ func (g *countingGate) Wait(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	g.mu.Lock()
 	g.calls++
+	g.mu.Unlock()
 	return nil
 }
 
@@ -93,8 +97,10 @@ func TestPassiveExecutorSharesRateBudgetAcrossProviderAndDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gate.calls != 3 {
-		t.Fatalf("expected one shared budget with 3 operations, got %d", gate.calls)
+	// Two provider queries, one DNS lookup, and the wildcard probes for its zone
+	// all draw from the same per-job budget.
+	if want := 3 + wildcardProbesPerZone; gate.calls != want {
+		t.Fatalf("expected one shared budget with %d operations, got %d", want, gate.calls)
 	}
 }
 

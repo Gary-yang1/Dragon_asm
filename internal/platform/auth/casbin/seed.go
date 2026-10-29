@@ -29,7 +29,8 @@ import (
 //   - system_admin: platform owner — every permission point, including
 //     project:access so it can reach any project without a project_member row.
 //   - security_admin: cross-project security management — everything except
-//     platform-config administration (admin:manage), including project:access.
+//     project deletion and platform-config administration (admin:manage),
+//     including project:access.
 //   - project_owner: owns a project's assets/risk/tickets — full asset + risk +
 //     ticket + scope + report-read within the project; no cross-project export,
 //     audit read, or platform admin. Enters via membership, so no project:access.
@@ -48,7 +49,7 @@ var mvpRolePerms = map[string][]string{
 	RoleSystemAdmin: {
 		PermUserRead, PermUserWrite, PermUserCredentialReset, PermUserRoleWrite,
 		PermProjectAccess,
-		PermProjectRead, PermProjectCreate, PermProjectWrite, PermProjectArchive, PermProjectMemberWrite,
+		PermProjectRead, PermProjectCreate, PermProjectWrite, PermProjectArchive, PermProjectDelete, PermProjectMemberWrite,
 		PermAssetRead, PermAssetWrite, PermAssetDelete,
 		PermExposureRead,
 		PermScopeRead, PermScopeWrite,

@@ -3,8 +3,10 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -37,6 +39,8 @@ type Repository interface {
 	ListScopes(ctx context.Context, projectID uint64) ([]*Scope, error)
 	UpdateScope(ctx context.Context, in UpdateScopeParams) error
 	DeactivateScope(ctx context.Context, projectID, scopeID uint64, actorID string, updatedAtNow func() time.Time) error
+	LockProjectForScopeDefault(ctx context.Context, projectID uint64) error
+	ClearDefaultScopes(ctx context.Context, projectID, exceptScopeID uint64, actorID string, updatedAt time.Time) error
 
 	InsertScopeTarget(ctx context.Context, in InsertScopeTargetParams) error
 	ListScopeTargets(ctx context.Context, projectID, scopeID uint64) ([]*ScopeTarget, error)
@@ -57,7 +61,7 @@ type Repository interface {
 	MarkRunDispatched(ctx context.Context, projectID, runID uint64, actorID, fromStatus, engineJobID string, now time.Time) error
 	MarkRunDispatchFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus, errorSummary string, now time.Time) error
 	MarkRunSucceeded(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error
-	MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error
+	MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus, errorSummary string, resultCount uint64, now time.Time) error
 	MarkRunFailed(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, resultCount uint64, now time.Time) error
 	MarkRunCancelled(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, errorSummary string, now time.Time) error
 	IncrementRunAttempt(ctx context.Context, projectID, runID uint64, actorID string, now time.Time) error
@@ -65,6 +69,9 @@ type Repository interface {
 	InsertDiscoveryCallback(ctx context.Context, in DiscoveryCallback) (bool, error)
 	GetDiscoveryCallback(ctx context.Context, projectID, runID, seq uint64) (*DiscoveryCallback, error)
 	ListPendingDiscoveryCallbacks(ctx context.Context, limit int32) ([]*DiscoveryCallback, error)
+	// ListPendingDiscoveryCallbackRefs returns identifiers only, for the recovery
+	// scan that just needs to re-enqueue work.
+	ListPendingDiscoveryCallbackRefs(ctx context.Context, limit int32) ([]CallbackRef, error)
 	MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error
 	MarkDiscoveryCallbackProcessing(ctx context.Context, projectID, runID, seq uint64) (bool, error)
 	MarkDiscoveryCallbackProcessed(ctx context.Context, projectID, runID, seq uint64, processedAt time.Time) (bool, error)
@@ -87,6 +94,7 @@ type CreateScopeParams struct {
 	AuthorizedBy string
 	ValidFrom    time.Time
 	ValidUntil   time.Time
+	IsDefault    bool
 	ActorID      string
 }
 
@@ -100,18 +108,21 @@ type UpdateScopeParams struct {
 	AuthorizedBy string
 	ValidFrom    time.Time
 	ValidUntil   time.Time
+	IsDefault    bool
 	ActorID      string
 }
 
 type InsertScopeTargetParams struct {
-	TenantID   string
-	OrgID      string
-	ProjectID  uint64
-	ScopeID    uint64
-	TargetType string
-	MatchMode  string
-	Value      string
-	ActorID    string
+	URLRule      *URLAuthorizationRule
+	TenantID     string
+	OrgID        string
+	ProjectID    uint64
+	ScopeID      uint64
+	TargetType   string
+	MatchMode    string
+	CoverageMode string
+	Value        string
+	ActorID      string
 }
 
 type CreateTaskTemplateParams struct {
@@ -148,28 +159,31 @@ type UpdateTaskTemplateParams struct {
 }
 
 type CreateTaskRunParams struct {
-	TenantID          string
-	OrgID             string
-	ProjectID         uint64
-	TemplateID        uint64
-	ScopeID           uint64
-	TaskType          string
-	Status            string
-	Progress          int
-	TimeoutSeconds    int
-	RateLimit         int
-	Concurrency       int
-	RetryLimit        int
-	Attempt           int
-	EngineJobID       string
-	DispatchedAt      time.Time
-	LastCallbackAt    time.Time
-	ResultCount       uint64
-	CallbackSecretRef string
-	StartedAt         time.Time
-	FinishedAt        time.Time
-	ErrorSummary      string
-	ActorID           string
+	EngineConfigVersion uint64
+	TenantID            string
+	OrgID               string
+	ProjectID           uint64
+	TemplateID          uint64
+	ScopeID             uint64
+	TaskType            string
+	Status              string
+	Progress            int
+	TimeoutSeconds      int
+	RateLimit           int
+	Concurrency         int
+	RetryLimit          int
+	Attempt             int
+	EngineJobID         string
+	DispatchedAt        time.Time
+	LastCallbackAt      time.Time
+	ResultCount         uint64
+	CallbackSecretRef   string
+	ApprovedBy          string
+	ApprovalReason      string
+	StartedAt           time.Time
+	FinishedAt          time.Time
+	ErrorSummary        string
+	ActorID             string
 }
 
 type sqlcRepository struct {
@@ -190,6 +204,7 @@ func (r *sqlcRepository) CreateScope(ctx context.Context, in CreateScopeParams) 
 		AuthorizedBy: in.AuthorizedBy,
 		ValidFrom:    in.ValidFrom,
 		ValidUntil:   in.ValidUntil,
+		IsDefault:    in.IsDefault,
 		CreatedBy:    in.ActorID,
 		UpdatedBy:    in.ActorID,
 	})
@@ -229,6 +244,7 @@ func (r *sqlcRepository) UpdateScope(ctx context.Context, in UpdateScopeParams) 
 		AuthorizedBy: in.AuthorizedBy,
 		ValidFrom:    in.ValidFrom,
 		ValidUntil:   in.ValidUntil,
+		IsDefault:    in.IsDefault,
 		UpdatedBy:    in.ActorID,
 		ID:           in.ScopeID,
 		ProjectID:    in.ProjectID,
@@ -239,8 +255,7 @@ func (r *sqlcRepository) DeactivateScope(ctx context.Context, projectID, scopeID
 	if updatedAtNow == nil {
 		updatedAtNow = time.Now
 	}
-	return r.q.UpdateScopeStatus(ctx, dbgen.UpdateScopeStatusParams{
-		Status:    StatusInactive,
+	return r.q.DeactivateScope(ctx, dbgen.DeactivateScopeParams{
 		UpdatedBy: actorID,
 		UpdatedAt: updatedAtNow().UTC(),
 		ID:        scopeID,
@@ -248,17 +263,46 @@ func (r *sqlcRepository) DeactivateScope(ctx context.Context, projectID, scopeID
 	})
 }
 
+func (r *sqlcRepository) LockProjectForScopeDefault(ctx context.Context, projectID uint64) error {
+	_, err := r.q.LockProjectForScopeDefault(ctx, projectID)
+	return mapErr(err)
+}
+
+func (r *sqlcRepository) ClearDefaultScopes(
+	ctx context.Context,
+	projectID, exceptScopeID uint64,
+	actorID string,
+	updatedAt time.Time,
+) error {
+	return r.q.ClearDefaultScopes(ctx, dbgen.ClearDefaultScopesParams{
+		UpdatedBy: actorID,
+		UpdatedAt: updatedAt.UTC(),
+		ProjectID: projectID,
+		ID:        exceptScopeID,
+	})
+}
+
 func (r *sqlcRepository) InsertScopeTarget(ctx context.Context, in InsertScopeTargetParams) error {
+	var rule []byte
+	if in.URLRule != nil {
+		var err error
+		rule, err = json.Marshal(in.URLRule)
+		if err != nil {
+			return err
+		}
+	}
 	return r.q.InsertScopeTarget(ctx, dbgen.InsertScopeTargetParams{
-		TenantID:    in.TenantID,
-		OrgID:       in.OrgID,
-		ProjectID:   in.ProjectID,
-		ScopeID:     in.ScopeID,
-		TargetType:  in.TargetType,
-		MatchMode:   in.MatchMode,
-		TargetValue: in.Value,
-		CreatedBy:   in.ActorID,
-		UpdatedBy:   in.ActorID,
+		TenantID:     in.TenantID,
+		OrgID:        in.OrgID,
+		ProjectID:    in.ProjectID,
+		ScopeID:      in.ScopeID,
+		TargetType:   in.TargetType,
+		MatchMode:    in.MatchMode,
+		CoverageMode: in.CoverageMode,
+		TargetValue:  in.Value,
+		UrlRule:      rule,
+		CreatedBy:    in.ActorID,
+		UpdatedBy:    in.ActorID,
 	})
 }
 
@@ -272,20 +316,30 @@ func (r *sqlcRepository) ListScopeTargets(ctx context.Context, projectID, scopeI
 	}
 	out := make([]*ScopeTarget, 0, len(rows))
 	for _, row := range rows {
+
+		var rule *URLAuthorizationRule
+		if len(row.UrlRule) > 0 && string(row.UrlRule) != "null" {
+			rule = &URLAuthorizationRule{}
+			if err := json.Unmarshal(row.UrlRule, rule); err != nil {
+				return nil, ErrInvalidURLAuthorization
+			}
+		}
 		out = append(out, &ScopeTarget{
-			ID:         row.ID,
-			TenantID:   row.TenantID,
-			OrgID:      row.OrgID,
-			ProjectID:  row.ProjectID,
-			ScopeID:    row.ScopeID,
-			TargetType: row.TargetType,
-			MatchMode:  row.MatchMode,
-			Value:      row.TargetValue,
-			CreatedAt:  row.CreatedAt,
-			UpdatedAt:  row.UpdatedAt,
-			CreatedBy:  row.CreatedBy,
-			UpdatedBy:  row.UpdatedBy,
-			DeletedAt:  row.DeletedAt,
+			URLRule:      rule,
+			ID:           row.ID,
+			TenantID:     row.TenantID,
+			OrgID:        row.OrgID,
+			ProjectID:    row.ProjectID,
+			ScopeID:      row.ScopeID,
+			TargetType:   row.TargetType,
+			MatchMode:    row.MatchMode,
+			CoverageMode: row.CoverageMode,
+			Value:        row.TargetValue,
+			CreatedAt:    row.CreatedAt,
+			UpdatedAt:    row.UpdatedAt,
+			CreatedBy:    row.CreatedBy,
+			UpdatedBy:    row.UpdatedBy,
+			DeletedAt:    row.DeletedAt,
 		})
 	}
 	return out, nil
@@ -401,6 +455,8 @@ func (r *sqlcRepository) CreateTaskRun(ctx context.Context, in CreateTaskRunPara
 		LastCallbackAt:    taskRunTimeForDatabase(in.LastCallbackAt),
 		ResultCount:       in.ResultCount,
 		CallbackSecretRef: in.CallbackSecretRef,
+		ApprovedBy:        in.ApprovedBy,
+		ApprovalReason:    in.ApprovalReason,
 		StartedAt:         taskRunTimeForDatabase(in.StartedAt),
 		FinishedAt:        taskRunTimeForDatabase(in.FinishedAt),
 		ErrorSummary:      in.ErrorSummary,
@@ -410,7 +466,16 @@ func (r *sqlcRepository) CreateTaskRun(ctx context.Context, in CreateTaskRunPara
 	if err != nil {
 		return 0, err
 	}
-	return resultID(res)
+	id, err := resultID(res)
+	if err != nil {
+		return 0, err
+	}
+	if in.EngineConfigVersion > 0 {
+		if err = r.q.BindEngineRunSettings(ctx, dbgen.BindEngineRunSettingsParams{ProjectID: in.ProjectID, RunID: id, Version: in.EngineConfigVersion}); err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
 }
 
 func (r *sqlcRepository) GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
@@ -425,7 +490,10 @@ func (r *sqlcRepository) GetTaskRun(ctx context.Context, projectID, runID uint64
 }
 
 func (r *sqlcRepository) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error) {
-	rows, err := r.q.ListTaskRunsByProject(ctx, projectID)
+	rows, err := r.q.ListTaskRunsByProject(ctx, dbgen.ListTaskRunsByProjectParams{
+		ProjectID: projectID,
+		Limit:     MaxTaskRunWindow,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -505,12 +573,12 @@ func (r *sqlcRepository) MarkRunSucceeded(ctx context.Context, projectID, runID 
 	return markRunUpdateResultError(res, err)
 }
 
-func (r *sqlcRepository) MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error {
+func (r *sqlcRepository) MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus, errorSummary string, resultCount uint64, now time.Time) error {
 	res, err := r.q.MarkTaskRunPartialSuccess(ctx, dbgen.MarkTaskRunPartialSuccessParams{
 		Status:       TaskRunStatusPartial,
 		Progress:     100,
 		ResultCount:  resultCount,
-		ErrorSummary: "",
+		ErrorSummary: errorSummary,
 		FinishedAt:   now.UTC(),
 		UpdatedBy:    actorID,
 		ID:           runID,
@@ -643,6 +711,18 @@ func (r *sqlcRepository) ListPendingDiscoveryCallbacks(ctx context.Context, limi
 	return items, nil
 }
 
+func (r *sqlcRepository) ListPendingDiscoveryCallbackRefs(ctx context.Context, limit int32) ([]CallbackRef, error) {
+	rows, err := r.q.ListPendingDiscoveryCallbackRefs(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]CallbackRef, 0, len(rows))
+	for _, row := range rows {
+		refs = append(refs, CallbackRef{ProjectID: row.ProjectID, RunID: row.RunID, Seq: row.Seq})
+	}
+	return refs, nil
+}
+
 func (r *sqlcRepository) MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error {
 	return r.q.MarkDiscoveryCallbackEnqueued(ctx, dbgen.MarkDiscoveryCallbackEnqueuedParams{
 		EnqueuedAt: enqueuedAt.UTC(),
@@ -732,6 +812,7 @@ func toDomainScope(row dbgen.Scope) *Scope {
 		AuthorizedBy: row.AuthorizedBy,
 		ValidFrom:    row.ValidFrom,
 		ValidUntil:   row.ValidUntil,
+		IsDefault:    row.IsDefault,
 		CreatedAt:    row.CreatedAt,
 		UpdatedAt:    row.UpdatedAt,
 		CreatedBy:    row.CreatedBy,
@@ -741,6 +822,14 @@ func toDomainScope(row dbgen.Scope) *Scope {
 }
 
 func toDomainTaskTemplate(row dbgen.TaskTemplate) *TaskTemplate {
+	// MySQL's JSON text representation adds whitespace. The configured size
+	// limit applies to the canonical document that was accepted before storage,
+	// not to database formatting added on readback.
+	config := string(row.Config)
+	var compact bytes.Buffer
+	if json.Compact(&compact, row.Config) == nil {
+		config = compact.String()
+	}
 	return &TaskTemplate{
 		ID:             row.ID,
 		TenantID:       row.TenantID,
@@ -749,7 +838,7 @@ func toDomainTaskTemplate(row dbgen.TaskTemplate) *TaskTemplate {
 		ScopeID:        row.ScopeID,
 		Name:           row.Name,
 		TaskType:       row.TaskType,
-		Config:         string(row.Config),
+		Config:         config,
 		Schedule:       row.Schedule,
 		Enabled:        row.Enabled,
 		TimeoutSeconds: int(row.TimeoutSeconds),
@@ -785,6 +874,8 @@ func toDomainTaskRun(row dbgen.TaskRun) *TaskRun {
 		LastCallbackAt:    taskRunTimeFromDatabase(row.LastCallbackAt),
 		ResultCount:       uint64(row.ResultCount),
 		CallbackSecretRef: row.CallbackSecretRef,
+		ApprovedBy:        row.ApprovedBy,
+		ApprovalReason:    row.ApprovalReason,
 		StartedAt:         taskRunTimeFromDatabase(row.StartedAt),
 		FinishedAt:        taskRunTimeFromDatabase(row.FinishedAt),
 		ErrorSummary:      row.ErrorSummary,

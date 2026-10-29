@@ -61,6 +61,7 @@ func (r *fakeRepo) CreateScope(ctx context.Context, in CreateScopeParams) (uint6
 		AuthorizedBy: in.AuthorizedBy,
 		ValidFrom:    in.ValidFrom,
 		ValidUntil:   in.ValidUntil,
+		IsDefault:    in.IsDefault,
 		CreatedBy:    in.ActorID,
 		UpdatedBy:    in.ActorID,
 		CreatedAt:    time.Time{},
@@ -111,6 +112,7 @@ func (r *fakeRepo) UpdateScope(ctx context.Context, in UpdateScopeParams) error 
 	scope.AuthorizedBy = in.AuthorizedBy
 	scope.ValidFrom = in.ValidFrom
 	scope.ValidUntil = in.ValidUntil
+	scope.IsDefault = in.IsDefault
 	scope.UpdatedBy = in.ActorID
 	return nil
 }
@@ -122,8 +124,33 @@ func (r *fakeRepo) DeactivateScope(ctx context.Context, projectID, scopeID uint6
 		return ErrNotFound
 	}
 	scope.Status = StatusInactive
+	scope.IsDefault = false
 	scope.UpdatedBy = actorID
 	scope.UpdatedAt = updatedAtNow()
+	return nil
+}
+
+func (r *fakeRepo) LockProjectForScopeDefault(_ context.Context, projectID uint64) error {
+	if projectID == 0 {
+		return ErrInvalidProjectID
+	}
+	return nil
+}
+
+func (r *fakeRepo) ClearDefaultScopes(
+	_ context.Context,
+	projectID, exceptScopeID uint64,
+	actorID string,
+	updatedAt time.Time,
+) error {
+	for id, scope := range r.scopes[projectID] {
+		if id == exceptScopeID || !scope.IsDefault {
+			continue
+		}
+		scope.IsDefault = false
+		scope.UpdatedBy = actorID
+		scope.UpdatedAt = updatedAt
+	}
 	return nil
 }
 
@@ -134,16 +161,18 @@ func (r *fakeRepo) InsertScopeTarget(ctx context.Context, in InsertScopeTargetPa
 	}
 	r.nextTargetID++
 	target := &ScopeTarget{
-		ID:         r.nextTargetID,
-		TenantID:   in.TenantID,
-		OrgID:      in.OrgID,
-		ProjectID:  in.ProjectID,
-		ScopeID:    in.ScopeID,
-		TargetType: in.TargetType,
-		MatchMode:  in.MatchMode,
-		Value:      in.Value,
-		CreatedBy:  in.ActorID,
-		UpdatedBy:  in.ActorID,
+		ID:           r.nextTargetID,
+		TenantID:     in.TenantID,
+		OrgID:        in.OrgID,
+		ProjectID:    in.ProjectID,
+		ScopeID:      in.ScopeID,
+		TargetType:   in.TargetType,
+		MatchMode:    in.MatchMode,
+		CoverageMode: in.CoverageMode,
+		URLRule:      in.URLRule,
+		Value:        in.Value,
+		CreatedBy:    in.ActorID,
+		UpdatedBy:    in.ActorID,
 	}
 	r.targets[in.ProjectID][in.ScopeID] = append(r.targets[in.ProjectID][in.ScopeID], target)
 	return nil
@@ -305,6 +334,8 @@ func (r *fakeRepo) CreateTaskRun(ctx context.Context, in CreateTaskRunParams) (u
 		LastCallbackAt:    in.LastCallbackAt,
 		ResultCount:       in.ResultCount,
 		CallbackSecretRef: in.CallbackSecretRef,
+		ApprovedBy:        in.ApprovedBy,
+		ApprovalReason:    in.ApprovalReason,
 		StartedAt:         in.StartedAt,
 		FinishedAt:        in.FinishedAt,
 		ErrorSummary:      in.ErrorSummary,
@@ -433,7 +464,7 @@ func (r *fakeRepo) MarkRunSucceeded(ctx context.Context, projectID, runID uint64
 	return nil
 }
 
-func (r *fakeRepo) MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, resultCount uint64, now time.Time) error {
+func (r *fakeRepo) MarkRunPartialSuccess(ctx context.Context, projectID, runID uint64, actorID, fromStatus, errorSummary string, resultCount uint64, now time.Time) error {
 	_ = ctx
 	_ = now
 	_ = actorID
@@ -447,7 +478,7 @@ func (r *fakeRepo) MarkRunPartialSuccess(ctx context.Context, projectID, runID u
 	run.Status = TaskRunStatusPartial
 	run.Progress = 100
 	run.ResultCount = resultCount
-	run.ErrorSummary = ""
+	run.ErrorSummary = errorSummary
 	run.FinishedAt = now
 	run.UpdatedBy = actorID
 	return nil
@@ -570,6 +601,19 @@ func (r *fakeRepo) ListPendingDiscoveryCallbacks(ctx context.Context, limit int3
 		}
 	}
 	return items, nil
+}
+
+// Mirrors the real repository: identifiers only, no stored payload.
+func (r *fakeRepo) ListPendingDiscoveryCallbackRefs(ctx context.Context, limit int32) ([]CallbackRef, error) {
+	items, err := r.ListPendingDiscoveryCallbacks(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]CallbackRef, 0, len(items))
+	for _, cb := range items {
+		refs = append(refs, CallbackRef{ProjectID: cb.ProjectID, RunID: cb.RunID, Seq: cb.Seq})
+	}
+	return refs, nil
 }
 
 func (r *fakeRepo) MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error {
@@ -848,6 +892,55 @@ func TestCreateScopeDefaultsToInactive(t *testing.T) {
 	assert.Equal(t, StatusInactive, out.Status)
 }
 
+func TestDefaultScopeMustBeActiveAndTransfersWithinProject(t *testing.T) {
+	repo := newFakeRepo()
+	auditSink := &fakeAudit{}
+	now := time.Now().UTC()
+	svc := NewService(repo, WithAuditSink(auditSink), WithNow(func() time.Time { return now }))
+
+	_, err := svc.CreateScope(context.Background(), CreateScopeInput{
+		TenantID: "t1", OrgID: "o1", ProjectID: 16, Name: "invalid default",
+		AuthorizedBy: "alice", Status: StatusInactive, IsDefault: true,
+		ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(time.Hour), ActorID: "alice",
+	})
+	assert.ErrorIs(t, err, ErrInvalidDefaultScope)
+
+	first, err := svc.CreateScope(context.Background(), CreateScopeInput{
+		TenantID: "t1", OrgID: "o1", ProjectID: 16, Name: "first",
+		AuthorizedBy: "alice", Status: StatusActive, IsDefault: true,
+		ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(time.Hour), ActorID: "alice",
+	})
+	require.NoError(t, err)
+	assert.True(t, first.IsDefault)
+
+	second, err := svc.CreateScope(context.Background(), CreateScopeInput{
+		TenantID: "t1", OrgID: "o1", ProjectID: 16, Name: "second",
+		AuthorizedBy: "alice", Status: StatusActive, IsDefault: true,
+		ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(time.Hour), ActorID: "alice",
+	})
+	require.NoError(t, err)
+	assert.True(t, second.IsDefault)
+
+	first, err = svc.GetScope(context.Background(), 16, first.ID)
+	require.NoError(t, err)
+	assert.False(t, first.IsDefault)
+	require.Len(t, auditSink.events, 3)
+	assert.Equal(t, ActionScopeUpdate, auditSink.events[1].Action)
+	assert.Equal(t, strconv.FormatUint(first.ID, 10), auditSink.events[1].ResourceID)
+	require.IsType(t, &Scope{}, auditSink.events[1].Before)
+	require.IsType(t, &Scope{}, auditSink.events[1].After)
+	assert.True(t, auditSink.events[1].Before.(*Scope).IsDefault)
+	assert.False(t, auditSink.events[1].After.(*Scope).IsDefault)
+
+	err = svc.DeactivateScope(context.Background(), DeactivateScopeInput{
+		ScopeID: second.ID, ProjectID: 16, ActorID: "alice",
+	})
+	require.NoError(t, err)
+	second, err = svc.GetScope(context.Background(), 16, second.ID)
+	require.NoError(t, err)
+	assert.False(t, second.IsDefault)
+}
+
 func TestUpdateScopeReplacesTargetsAndAudits(t *testing.T) {
 	repo := newFakeRepo()
 	auditSink := &fakeAudit{}
@@ -1001,6 +1094,70 @@ func TestIsTargetAllowedMatchesAndBlocks(t *testing.T) {
 
 	ok, reason, err = svc.IsTargetAllowed(context.Background(), 8, scopeID, "https://not-included.com")
 	assert.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, ReasonNoMatch, reason)
+}
+
+func TestDomainCoverageModeControlsSubdomainAuthorization(t *testing.T) {
+	repo := newFakeRepo()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	svc := NewService(repo, WithNow(func() time.Time { return now }))
+
+	exact, err := svc.CreateScope(context.Background(), CreateScopeInput{
+		TenantID: "t1", OrgID: "o1", ProjectID: 18, Name: "exact",
+		AuthorizedBy: "alice", Status: StatusActive,
+		ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(time.Hour), ActorID: "alice",
+		Targets: []ScopeTargetInput{{
+			TargetType: TargetTypeDomain, MatchMode: MatchModeInclude,
+			CoverageMode: CoverageModeExact, Value: "example.com",
+		}},
+	})
+	require.NoError(t, err)
+
+	ok, reason, err := svc.IsTypedTargetAllowed(
+		context.Background(), 18, exact.ID, TargetTypeDomain, "api.example.com",
+	)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, ReasonNoMatch, reason)
+
+	subdomains, err := svc.CreateScope(context.Background(), CreateScopeInput{
+		TenantID: "t1", OrgID: "o1", ProjectID: 18, Name: "subdomains",
+		AuthorizedBy: "alice", Status: StatusActive,
+		ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(time.Hour), ActorID: "alice",
+		Targets: []ScopeTargetInput{
+			{
+				TargetType: TargetTypeDomain, MatchMode: MatchModeInclude,
+				CoverageMode: CoverageModeSubdomains, Value: "example.com",
+			},
+			{
+				TargetType: TargetTypeDomain, MatchMode: MatchModeExclude,
+				CoverageMode: CoverageModeSubdomains, Value: "blocked.example.com",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	for _, candidate := range []string{"example.com", "api.example.com", "deep.api.example.com"} {
+		ok, reason, err = svc.IsTypedTargetAllowed(
+			context.Background(), 18, subdomains.ID, TargetTypeDomain, candidate,
+		)
+		require.NoError(t, err)
+		assert.True(t, ok, candidate)
+		assert.Equal(t, ReasonAllowed, reason)
+	}
+
+	ok, reason, err = svc.IsTypedTargetAllowed(
+		context.Background(), 18, subdomains.ID, TargetTypeDomain, "api.blocked.example.com",
+	)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, ReasonExcluded, reason)
+
+	ok, reason, err = svc.IsTypedTargetAllowed(
+		context.Background(), 18, subdomains.ID, TargetTypeDomain, "notexample.com",
+	)
+	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, ReasonNoMatch, reason)
 }
@@ -1227,6 +1384,94 @@ func TestCreateTaskTemplateValidatesAndPersists(t *testing.T) {
 	assert.Equal(t, "template", out.Name)
 	require.Len(t, auditSink.events, 1)
 	assert.Equal(t, ActionTemplateCreate, auditSink.events[0].Action)
+}
+
+func TestCreateTaskTemplateActiveDispatchPolicy(t *testing.T) {
+	repo := newFakeRepo()
+	scopeID, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID: "t1", OrgID: "o1", ProjectID: 1, Name: "scope", Status: StatusActive,
+		AuthorizedBy: "alice", ValidFrom: time.Now().Add(-time.Minute),
+		ValidUntil: time.Now().Add(time.Hour), ActorID: "alice",
+	})
+	require.NoError(t, err)
+
+	input := CreateTaskTemplateInput{
+		TenantID: "t1", OrgID: "o1", ProjectID: 1, ScopeID: scopeID, Name: "active",
+		TaskType: TaskTypePortProbe, Config: `{"targets":[{"type":"ip","value":"1.1.1.1"}],"options":{"ports":"80,443"}}`,
+		Enabled: true, TimeoutSeconds: 30, RateLimit: MaxActiveRateLimit,
+		Concurrency: MaxActiveConcurrency, RetryLimit: 1, ActorID: "alice",
+	}
+
+	_, err = NewService(repo).CreateTaskTemplate(context.Background(), input)
+	assert.ErrorIs(t, err, ErrTaskTypeUnsupported, "active dispatch must remain default-off")
+
+	input.RateLimit = MaxActiveRateLimit + 1
+	_, err = NewService(repo, WithActiveDispatchPolicy(ActiveDispatchPolicy{Enabled: true})).
+		CreateTaskTemplate(context.Background(), input)
+	assert.ErrorIs(t, err, ErrActiveLimitsTooHigh)
+}
+
+func TestActiveDispatchCanSkipApprovalAndOwnershipButKeepsScopeValidation(t *testing.T) {
+	repo := newFakeRepo()
+	now := time.Now().UTC()
+	scopeID, err := repo.CreateScope(context.Background(), CreateScopeParams{
+		TenantID: "t1", OrgID: "o1", ProjectID: 1, Name: "scope", Status: StatusActive,
+		AuthorizedBy: "alice", ValidFrom: now.Add(-time.Minute),
+		ValidUntil: now.Add(time.Hour), ActorID: "alice",
+	})
+	require.NoError(t, err)
+	require.NoError(t, repo.InsertScopeTarget(context.Background(), InsertScopeTargetParams{
+		TenantID: "t1", OrgID: "o1", ProjectID: 1, ScopeID: scopeID,
+		TargetType: TargetTypeIP, MatchMode: MatchModeInclude, Value: "1.1.1.1", ActorID: "alice",
+	}))
+
+	engine := &fakeEngine{ids: []string{"active-job-1"}}
+	svc := NewService(repo,
+		WithNow(func() time.Time { return now }),
+		WithEngineAdapter(engine),
+		WithActiveDispatchPolicy(ActiveDispatchPolicy{
+			Enabled:          true,
+			RequireApproval:  false,
+			RequireOwnership: false,
+		}),
+	)
+	template, err := svc.CreateTaskTemplate(context.Background(), CreateTaskTemplateInput{
+		TenantID: "t1", OrgID: "o1", ProjectID: 1, ScopeID: scopeID, Name: "active",
+		TaskType: TaskTypePortProbe, Config: `{"targets":[{"type":"ip","value":"1.1.1.1"}],"options":{"ports":"80,443"}}`,
+		Enabled: true, TimeoutSeconds: 30, RateLimit: MaxActiveRateLimit,
+		Concurrency: MaxActiveConcurrency, RetryLimit: 1, ActorID: "alice",
+	})
+	require.NoError(t, err)
+
+	run, err := svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+		ProjectID: 1, TemplateID: template.ID, ActorID: "alice",
+	})
+	require.NoError(t, err, "approval is intentionally disabled for this deployment")
+	assert.Empty(t, run.ApprovedBy)
+
+	plan, err := svc.BuildDispatchPlan(context.Background(), 1, run.ID, "alice")
+	require.NoError(t, err, "bare IP targets are allowed when ownership proof is intentionally disabled")
+	assert.Equal(t, []DispatchTarget{{Type: TargetTypeIP, Value: "1.1.1.1"}}, plan.Targets)
+
+	dispatched, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1, RunID: run.ID, ActorID: "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, TaskRunStatusRunning, dispatched.Status)
+	assert.Equal(t, "active-job-1", dispatched.EngineJobID)
+
+	template.Config = `{"targets":[{"type":"ip","value":"8.8.8.8"}],"options":{"ports":"80"}}`
+	repo.templates[1][template.ID] = template
+	secondRunID, err := repo.CreateTaskRun(context.Background(), CreateTaskRunParams{
+		TenantID: "t1", OrgID: "o1", ProjectID: 1, TemplateID: template.ID, ScopeID: scopeID,
+		TaskType: TaskTypePortProbe, Status: TaskRunStatusPending, TimeoutSeconds: 30,
+		RateLimit: 1, Concurrency: 1, ActorID: "alice",
+	})
+	require.NoError(t, err)
+	_, err = svc.BuildDispatchPlan(context.Background(), 1, secondRunID, "alice")
+	var denied DispatchDeniedError
+	require.ErrorAs(t, err, &denied)
+	assert.Equal(t, ReasonNoMatch, denied.Reason, "scope membership remains mandatory")
 }
 
 func TestCreateTaskTemplateRejectsSensitiveConfig(t *testing.T) {
@@ -1714,7 +1959,12 @@ func newDispatchPlanFixture(t *testing.T, scopeStatus string, templateEnabled bo
 		}))
 	}
 
-	svc := NewService(repo, WithNow(func() time.Time { return now }))
+	// Retry backoff is neutralised here so the existing retry tests do not pay real
+	// wall-clock delays; the backoff itself is asserted in the dedicated tests below.
+	svc := NewService(repo,
+		WithNow(func() time.Time { return now }),
+		WithRetrySleep(func(context.Context, time.Duration) bool { return true }),
+	)
 	template, run := createTemplateAndRun(t, svc, scopeID, templateEnabled, config)
 	if runStatus != TaskRunStatusPending {
 		stored := repo.runs[1][run.ID]
@@ -2127,4 +2377,203 @@ func validCallbackRaw(t *testing.T, runID, seq uint64, phase, status string, res
 	})
 	require.NoError(t, err)
 	return raw
+}
+
+// A payload the adapter refuses up front — the six task types that never reach the
+// engine land here — must not consume the retry budget. Before this, a run with
+// retry_limit=100 issued 101 identical, hopeless POSTs.
+func TestDispatchTaskRunDoesNotRetryPermanentRejection(t *testing.T) {
+	engine := &fakeEngine{errs: []error{ErrEngineJobRejected, ErrEngineJobRejected, ErrEngineJobRejected, ErrEngineJobRejected}}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+
+	out, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1, RunID: run.ID, ActorID: "alice",
+	})
+	assert.ErrorIs(t, err, ErrEngineJobRejected)
+	assert.ErrorIs(t, err, ErrEngineDispatch, "the new sentinel must stay compatible with existing handling")
+	require.NotNil(t, out)
+	assert.Equal(t, TaskRunStatusFailed, out.Status)
+	assert.Equal(t, 1, engine.dispatchCalls, "a permanently rejected job must be attempted once")
+	assert.Equal(t, 1, out.Attempt)
+}
+
+// A 4xx means the engine evaluated the request and refused it; a 5xx is worth
+// retrying. The status has to be carried structurally for this to work.
+func TestDispatchTaskRunClassifiesEngineStatusCodes(t *testing.T) {
+	t.Run("4xx is permanent", func(t *testing.T) {
+		engine := &fakeEngine{errs: []error{
+			&engineStatusError{sentinel: ErrEngineDispatch, status: 422},
+			&engineStatusError{sentinel: ErrEngineDispatch, status: 422},
+			&engineStatusError{sentinel: ErrEngineDispatch, status: 422},
+			&engineStatusError{sentinel: ErrEngineDispatch, status: 422},
+		}}
+		svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+		svc.engine = engine
+
+		_, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+			ProjectID: 1, RunID: run.ID, ActorID: "alice",
+		})
+		assert.ErrorIs(t, err, ErrEngineDispatch)
+		assert.Equal(t, 1, engine.dispatchCalls)
+	})
+
+	t.Run("5xx keeps retrying", func(t *testing.T) {
+		engine := &fakeEngine{errs: []error{
+			&engineStatusError{sentinel: ErrEngineDispatch, status: 503},
+			&engineStatusError{sentinel: ErrEngineDispatch, status: 503},
+			nil,
+		}, ids: []string{"job-after-503"}}
+		svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+		svc.engine = engine
+
+		out, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+			ProjectID: 1, RunID: run.ID, ActorID: "alice",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, TaskRunStatusRunning, out.Status)
+		assert.Equal(t, "job-after-503", out.EngineJobID)
+		assert.Equal(t, 3, engine.dispatchCalls)
+	})
+}
+
+func TestDispatchTaskRunBacksOffBetweenAttempts(t *testing.T) {
+	transient := errors.New("engine unavailable")
+	engine := &fakeEngine{errs: []error{transient, transient, transient, transient}}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+
+	var delays []time.Duration
+	svc.sleepFn = func(_ context.Context, d time.Duration) bool {
+		delays = append(delays, d)
+		return true
+	}
+
+	_, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1, RunID: run.ID, ActorID: "alice",
+	})
+	assert.ErrorIs(t, err, transient)
+	// 4 attempts => 3 waits, and no wait before the first attempt.
+	require.Len(t, delays, 3)
+	assert.Equal(t, dispatchRetryBaseDelay, delays[0])
+	assert.Equal(t, 2*dispatchRetryBaseDelay, delays[1])
+	assert.Equal(t, 4*dispatchRetryBaseDelay, delays[2])
+	for _, d := range delays {
+		assert.LessOrEqual(t, d, dispatchRetryMaxDelay)
+	}
+}
+
+// A cancelled context during backoff must stop the loop rather than continuing to
+// dispatch after the task's deadline has passed.
+func TestDispatchTaskRunStopsWhenBackoffIsCancelled(t *testing.T) {
+	transient := errors.New("engine unavailable")
+	engine := &fakeEngine{errs: []error{transient, transient, transient, transient}}
+	svc, _, run := newDispatchPlanFixture(t, StatusActive, true, TaskRunStatusPending, dispatchConfigFor("example.com"))
+	svc.engine = engine
+	svc.sleepFn = func(context.Context, time.Duration) bool { return false }
+
+	_, err := svc.DispatchTaskRun(context.Background(), DispatchTaskRunInput{
+		ProjectID: 1, RunID: run.ID, ActorID: "alice",
+	})
+	require.Error(t, err)
+	assert.Equal(t, 1, engine.dispatchCalls, "the loop must stop when the wait is cut short")
+}
+
+// Separation of duties on active runs, checked where it actually has to hold:
+// creating the run, not in the policy helper in isolation.
+func TestCreateTaskRunRequiresApprovalForActiveTaskTypes(t *testing.T) {
+	newActiveTemplate := func(t *testing.T, taskType string) (*Service, *TaskTemplate) {
+		t.Helper()
+		repo := newFakeRepo()
+		_, err := repo.CreateScope(context.Background(), CreateScopeParams{
+			TenantID: "t1", OrgID: "o1", ProjectID: 1, Name: "scope", Status: StatusActive,
+			AuthorizedBy: "alice", ValidFrom: time.Now().Add(-time.Minute),
+			ValidUntil: time.Now().Add(time.Hour), ActorID: "alice",
+		})
+		require.NoError(t, err)
+		// The template is written straight through the repository because this
+		// test isolates run approval from template creation.
+		config := `{"target":"example.com"}`
+		switch taskType {
+		case TaskTypePortProbe:
+			config = `{"targets":[{"type":"ip","value":"1.1.1.1"}],"options":{"ports":"443"}}`
+		case TaskTypeWebProbe, TaskTypeFingerprint:
+			config = `{"targets":[{"type":"url","value":"https://example.com"}],"options":{}}`
+		}
+		id, err := repo.CreateTaskTemplate(context.Background(), CreateTaskTemplateParams{
+			TenantID: "t1", OrgID: "o1", ProjectID: 1, ScopeID: 1, Name: "template",
+			TaskType: taskType, Config: config, Enabled: true,
+			TimeoutSeconds: 30, RateLimit: MaxActiveRateLimit, Concurrency: MaxActiveConcurrency,
+			RetryLimit: 3, ActorID: "alice",
+		})
+		require.NoError(t, err)
+		template, err := repo.GetTaskTemplate(context.Background(), 1, id)
+		require.NoError(t, err)
+		return NewService(repo, WithActiveDispatchPolicy(ActiveDispatchPolicy{
+			Enabled:          true,
+			RequireApproval:  true,
+			RequireOwnership: true,
+		})), template
+	}
+
+	for _, taskType := range []string{TaskTypePortProbe, TaskTypeWebProbe, TaskTypeFingerprint} {
+		t.Run(taskType, func(t *testing.T) {
+			svc, template := newActiveTemplate(t, taskType)
+			base := CreateTaskRunInput{TemplateID: template.ID, ProjectID: 1, ActorID: "alice"}
+
+			_, err := svc.CreateTaskRun(context.Background(), base)
+			assert.ErrorIs(t, err, ErrActiveApprovalRequired, "an unapproved active run must not be created")
+
+			selfApproved := base
+			selfApproved.ApprovedBy = "alice"
+			_, err = svc.CreateTaskRun(context.Background(), selfApproved)
+			assert.ErrorIs(t, err, ErrActiveApprovalRequired, "the operator cannot approve their own scan")
+
+			approved := base
+			approved.ApprovedBy = "  bob  "
+			approved.ApprovalReason = " ticket OPS-42 "
+			run, err := svc.CreateTaskRun(context.Background(), approved)
+			require.NoError(t, err)
+			// Stored trimmed, so the record reads cleanly in an audit.
+			assert.Equal(t, "bob", run.ApprovedBy)
+			assert.Equal(t, "ticket OPS-42", run.ApprovalReason)
+		})
+	}
+
+	t.Run("historical invalid active config is rejected on enable and run", func(t *testing.T) {
+		svc, template := newActiveTemplate(t, TaskTypePortProbe)
+		repo := svc.repo.(*fakeRepo)
+		stored := repo.templates[1][template.ID]
+		stored.Enabled = false
+		stored.Config = `{"targets":[{"type":"url","value":"https://example.com"}],"options":{"ports":"443"}}`
+
+		_, err := svc.SetTaskTemplateEnabled(context.Background(), SetTaskTemplateEnabledInput{
+			TemplateID: template.ID, ProjectID: 1, Enabled: true, ActorID: "alice",
+		})
+		assert.ErrorIs(t, err, ErrInvalidTaskConfig)
+		assert.False(t, stored.Enabled)
+
+		stored.Enabled = true
+		_, err = svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+			TemplateID: template.ID, ProjectID: 1, ActorID: "alice", ApprovedBy: "bob",
+		})
+		assert.ErrorIs(t, err, ErrInvalidTaskConfig)
+	})
+
+	t.Run("passive runs need no approver", func(t *testing.T) {
+		svc, template := newActiveTemplate(t, TaskTypePassiveIntel)
+		run, err := svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+			TemplateID: template.ID, ProjectID: 1, ActorID: "alice",
+		})
+		require.NoError(t, err)
+		assert.Empty(t, run.ApprovedBy)
+	})
+
+	t.Run("dirscan remains unavailable", func(t *testing.T) {
+		svc, template := newActiveTemplate(t, TaskTypeDirScan)
+		_, err := svc.CreateTaskRun(context.Background(), CreateTaskRunInput{
+			TemplateID: template.ID, ProjectID: 1, ActorID: "alice", ApprovedBy: "bob",
+		})
+		assert.ErrorIs(t, err, ErrTaskTypeUnsupported)
+	})
 }

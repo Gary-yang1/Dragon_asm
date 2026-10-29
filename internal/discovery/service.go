@@ -7,10 +7,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/db"
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 )
 
@@ -50,15 +52,42 @@ var validRunTransitions = map[string]map[string]bool{
 
 // Service applies the M2-1/M2-2 discovery scope/task operations and writes audit events.
 type Service struct {
-	repo               Repository
-	db                 *sql.DB
-	engine             EngineAdapter
-	dispatchEnqueuer   DispatchEnqueuer
-	assetMissThreshold uint32
-	callbackEnqueuer   CallbackEnqueuer
-	callbackSecretRef  string
-	auditSink          auditRecorder
-	nowFn              func() time.Time
+	engineSettings      *EngineSettingsStore
+	engineConfigVersion uint64
+	repo                Repository
+	db                  *sql.DB
+	engine              EngineAdapter
+	engineRouter        EngineSelector
+	dispatchEnqueuer    DispatchEnqueuer
+	assetMissThreshold  uint32
+	callbackEnqueuer    CallbackEnqueuer
+	callbackSecretRef   string
+	auditSink           auditRecorder
+	nowFn               func() time.Time
+	// sleepFn gates dispatch retry backoff. Tests inject a no-op so they do not
+	// pay real wall-clock delays.
+	sleepFn func(ctx context.Context, d time.Duration) bool
+	// ownership gates active scanning on proven domain control.
+	ownership OwnershipChecker
+	// activePolicy is fail-closed by default and must be set identically in the
+	// API and Worker processes.
+	activePolicy ActiveDispatchPolicy
+	// activeResultIngestFn is the transaction boundary for one normalized result
+	// page. Tests replace it with an in-memory sink; production uses MySQL.
+	activeResultIngestFn activeResultIngestFunc
+}
+
+// WithOwnershipChecker supplies the verified-domain-ownership lookup used to gate
+// active scanning. Without it, active task types are refused.
+func WithOwnershipChecker(checker OwnershipChecker) ServiceOption {
+	return func(s *Service) { s.ownership = checker }
+}
+
+// WithActiveDispatchPolicy configures the release gates around active tasks.
+// It cannot disable unconditional Scope, dangerous-address, project, limit,
+// audit, or nopoc safeguards.
+func WithActiveDispatchPolicy(policy ActiveDispatchPolicy) ServiceOption {
+	return func(s *Service) { s.activePolicy = policy }
 }
 
 // auditRecorder is the minimal audit sink used by this service.
@@ -87,6 +116,13 @@ func WithAuditSink(sink auditRecorder) ServiceOption {
 func WithEngineAdapter(engine EngineAdapter) ServiceOption {
 	return func(s *Service) {
 		s.engine = engine
+	}
+}
+
+// WithEngineRouter injects task-type-aware passive/active engine routing.
+func WithEngineRouter(router EngineSelector) ServiceOption {
+	return func(s *Service) {
+		s.engineRouter = router
 	}
 }
 
@@ -119,6 +155,16 @@ func WithNow(now func() time.Time) ServiceOption {
 	}
 }
 
+// WithRetrySleep overrides the dispatch retry backoff. The function must report
+// false when the wait was cut short by context cancellation.
+func WithRetrySleep(sleep func(ctx context.Context, d time.Duration) bool) ServiceOption {
+	return func(s *Service) {
+		if sleep != nil {
+			s.sleepFn = sleep
+		}
+	}
+}
+
 func WithAssetMissThreshold(threshold int) ServiceOption {
 	return func(s *Service) {
 		if threshold < 1 {
@@ -137,28 +183,90 @@ func NewService(repo Repository, opts ...ServiceOption) *Service {
 		repo:               repo,
 		assetMissThreshold: 3,
 		nowFn:              func() time.Time { return time.Now().UTC() },
+		activePolicy:       DefaultActiveDispatchPolicy(),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.activeResultIngestFn = s.ingestActiveResultPayload
 	return s
 }
 
+func (s *Service) hasEngineRouting() bool {
+	return s.engineSettings != nil || s.engineRouter != nil || s.engine != nil
+}
+
+func (s *Service) engineForTaskType(taskType string) (EngineAdapter, error) {
+	if s.engineRouter != nil {
+		engine, err := s.engineRouter.EngineForTaskType(taskType)
+		return s.withProjectResolver(engine), err
+	}
+	// Preserve the single-adapter option for existing embedders and focused
+	// tests. Runtime wiring uses WithEngineRouter, so production never falls back
+	// across passive and active routes.
+	if s.engine != nil {
+		return s.withProjectResolver(s.engine), nil
+	}
+	return nil, ErrEngineNotConfigured
+}
+
+func (s *Service) withProjectResolver(engine EngineAdapter) EngineAdapter {
+	if active, ok := engine.(*ActiveAPIEngineAdapter); ok && s.db != nil && active.projectResolver == nil {
+		copy := *active
+		copy.projectResolver = &sqlEngineProjectResolver{db: s.db}
+		return &copy
+	}
+	return engine
+}
+
+// validateEngineProject checks local routing without contacting an engine.
+func (s *Service) validateEngineProject(projectID uint64, taskType string) error {
+	engine, err := s.engineForTaskType(taskType)
+	if err != nil {
+		return err
+	}
+	if active, ok := engine.(*ActiveAPIEngineAdapter); ok {
+		if active.projectIDs[projectID] <= 0 && active.projectResolver == nil {
+			return ErrActiveEngineProjectMapping
+		}
+	}
+	return nil
+}
+
+func (s *Service) requireActiveDispatchEnabled(taskType string) error {
+	if IsActiveTaskType(taskType) && !s.activePolicy.Enabled {
+		return ErrTaskTypeUnsupported
+	}
+	return nil
+}
+
+// runInTx runs fn in one transaction, re-running it if InnoDB rolls it back for a
+// deadlock or lock-wait timeout.
+//
+// Callback ingest needs this: several callbacks for the same run are processed
+// concurrently, and each transaction locks its own inbox row before locking every
+// row of the run, so one of them loses a deadlock. Treating that as fatal left the
+// callback stuck in `processing` — the run was then timed out by the reconcile
+// worker even though the scan had actually succeeded.
+//
+// fn re-reads its state on every attempt, which is what makes re-running safe.
 func (s *Service) runInTx(ctx context.Context, fn func(ctx context.Context, repo Repository, auditSink auditRecorder) error) error {
 	if s.db == nil {
 		return fn(ctx, s.repo, s.auditSink)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	txRepo := NewRepository(dbgen.New(tx))
-	txAudit := audit.NewService(audit.NewRepository(dbgen.New(tx)))
-	if err := fn(ctx, txRepo, txAudit); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return db.RetryOnLockConflict(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		txRepo := NewRepository(dbgen.New(tx))
+		txAudit := audit.NewService(audit.NewRepository(dbgen.New(tx)))
+		if err := fn(ctx, txRepo, txAudit); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // CreateScope creates a scope and optional include/exclude targets.
@@ -180,9 +288,19 @@ func (s *Service) CreateScope(ctx context.Context, in CreateScopeInput) (*Scope,
 	if err != nil {
 		return nil, err
 	}
+	if in.IsDefault && status != StatusActive {
+		return nil, ErrInvalidDefaultScope
+	}
 
 	var scopeID uint64
 	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		if in.IsDefault {
+			if err := s.replaceProjectDefault(
+				ctx, repo, txAudit, in.ProjectID, 0, in.ActorID, s.nowFn(), in.Meta,
+			); err != nil {
+				return err
+			}
+		}
 		var err error
 		scopeID, err = repo.CreateScope(ctx, CreateScopeParams{
 			TenantID:     in.TenantID,
@@ -193,6 +311,7 @@ func (s *Service) CreateScope(ctx context.Context, in CreateScopeInput) (*Scope,
 			AuthorizedBy: in.AuthorizedBy,
 			ValidFrom:    in.ValidFrom,
 			ValidUntil:   in.ValidUntil,
+			IsDefault:    in.IsDefault,
 			ActorID:      in.ActorID,
 		})
 		if err != nil {
@@ -201,14 +320,16 @@ func (s *Service) CreateScope(ctx context.Context, in CreateScopeInput) (*Scope,
 
 		for _, t := range targets {
 			if err := repo.InsertScopeTarget(ctx, InsertScopeTargetParams{
-				TenantID:   in.TenantID,
-				OrgID:      in.OrgID,
-				ProjectID:  in.ProjectID,
-				ScopeID:    scopeID,
-				TargetType: t.TargetType,
-				MatchMode:  t.MatchMode,
-				Value:      t.Value,
-				ActorID:    in.ActorID,
+				TenantID:     in.TenantID,
+				OrgID:        in.OrgID,
+				ProjectID:    in.ProjectID,
+				ScopeID:      scopeID,
+				TargetType:   t.TargetType,
+				MatchMode:    t.MatchMode,
+				CoverageMode: t.CoverageMode,
+				URLRule:      t.URLRule,
+				Value:        t.Value,
+				ActorID:      in.ActorID,
 			}); err != nil {
 				return err
 			}
@@ -233,6 +354,9 @@ func (s *Service) UpdateScope(ctx context.Context, in UpdateScopeInput) (*Scope,
 	}
 
 	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		if err := repo.LockProjectForScopeDefault(ctx, in.ProjectID); err != nil {
+			return err
+		}
 		before, err := repo.GetScope(ctx, in.ProjectID, in.ScopeID)
 		if err != nil {
 			return err
@@ -259,6 +383,16 @@ func (s *Service) UpdateScope(ctx context.Context, in UpdateScopeInput) (*Scope,
 				return err
 			}
 			status = st
+		}
+		isDefault := before.IsDefault
+		if in.IsDefault != nil {
+			isDefault = *in.IsDefault
+		}
+		if status != StatusActive {
+			if in.IsDefault != nil && *in.IsDefault {
+				return ErrInvalidDefaultScope
+			}
+			isDefault = false
 		}
 		validFrom := before.ValidFrom
 		if in.ValidFrom != nil {
@@ -287,6 +421,14 @@ func (s *Service) UpdateScope(ctx context.Context, in UpdateScopeInput) (*Scope,
 			}
 		}
 
+		if isDefault {
+			if err := s.replaceProjectDefault(
+				ctx, repo, txAudit, in.ProjectID, in.ScopeID, in.ActorID, s.nowFn(), in.Meta,
+			); err != nil {
+				return err
+			}
+		}
+
 		if err := repo.UpdateScope(ctx, UpdateScopeParams{
 			ScopeID:      in.ScopeID,
 			TenantID:     in.TenantID,
@@ -297,6 +439,7 @@ func (s *Service) UpdateScope(ctx context.Context, in UpdateScopeInput) (*Scope,
 			AuthorizedBy: authorizedBy,
 			ValidFrom:    validFrom,
 			ValidUntil:   validUntil,
+			IsDefault:    isDefault,
 			ActorID:      in.ActorID,
 		}); err != nil {
 			return err
@@ -305,14 +448,16 @@ func (s *Service) UpdateScope(ctx context.Context, in UpdateScopeInput) (*Scope,
 		if in.Targets != nil {
 			for _, t := range targets {
 				if err := repo.InsertScopeTarget(ctx, InsertScopeTargetParams{
-					TenantID:   in.TenantID,
-					OrgID:      in.OrgID,
-					ProjectID:  in.ProjectID,
-					ScopeID:    in.ScopeID,
-					TargetType: t.TargetType,
-					MatchMode:  t.MatchMode,
-					Value:      t.Value,
-					ActorID:    in.ActorID,
+					TenantID:     in.TenantID,
+					OrgID:        in.OrgID,
+					ProjectID:    in.ProjectID,
+					ScopeID:      in.ScopeID,
+					TargetType:   t.TargetType,
+					MatchMode:    t.MatchMode,
+					CoverageMode: t.CoverageMode,
+					URLRule:      t.URLRule,
+					Value:        t.Value,
+					ActorID:      in.ActorID,
 				}); err != nil {
 					return err
 				}
@@ -335,12 +480,69 @@ func (s *Service) UpdateScope(ctx context.Context, in UpdateScopeInput) (*Scope,
 	return s.GetScope(ctx, in.ProjectID, in.ScopeID)
 }
 
+// replaceProjectDefault serializes one project's default transfer and audits
+// the displaced Scope in the same transaction. The database unique key remains
+// the final concurrency guard; the project row lock makes the chosen winner
+// deterministic before either request clears or assigns the marker.
+func (s *Service) replaceProjectDefault(
+	ctx context.Context,
+	repo Repository,
+	txAudit auditRecorder,
+	projectID, exceptScopeID uint64,
+	actorID string,
+	updatedAt time.Time,
+	meta AuditMeta,
+) error {
+	if err := repo.LockProjectForScopeDefault(ctx, projectID); err != nil {
+		return err
+	}
+
+	var displaced []*Scope
+	if txAudit != nil {
+		scopes, err := repo.ListScopes(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		for _, scope := range scopes {
+			if scope == nil || !scope.IsDefault || scope.ID == exceptScopeID {
+				continue
+			}
+			targets, err := repo.ListScopeTargets(ctx, projectID, scope.ID)
+			if err != nil {
+				return err
+			}
+			before := *scope
+			before.Targets = targets
+			displaced = append(displaced, &before)
+		}
+	}
+
+	if err := repo.ClearDefaultScopes(ctx, projectID, exceptScopeID, actorID, updatedAt); err != nil {
+		return err
+	}
+	for _, before := range displaced {
+		after := *before
+		after.IsDefault = false
+		after.UpdatedBy = actorID
+		after.UpdatedAt = updatedAt
+		if err := s.recordAuditWithSink(
+			ctx, txAudit, ActionScopeUpdate, before, &after, actorID, meta,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DeactivateScope marks a live scope inactive.
 func (s *Service) DeactivateScope(ctx context.Context, in DeactivateScopeInput) error {
 	if in.ProjectID == 0 || in.ScopeID == 0 {
 		return ErrInvalidScopeID
 	}
 	return s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		if err := repo.LockProjectForScopeDefault(ctx, in.ProjectID); err != nil {
+			return err
+		}
 		before, err := repo.GetScope(ctx, in.ProjectID, in.ScopeID)
 		if err != nil {
 			return err
@@ -393,11 +595,21 @@ func (s *Service) ListScopes(ctx context.Context, projectID uint64) ([]*Scope, e
 }
 
 // IsTargetAllowed validates time window + target policy and returns a reason.
+//
+// The target type is inferred from the value. Callers that already know it
+// should use IsTypedTargetAllowed, which is the only way a company target can be
+// matched.
 func (s *Service) IsTargetAllowed(ctx context.Context, projectID, scopeID uint64, rawTarget string) (bool, ScopeRejectReason, error) {
+	return s.IsTypedTargetAllowed(ctx, projectID, scopeID, "", rawTarget)
+}
+
+// IsTypedTargetAllowed validates time window + target policy for a target whose
+// type the caller knows, and returns a reason.
+func (s *Service) IsTypedTargetAllowed(ctx context.Context, projectID, scopeID uint64, targetType, rawTarget string) (bool, ScopeRejectReason, error) {
 	if projectID == 0 || scopeID == 0 {
 		return false, ReasonScopeNotFound, ErrInvalidScopeID
 	}
-	parsed, err := parseTarget(rawTarget)
+	parsed, err := parseTypedTarget(targetType, rawTarget)
 	if err != nil {
 		if errors.Is(err, ErrDangerousTarget) {
 			return false, ReasonDangerous, err
@@ -429,46 +641,37 @@ func (s *Service) IsTargetAllowed(ctx context.Context, projectID, scopeID uint64
 		return false, ReasonSystemError, err
 	}
 
-	for _, t := range targets {
-		if t.MatchMode != MatchModeExclude {
-			continue
-		}
-		if matchTarget(t, parsed) {
-			return false, ReasonExcluded, nil
-		}
-	}
-	for _, t := range targets {
-		if t.MatchMode != MatchModeInclude {
-			continue
-		}
-		if matchTarget(t, parsed) {
-			return true, ReasonAllowed, nil
-		}
-	}
-	return false, ReasonNoMatch, nil
+	decision := scopeMatchDecision(targets, parsed)
+	return decision == ReasonAllowed, decision, nil
 }
 
 // CreateTaskTemplate creates a task template and validates scope ownership by project.
 func (s *Service) CreateTaskTemplate(ctx context.Context, in CreateTaskTemplateInput) (*TaskTemplate, error) {
-	if err := validateTemplateMeta(in.TenantID, in.OrgID, in.Name, in.ScopeID, in.ProjectID, in.TaskType, in.ActorID); err != nil {
-		return nil, err
+	if s.engineSettings != nil {
+		scoped, err := s.withLatestSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return scoped.CreateTaskTemplate(ctx, in)
 	}
-	if err := validateTemplateSchedule(in.Schedule); err != nil {
-		return nil, err
-	}
-	config, err := normalizeTemplateConfig(in.Config)
+
+	prepared, err := s.prepareTaskTemplateInput(in)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateTaskLimits(in.TimeoutSeconds, in.RateLimit, in.Concurrency, in.RetryLimit); err != nil {
-		return nil, err
-	}
+	in = prepared
 	template := (*TaskTemplate)(nil)
 
 	if err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
 		if _, err := repo.GetScope(ctx, in.ProjectID, in.ScopeID); err != nil {
 			return err
 		}
+		validator := *s
+		validator.repo = repo
+		if err := validator.validateInheritedSnapshot(ctx, in.ProjectID, in.ScopeID, in.TaskType, in.Config); err != nil {
+			return err
+		}
+
 		id, err := repo.CreateTaskTemplate(ctx, CreateTaskTemplateParams{
 			TenantID:       in.TenantID,
 			OrgID:          in.OrgID,
@@ -476,7 +679,7 @@ func (s *Service) CreateTaskTemplate(ctx context.Context, in CreateTaskTemplateI
 			ScopeID:        in.ScopeID,
 			Name:           in.Name,
 			TaskType:       in.TaskType,
-			Config:         config,
+			Config:         in.Config,
 			Schedule:       in.Schedule,
 			Enabled:        in.Enabled,
 			TimeoutSeconds: in.TimeoutSeconds,
@@ -503,8 +706,45 @@ func (s *Service) CreateTaskTemplate(ctx context.Context, in CreateTaskTemplateI
 	return template, nil
 }
 
+func (s *Service) prepareTaskTemplateInput(in CreateTaskTemplateInput) (CreateTaskTemplateInput, error) {
+	if err := validateTemplateMeta(in.TenantID, in.OrgID, in.Name, in.ScopeID, in.ProjectID, in.TaskType, in.ActorID); err != nil {
+		return CreateTaskTemplateInput{}, err
+	}
+	if err := s.requireActiveDispatchEnabled(in.TaskType); err != nil {
+		return CreateTaskTemplateInput{}, err
+	}
+	if err := validateTemplateSchedule(in.Schedule); err != nil {
+		return CreateTaskTemplateInput{}, err
+	}
+	config, err := normalizeTemplateConfig(in.Config)
+	if err != nil {
+		return CreateTaskTemplateInput{}, err
+	}
+	if err := validateActiveDispatchConfig(in.TaskType, config); err != nil {
+		return CreateTaskTemplateInput{}, err
+	}
+	if err := validateTaskLimits(in.TimeoutSeconds, in.RateLimit, in.Concurrency, in.RetryLimit); err != nil {
+		return CreateTaskTemplateInput{}, err
+	}
+	// Active probes carry much tighter ceilings than passive collection: the cost
+	// of getting the rate wrong lands on someone else's servers.
+	if err := ValidateActiveTaskLimits(in.TaskType, in.RateLimit, in.Concurrency); err != nil {
+		return CreateTaskTemplateInput{}, err
+	}
+	in.Config = config
+	return in, nil
+}
+
 // UpdateTaskTemplate updates fields but does not change scope association.
 func (s *Service) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateInput) (*TaskTemplate, error) {
+	if s.engineSettings != nil {
+		scoped, err := s.withLatestSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return scoped.UpdateTaskTemplate(ctx, in)
+	}
+
 	if in.ProjectID == 0 || in.TemplateID == 0 {
 		return nil, ErrInvalidTemplateID
 	}
@@ -517,6 +757,10 @@ func (s *Service) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateI
 		before, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
 		if err != nil {
 			return err
+		}
+
+		if (hasInheritance(before.Config) && (in.Config != nil || in.TaskType != nil)) || (in.Config != nil && hasInheritance(*in.Config)) {
+			return ErrInheritanceImmutable
 		}
 
 		name := before.Name
@@ -534,6 +778,9 @@ func (s *Service) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateI
 			}
 			taskType = t
 		}
+		if err := s.requireActiveDispatchEnabled(taskType); err != nil {
+			return err
+		}
 		config := before.Config
 		if in.Config != nil {
 			var normalizedConfig string
@@ -542,6 +789,9 @@ func (s *Service) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateI
 				return err
 			}
 			config = normalizedConfig
+		}
+		if err := validateActiveDispatchConfig(taskType, config); err != nil {
+			return err
 		}
 		schedule := before.Schedule
 		if in.Schedule != nil {
@@ -568,6 +818,9 @@ func (s *Service) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateI
 			retryLimit = *in.RetryLimit
 		}
 		if err := validateTaskLimits(timeoutSeconds, rateLimit, concurrency, retryLimit); err != nil {
+			return err
+		}
+		if err := ValidateActiveTaskLimits(taskType, rateLimit, concurrency); err != nil {
 			return err
 		}
 
@@ -605,6 +858,14 @@ func (s *Service) UpdateTaskTemplate(ctx context.Context, in UpdateTaskTemplateI
 
 // SetTaskTemplateEnabled updates template enabled flag.
 func (s *Service) SetTaskTemplateEnabled(ctx context.Context, in SetTaskTemplateEnabledInput) (*TaskTemplate, error) {
+	if s.engineSettings != nil {
+		scoped, err := s.withLatestSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return scoped.SetTaskTemplateEnabled(ctx, in)
+	}
+
 	if in.ProjectID == 0 || in.TemplateID == 0 {
 		return nil, ErrInvalidTemplateID
 	}
@@ -616,6 +877,20 @@ func (s *Service) SetTaskTemplateEnabled(ctx context.Context, in SetTaskTemplate
 		before, err := repo.GetTaskTemplate(ctx, in.ProjectID, in.TemplateID)
 		if err != nil {
 			return err
+		}
+		if in.Enabled {
+			if _, err := validateTaskType(before.TaskType); err != nil {
+				return err
+			}
+			if err := s.requireActiveDispatchEnabled(before.TaskType); err != nil {
+				return err
+			}
+			if err := ValidateActiveTaskLimits(before.TaskType, before.RateLimit, before.Concurrency); err != nil {
+				return err
+			}
+			if err := validateActiveDispatchConfig(before.TaskType, before.Config); err != nil {
+				return err
+			}
 		}
 		if err := repo.SetTaskTemplateEnabled(ctx, in.ProjectID, in.TemplateID, in.Enabled, in.ActorID); err != nil {
 			return err
@@ -679,6 +954,14 @@ func (s *Service) ListTaskTemplates(ctx context.Context, projectID uint64) ([]*T
 
 // CreateTaskRun creates a pending run bound to a template.
 func (s *Service) CreateTaskRun(ctx context.Context, in CreateTaskRunInput) (*TaskRun, error) {
+	if s.engineSettings != nil {
+		scoped, err := s.withLatestSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return scoped.CreateTaskRun(ctx, in)
+	}
+
 	if in.ProjectID == 0 || in.TemplateID == 0 {
 		return nil, ErrInvalidTemplateID
 	}
@@ -695,29 +978,64 @@ func (s *Service) CreateTaskRun(ctx context.Context, in CreateTaskRunInput) (*Ta
 		if err != nil {
 			return err
 		}
+		validator := *s
+		validator.repo = repo
+		if err := validator.validateInheritedSnapshot(ctx, in.ProjectID, template.ScopeID, template.TaskType, template.Config); err != nil {
+			return err
+		}
+
 		if !template.Enabled {
 			return ErrTemplateDisabled
 		}
+		if _, err := validateTaskType(template.TaskType); err != nil {
+			return err
+		}
+		if err := s.requireActiveDispatchEnabled(template.TaskType); err != nil {
+			return err
+		}
+		if s.hasEngineRouting() {
+			if err := s.validateEngineProject(in.ProjectID, template.TaskType); err != nil {
+				return err
+			}
+		}
+		if err := ValidateActiveTaskLimits(template.TaskType, template.RateLimit, template.Concurrency); err != nil {
+			return err
+		}
+		if err := validateActiveDispatchConfig(template.TaskType, template.Config); err != nil {
+			return err
+		}
+		// The task type lives on the template, so separation of duties can only be
+		// checked once the template is loaded.
+		if s.activePolicy.RequireApproval {
+			if err := ValidateActiveApproval(template.TaskType, ActiveApproval{
+				ActorID: in.ActorID, ApprovedBy: in.ApprovedBy,
+			}); err != nil {
+				return err
+			}
+		}
 		id, err := repo.CreateTaskRun(ctx, CreateTaskRunParams{
-			TenantID:          template.TenantID,
-			OrgID:             template.OrgID,
-			ProjectID:         in.ProjectID,
-			TemplateID:        in.TemplateID,
-			ScopeID:           template.ScopeID,
-			TaskType:          template.TaskType,
-			Status:            TaskRunStatusPending,
-			Progress:          0,
-			TimeoutSeconds:    template.TimeoutSeconds,
-			RateLimit:         template.RateLimit,
-			Concurrency:       template.Concurrency,
-			RetryLimit:        template.RetryLimit,
-			Attempt:           0,
-			EngineJobID:       "",
-			DispatchedAt:      time.Time{},
-			LastCallbackAt:    time.Time{},
-			ResultCount:       0,
-			CallbackSecretRef: s.callbackSecretRef,
-			ActorID:           in.ActorID,
+			EngineConfigVersion: s.engineConfigVersion,
+			TenantID:            template.TenantID,
+			OrgID:               template.OrgID,
+			ProjectID:           in.ProjectID,
+			TemplateID:          in.TemplateID,
+			ScopeID:             template.ScopeID,
+			TaskType:            template.TaskType,
+			Status:              TaskRunStatusPending,
+			Progress:            0,
+			TimeoutSeconds:      template.TimeoutSeconds,
+			RateLimit:           template.RateLimit,
+			Concurrency:         template.Concurrency,
+			RetryLimit:          template.RetryLimit,
+			Attempt:             0,
+			EngineJobID:         "",
+			DispatchedAt:        time.Time{},
+			LastCallbackAt:      time.Time{},
+			ResultCount:         0,
+			CallbackSecretRef:   s.callbackSecretRef,
+			ApprovedBy:          strings.TrimSpace(in.ApprovedBy),
+			ApprovalReason:      strings.TrimSpace(in.ApprovalReason),
+			ActorID:             in.ActorID,
 		})
 		if err != nil {
 			return err
@@ -789,6 +1107,14 @@ func (s *Service) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRu
 // BuildDispatchPlan validates a pending run's targets against its project scope.
 // It does not call the engine or mutate run status; M2-4 owns actual dispatch.
 func (s *Service) BuildDispatchPlan(ctx context.Context, projectID, runID uint64, actorID string) (*DispatchPlan, error) {
+	if s.engineSettings != nil {
+		scoped, err := s.withRunSettings(ctx, projectID, runID)
+		if err != nil {
+			return nil, err
+		}
+		return scoped.BuildDispatchPlan(ctx, projectID, runID, actorID)
+	}
+
 	if projectID == 0 || runID == 0 {
 		return nil, ErrInvalidTaskRunID
 	}
@@ -808,11 +1134,30 @@ func (s *Service) BuildDispatchPlan(ctx context.Context, projectID, runID uint64
 	if err != nil {
 		return nil, err
 	}
-	if template.ProjectID != run.ProjectID || template.ID != run.TemplateID || template.ScopeID != run.ScopeID {
+	if template.ProjectID != run.ProjectID ||
+		template.ID != run.TemplateID ||
+		template.ScopeID != run.ScopeID ||
+		template.TaskType != run.TaskType {
 		return nil, ErrInvalidTemplate
 	}
 	if !template.Enabled {
 		return nil, ErrTemplateDisabled
+	}
+	if _, err := validateTaskType(run.TaskType); err != nil {
+		return nil, err
+	}
+	if err := s.requireActiveDispatchEnabled(run.TaskType); err != nil {
+		return nil, err
+	}
+	if err := ValidateActiveTaskLimits(run.TaskType, run.RateLimit, run.Concurrency); err != nil {
+		return nil, err
+	}
+	if err := validateActiveDispatchConfig(run.TaskType, template.Config); err != nil {
+		return nil, err
+	}
+
+	if err := s.validateInheritedSnapshot(ctx, projectID, run.ScopeID, run.TaskType, template.Config); err != nil {
+		return nil, err
 	}
 
 	config, err := parseDispatchConfig(template.Config)
@@ -820,7 +1165,7 @@ func (s *Service) BuildDispatchPlan(ctx context.Context, projectID, runID uint64
 		return nil, err
 	}
 	for _, target := range config.Targets {
-		allowed, reason, err := s.IsTargetAllowed(ctx, projectID, run.ScopeID, target.Value)
+		allowed, reason, err := s.IsTypedTargetAllowed(ctx, projectID, run.ScopeID, target.Type, target.Value)
 		if err != nil && reason == ReasonSystemError {
 			return nil, err
 		}
@@ -828,6 +1173,15 @@ func (s *Service) BuildDispatchPlan(ctx context.Context, projectID, runID uint64
 			return nil, DispatchDeniedError{Target: target.Value, Reason: reason}
 		}
 		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Scope membership says the operator listed the target; ownership says the
+	// platform checked they control it. Active probing requires both, and this is
+	// the last point before packets leave the building.
+	if s.activePolicy.RequireOwnership {
+		if err := s.requireVerifiedOwnership(ctx, projectID, run.TaskType, config.Targets); err != nil {
 			return nil, err
 		}
 	}
@@ -847,10 +1201,66 @@ func (s *Service) BuildDispatchPlan(ctx context.Context, projectID, runID uint64
 	}, nil
 }
 
+// requireVerifiedOwnership refuses an active run whose domain targets have no
+// verified ownership proof in this project.
+//
+// It fails closed: with no checker configured, active scanning is refused rather
+// than allowed, so a deployment that forgot to wire verification cannot probe.
+func (s *Service) requireVerifiedOwnership(ctx context.Context, projectID uint64, taskType string, targets []DispatchTarget) error {
+	if !IsActiveTaskType(taskType) {
+		return nil
+	}
+	if s.ownership == nil {
+		return ErrOwnershipRequired
+	}
+	for _, target := range targets {
+		host := ownershipHostFor(target)
+		if host == "" {
+			// An active target the platform cannot attribute to a verified domain —
+			// a bare IP or CIDR — has no ownership proof available, so it is refused.
+			return ErrOwnershipRequired
+		}
+		verified, err := s.ownership.IsDomainOwnershipVerified(ctx, projectID, host)
+		if err != nil {
+			return err
+		}
+		if !verified {
+			return ErrOwnershipRequired
+		}
+	}
+	return nil
+}
+
+// ownershipHostFor reduces a target to the hostname whose ownership must be
+// proven, or "" when no such attribution exists.
+func ownershipHostFor(target DispatchTarget) string {
+	value := strings.TrimSpace(target.Value)
+	switch target.Type {
+	case TargetTypeDomain:
+		return value
+	case TargetTypeURL:
+		parsed, err := url.Parse(value)
+		if err != nil {
+			return ""
+		}
+		return parsed.Hostname()
+	default:
+		return ""
+	}
+}
+
 // DispatchTaskRun sends a pending run to the configured engine and records the
 // returned engine_job_id. Callback handling and result ingest are owned by M2-5.
 func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) (*TaskRun, error) {
-	if s.engine == nil {
+	if s.engineSettings != nil {
+		scoped, err := s.withRunSettings(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return nil, err
+		}
+		return scoped.DispatchTaskRun(ctx, in)
+	}
+
+	if !s.hasEngineRouting() {
 		return nil, ErrEngineNotConfigured
 	}
 	existing, err := s.repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
@@ -867,15 +1277,44 @@ func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) 
 	if err != nil {
 		return nil, err
 	}
+	// Keep a dispatch-time capability check for historical rows that predate the
+	// template validation guard. Release policy is checked separately below.
+	if !IsDispatchableTaskType(plan.TaskType) {
+		return nil, ErrTaskTypeUnsupported
+	}
+	if err := s.requireActiveDispatchEnabled(plan.TaskType); err != nil {
+		return nil, err
+	}
+	engine, err := s.engineForTaskType(plan.TaskType)
+	if err != nil {
+		return nil, err
+	}
 
 	job := scanJobFromDispatchPlan(plan, in.CallbackURL)
 	var lastErr error
 	maxAttempts := plan.RetryLimit + 1
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// retry_limit is caller-supplied (up to 100), so without this the loop
+		// keeps hammering the engine after the task's deadline has passed.
+		if err := ctx.Err(); err != nil {
+			if lastErr == nil {
+				lastErr = err
+			}
+			break
+		}
+		// Back off before every attempt but the first. Previously all 101 attempts
+		// fired back to back, so one run could issue 101 immediate POSTs at the
+		// engine — a self-inflicted burst exactly when it is already unhealthy.
+		if attempt > 0 && !s.waitBeforeRetry(ctx, attempt) {
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			break
+		}
 		if err := s.repo.IncrementRunAttempt(ctx, in.ProjectID, in.RunID, in.ActorID, s.nowFn()); err != nil {
 			return nil, err
 		}
-		engineJobID, err := s.engine.Dispatch(ctx, job)
+		engineJobID, err := engine.Dispatch(ctx, job)
 		if err == nil {
 			run, recordErr := s.recordRunDispatched(ctx, in, engineJobID)
 			if recordErr != nil {
@@ -883,18 +1322,21 @@ func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) 
 				if currentErr == nil && current.Status == TaskRunStatusRunning && current.EngineJobID == engineJobID {
 					return current, nil
 				}
-				_ = s.engine.Cancel(ctx, engineJobID)
+				_ = engine.Cancel(ctx, engineJobID)
 				return nil, recordErr
 			}
 			return run, nil
 		}
 		lastErr = err
+		// A rejected payload or a 4xx means the engine refused this request on its
+		// merits; the six task types that never reach the engine land here. Retrying
+		// identical bytes cannot help, so fail fast instead of burning the budget.
+		if dispatchErrorIsPermanent(err) {
+			break
+		}
 	}
 
-	summary := "engine dispatch failed"
-	if lastErr != nil {
-		summary = lastErr.Error()
-	}
+	summary := sanitizeEngineErrorSummary(lastErr, "engine dispatch failed")
 	run, err := s.recordRunDispatchFailed(ctx, in, summary)
 	if err != nil {
 		return nil, err
@@ -906,6 +1348,14 @@ func (s *Service) DispatchTaskRun(ctx context.Context, in DispatchTaskRunInput) 
 // jobs need no engine call; running jobs are cancelled remotely before the local
 // transition is committed.
 func (s *Service) CancelDispatchedTaskRun(ctx context.Context, in UpdateTaskRunStatusInput) error {
+	if s.engineSettings != nil {
+		scoped, err := s.withRunSettings(ctx, in.ProjectID, in.RunID)
+		if err != nil {
+			return err
+		}
+		return scoped.CancelDispatchedTaskRun(ctx, in)
+	}
+
 	if in.ProjectID == 0 || in.RunID == 0 {
 		return ErrInvalidTaskRunID
 	}
@@ -922,13 +1372,14 @@ func (s *Service) CancelDispatchedTaskRun(ctx context.Context, in UpdateTaskRunS
 	case TaskRunStatusPending:
 		return s.MarkTaskRunCancelled(ctx, in)
 	case TaskRunStatusRunning:
-		if s.engine == nil {
-			return ErrEngineNotConfigured
-		}
 		if strings.TrimSpace(run.EngineJobID) == "" {
 			return ErrInvalidRunTransition
 		}
-		if err := s.engine.Cancel(ctx, run.EngineJobID); err != nil {
+		engine, err := s.engineForTaskType(run.TaskType)
+		if err != nil {
+			return err
+		}
+		if err := engine.Cancel(ctx, run.EngineJobID); err != nil {
 			return err
 		}
 		return s.MarkTaskRunCancelled(ctx, in)
@@ -940,7 +1391,7 @@ func (s *Service) CancelDispatchedTaskRun(ctx context.Context, in UpdateTaskRunS
 // ReconcileTaskRun pulls the external engine state for one running run and
 // closes terminal engine jobs in the local state machine.
 func (s *Service) ReconcileTaskRun(ctx context.Context, in ReconcileTaskRunInput) (*TaskRun, error) {
-	if s.engine == nil {
+	if !s.hasEngineRouting() {
 		return nil, ErrEngineNotConfigured
 	}
 	if in.ProjectID == 0 || in.RunID == 0 {
@@ -956,9 +1407,55 @@ func (s *Service) ReconcileTaskRun(ctx context.Context, in ReconcileTaskRunInput
 	return s.reconcileRun(ctx, run, in.ActorID, in.Meta, false)
 }
 
+// ReconcileRunningRuns polls ordinary running jobs, pulls terminal active-engine
+// results, and also applies timeout recovery when a deadline has elapsed.
+func (s *Service) ReconcileRunningRuns(
+	ctx context.Context,
+	in ReconcileRunningRunsInput,
+) (ReconcileTimedOutRunsResult, error) {
+	if !s.hasEngineRouting() {
+		return ReconcileTimedOutRunsResult{}, ErrEngineNotConfigured
+	}
+	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
+		return ReconcileTimedOutRunsResult{}, ErrInvalidActorID
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	runs, err := s.repo.ListRunningRunsForReconcile(ctx, limit)
+	if err != nil {
+		return ReconcileTimedOutRunsResult{}, err
+	}
+	now := s.nowFn()
+	result := ReconcileTimedOutRunsResult{}
+	for _, run := range runs {
+		result.Checked++
+		timeoutMode := runTimedOut(run, now)
+		after, err := s.reconcileRun(ctx, run, in.ActorID, in.Meta, timeoutMode)
+		if err != nil {
+			result.FailedRunIDs = append(result.FailedRunIDs, run.ID)
+			result.Errors = append(result.Errors, err)
+			continue
+		}
+		if after != nil && after.Status != TaskRunStatusRunning {
+			result.Updated++
+			if timeoutMode &&
+				after.Status == TaskRunStatusFailed &&
+				strings.Contains(after.ErrorSummary, "timed out") {
+				result.Cancelled++
+			}
+		}
+	}
+	if len(result.Errors) > 0 {
+		return result, errors.Join(result.Errors...)
+	}
+	return result, nil
+}
+
 // ReconcileTimedOutRuns recovers running runs whose dispatch deadline has passed.
 func (s *Service) ReconcileTimedOutRuns(ctx context.Context, in ReconcileTimedOutRunsInput) (ReconcileTimedOutRunsResult, error) {
-	if s.engine == nil {
+	if !s.hasEngineRouting() {
 		return ReconcileTimedOutRunsResult{}, ErrEngineNotConfigured
 	}
 	if in.ActorID == "" || len(in.ActorID) > maxActorLen {
@@ -981,6 +1478,7 @@ func (s *Service) ReconcileTimedOutRuns(ctx context.Context, in ReconcileTimedOu
 		result.Checked++
 		after, err := s.reconcileRun(ctx, run, in.ActorID, in.Meta, true)
 		if err != nil {
+			result.FailedRunIDs = append(result.FailedRunIDs, run.ID)
 			result.Errors = append(result.Errors, err)
 			continue
 		}
@@ -998,26 +1496,86 @@ func (s *Service) ReconcileTimedOutRuns(ctx context.Context, in ReconcileTimedOu
 }
 
 func (s *Service) reconcileRun(ctx context.Context, run *TaskRun, actorID string, meta AuditMeta, timeoutMode bool) (*TaskRun, error) {
+	if s.engineSettings != nil {
+		scoped, err := s.withRunSettings(ctx, run.ProjectID, run.ID)
+		if err != nil {
+			return nil, err
+		}
+		return scoped.reconcileRun(ctx, run, actorID, meta, timeoutMode)
+	}
+
 	if run.Status != TaskRunStatusRunning || strings.TrimSpace(run.EngineJobID) == "" {
 		return nil, ErrInvalidRunTransition
 	}
-	status, err := s.engine.Status(ctx, run.EngineJobID)
+	engine, err := s.engineForTaskType(run.TaskType)
 	if err != nil {
 		return nil, err
 	}
+	status, err := engine.Status(ctx, run.EngineJobID)
+	if err != nil {
+		return nil, err
+	}
+	// A terminal engine status only means collection ended. Never close a
+	// streaming run while acknowledged callback batches are still being ingested.
+	if !IsActiveTaskType(run.TaskType) && (status.Status == EngineJobStatusSuccess || status.Status == EngineJobStatusPartialSuccess) {
+		callbacks, callbackErr := s.repo.ListDiscoveryCallbacksForRunForUpdate(ctx, run.ProjectID, run.ID)
+		if callbackErr != nil {
+			return nil, callbackErr
+		}
+		if len(callbacks) > 0 {
+			_, _, ready, callbackErr := callbackFinalState(callbacks)
+			if callbackErr != nil {
+				return nil, callbackErr
+			}
+			if !ready {
+				if timeoutMode {
+					return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusFailed, run.ResultCount, "engine completed but result ingestion did not finish before timeout", meta)
+				}
+				return run, nil
+			}
+		}
+	}
+	resultCount := status.ResultCount
+	activeResultLifecycle := false
+	if IsActiveTaskType(run.TaskType) && status.Status != EngineJobStatusRunning {
+		pulled, pullErr := s.pullActiveRunResults(ctx, run, engine)
+		if pullErr != nil {
+			return nil, pullErr
+		}
+		if status.Status == EngineJobStatusSuccess &&
+			(pulled.FinishedTargets != pulled.TotalTargets ||
+				pulled.TargetCount != pulled.TotalTargets) {
+			return nil, ErrEngineResultIncomplete
+		}
+		resultCount = pulled.FactCount
+		activeResultLifecycle = status.Status == EngineJobStatusSuccess ||
+			status.Status == EngineJobStatusPartialSuccess
+	}
 	switch status.Status {
 	case EngineJobStatusSuccess:
-		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusSuccess, status.ResultCount, status.ErrorSummary, meta)
+		return s.recordRunStatusWithLifecycle(
+			ctx, run.ProjectID, run.ID, actorID, TaskRunStatusSuccess,
+			resultCount, status.ErrorSummary, meta, activeResultLifecycle,
+		)
 	case EngineJobStatusPartialSuccess:
-		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusPartial, status.ResultCount, status.ErrorSummary, meta)
+		return s.recordRunStatusWithLifecycle(
+			ctx, run.ProjectID, run.ID, actorID, TaskRunStatusPartial,
+			resultCount, status.ErrorSummary, meta, activeResultLifecycle,
+		)
 	case EngineJobStatusFailed:
-		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusFailed, status.ResultCount, status.ErrorSummary, meta)
+		return s.recordRunStatus(
+			ctx, run.ProjectID, run.ID, actorID, TaskRunStatusFailed,
+			resultCount, status.ErrorSummary, meta,
+		)
 	case EngineJobStatusCancelled:
-		return s.recordRunStatus(ctx, run.ProjectID, run.ID, actorID, TaskRunStatusCancelled, status.ResultCount, status.ErrorSummary, meta)
+		return s.recordRunStatus(
+			ctx, run.ProjectID, run.ID, actorID, TaskRunStatusCancelled,
+			resultCount, status.ErrorSummary, meta,
+		)
 	case EngineJobStatusRunning:
 		if timeoutMode {
 			summary := "task run timed out"
-			if err := s.engine.Cancel(ctx, run.EngineJobID); err != nil {
+			if err := engine.Cancel(ctx, run.EngineJobID); err != nil {
 				// Local timeout closure is authoritative. Record the cancellation
 				// failure without exposing the upstream error or leaving the run live.
 				summary = "task run timed out; engine cancellation failed"
@@ -1030,12 +1588,88 @@ func (s *Service) reconcileRun(ctx context.Context, run *TaskRun, actorID string
 	}
 }
 
+// maxErrorSummaryLen matches task_run.error_summary VARCHAR(1024). The column
+// counts characters, so the bound is on runes.
+const maxErrorSummaryLen = 1024
+
+// truncateErrorSummary bounds a summary to the column width without splitting a
+// rune. The engine supplies this string and never bounds it, and in MySQL strict
+// mode an over-long value fails the UPDATE — which leaves the run stuck in
+// 'running' and makes the reconcile worker retry it on every tick, forever.
+func truncateErrorSummary(summary string) string {
+	runes := []rune(summary)
+	if len(runes) <= maxErrorSummaryLen {
+		return summary
+	}
+	return string(runes[:maxErrorSummaryLen])
+}
+
+// sanitizeEngineErrorSummary renders an engine failure for storage and display.
+//
+// A *url.Error stringifies as `Post "http://engine-internal:9090/scan": …`, and
+// error_summary is echoed to every caller holding discovery:read via the run
+// DTO. Unwrapping keeps the useful cause (`dial tcp: connection refused`) while
+// dropping the internal endpoint.
+func sanitizeEngineErrorSummary(err error, fallback string) string {
+	if err == nil {
+		return fallback
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return truncateErrorSummary("engine dispatch failed: " + urlErr.Err.Error())
+	}
+	return truncateErrorSummary(err.Error())
+}
+
 func (s *Service) recordRunStatus(ctx context.Context, projectID, runID uint64, actorID, status string, resultCount uint64, summary string, meta AuditMeta) (*TaskRun, error) {
+	return s.recordRunStatusWithLifecycle(
+		ctx,
+		projectID,
+		runID,
+		actorID,
+		status,
+		resultCount,
+		summary,
+		meta,
+		false,
+	)
+}
+
+func (s *Service) recordRunStatusWithLifecycle(
+	ctx context.Context,
+	projectID uint64,
+	runID uint64,
+	actorID string,
+	status string,
+	resultCount uint64,
+	summary string,
+	meta AuditMeta,
+	applyLifecycle bool,
+) (*TaskRun, error) {
+	summary = truncateErrorSummary(summary)
 	var after *TaskRun
 	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
 		before, err := repo.GetTaskRun(ctx, projectID, runID)
 		if err != nil {
 			return err
+		}
+		if before.Status == status {
+			after = before
+			return nil
+		}
+		if applyLifecycle && (status == TaskRunStatusSuccess || status == TaskRunStatusPartial) {
+			if err := repo.ApplyDiscoveryObservationLifecycle(
+				ctx,
+				projectID,
+				runID,
+				capabilityForTaskType(before.TaskType),
+				s.assetMissThreshold,
+				status == TaskRunStatusSuccess,
+				"engine",
+				s.nowFn(),
+			); err != nil {
+				return err
+			}
 		}
 		in := UpdateTaskRunStatusInput{
 			ProjectID:    projectID,
@@ -1218,7 +1852,7 @@ func changeTaskRunStatusWith(ctx context.Context, repo Repository, before *TaskR
 	case TaskRunStatusSuccess:
 		return repo.MarkRunSucceeded(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now)
 	case TaskRunStatusPartial:
-		return repo.MarkRunPartialSuccess(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ResultCount, now)
+		return repo.MarkRunPartialSuccess(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, in.ResultCount, now)
 	case TaskRunStatusFailed:
 		return repo.MarkRunFailed(ctx, in.ProjectID, in.RunID, in.ActorID, before.Status, in.ErrorSummary, in.ResultCount, now)
 	case TaskRunStatusCancelled:
@@ -1357,4 +1991,49 @@ func extractAuditEntity(before any, after any) (auditEntity, string, error) {
 	}
 
 	return entity, "", ErrInvalidTemplate
+}
+
+// Dispatch retry backoff bounds. The engine is a single owned service, so the goal
+// is only to stop a run from hammering it: a short base with exponential growth
+// and a hard ceiling.
+const (
+	dispatchRetryBaseDelay = 250 * time.Millisecond
+	dispatchRetryMaxDelay  = 10 * time.Second
+)
+
+// waitBeforeRetry sleeps before attempt N, returning false if the context ended
+// first so the caller stops retrying.
+func (s *Service) waitBeforeRetry(ctx context.Context, attempt int) bool {
+	delay := dispatchRetryBaseDelay << (attempt - 1)
+	if delay > dispatchRetryMaxDelay || delay <= 0 {
+		delay = dispatchRetryMaxDelay
+	}
+	if s.sleepFn != nil {
+		return s.sleepFn(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// dispatchErrorIsPermanent reports whether another identical attempt is futile:
+// the adapter refused the payload up front, or the engine answered 4xx. Transport
+// faults and 5xx stay retryable.
+func dispatchErrorIsPermanent(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrEngineJobRejected) {
+		return true
+	}
+	var statusErr *engineStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.permanent()
+	}
+	return false
 }

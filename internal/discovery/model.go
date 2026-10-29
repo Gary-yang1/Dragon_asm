@@ -18,6 +18,14 @@ const (
 	TaskTypeCloudSync    = "cloud_sync"
 	TaskTypePassiveIntel = "passive_intel"
 	TaskTypeImport       = "import"
+	// TaskTypeDirScan is directory brute force. It is the noisiest and legally
+	// least defensible probe the platform performs, so it lives behind the same
+	// active-scanning gate as the rest rather than beside the passive types.
+	TaskTypeDirScan = "dirscan"
+	// TaskTypeOrgIntel collects enterprise registry information for a company
+	// name: subsidiaries, ICP filings, and the root domains those filings cover.
+	// It only ever queries third-party datasets.
+	TaskTypeOrgIntel = "org_intel"
 )
 
 const (
@@ -31,14 +39,22 @@ const (
 
 const (
 	TargetTypeDomain = "domain"
-	TargetTypeIP     = "ip"
-	TargetTypeCIDR   = "cidr"
-	TargetTypeURL    = "url"
+	// TargetTypeCompany authorises enterprise-registry collection for a named
+	// legal entity. It is not a network address and is never probed.
+	TargetTypeCompany = "company"
+	TargetTypeIP      = "ip"
+	TargetTypeCIDR    = "cidr"
+	TargetTypeURL     = "url"
 )
 
 const (
 	MatchModeInclude = "include"
 	MatchModeExclude = "exclude"
+)
+
+const (
+	CoverageModeExact      = "exact"
+	CoverageModeSubdomains = "subdomains"
 )
 
 // Action names and resource type for scope/template/run audit events.
@@ -92,6 +108,7 @@ type Scope struct {
 	AuthorizedBy string
 	ValidFrom    time.Time
 	ValidUntil   time.Time
+	IsDefault    bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	CreatedBy    string
@@ -102,19 +119,21 @@ type Scope struct {
 
 // ScopeTarget is one include/exclude policy entry for one scope.
 type ScopeTarget struct {
-	ID         uint64
-	TenantID   string
-	OrgID      string
-	ProjectID  uint64
-	ScopeID    uint64
-	TargetType string
-	MatchMode  string
-	Value      string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	CreatedBy  string
-	UpdatedBy  string
-	DeletedAt  time.Time
+	URLRule      *URLAuthorizationRule
+	ID           uint64
+	TenantID     string
+	OrgID        string
+	ProjectID    uint64
+	ScopeID      uint64
+	TargetType   string
+	MatchMode    string
+	CoverageMode string
+	Value        string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	CreatedBy    string
+	UpdatedBy    string
+	DeletedAt    time.Time
 }
 
 // TaskTemplate defines how one discovery strategy should be executed.
@@ -162,6 +181,8 @@ type TaskRun struct {
 	LastCallbackAt    time.Time
 	ResultCount       uint64
 	CallbackSecretRef string
+	ApprovedBy        string
+	ApprovalReason    string
 	StartedAt         time.Time
 	FinishedAt        time.Time
 	ErrorSummary      string
@@ -188,9 +209,11 @@ const (
 
 // ScopeTargetInput is input for create/update operations.
 type ScopeTargetInput struct {
-	TargetType string
-	MatchMode  string
-	Value      string
+	URLRule      *URLAuthorizationRule
+	TargetType   string
+	MatchMode    string
+	CoverageMode string
+	Value        string
 }
 
 // TaskTemplateTargetInput intentionally reuses scope-style target literals for
@@ -207,6 +230,7 @@ type CreateScopeInput struct {
 	ValidFrom    time.Time
 	ValidUntil   time.Time
 	Status       string
+	IsDefault    bool
 	ActorID      string
 	Meta         AuditMeta
 	Targets      []ScopeTargetInput
@@ -223,6 +247,7 @@ type UpdateScopeInput struct {
 	ValidFrom    *time.Time
 	ValidUntil   *time.Time
 	Status       *string
+	IsDefault    *bool
 	ActorID      string
 	Meta         AuditMeta
 	Targets      *[]ScopeTargetInput
@@ -295,7 +320,11 @@ type CreateTaskRunInput struct {
 	TemplateID uint64
 	ProjectID  uint64
 	ActorID    string
-	Meta       AuditMeta
+	// ApprovedBy and ApprovalReason are required for active task types, where a
+	// second person has to sign off before packets reach someone else's network.
+	ApprovedBy     string
+	ApprovalReason string
+	Meta           AuditMeta
 }
 
 // UpdateTaskRunStatusInput updates status and terminal fields for one run.
@@ -394,6 +423,15 @@ type DiscoveryCallback struct {
 	ProcessedAt   time.Time
 }
 
+// CallbackRef identifies one inbox row. The recovery scan works in these because
+// the queue payload carries nothing else, so there is no reason to read the
+// (up to 4 MiB) stored payload just to re-enqueue it.
+type CallbackRef struct {
+	ProjectID uint64
+	RunID     uint64
+	Seq       uint64
+}
+
 // HandleCallbackInput is the verified callback processing input.
 type HandleCallbackInput struct {
 	ProjectID uint64
@@ -413,7 +451,17 @@ type HandleCallbackResult struct {
 
 // AuditMeta carries request-scope metadata for audit payloads.
 type AuditMeta struct {
-	IP        string
-	UserAgent string
-	RequestID string
+	Reason               string
+	SourceRunID          uint64
+	SourceObservationIDs []uint64
+	IP                   string
+	UserAgent            string
+	RequestID            string
 }
+
+// MaxTaskRunWindow bounds how many of a project's most recent task runs the API
+// exposes. The run history is append-only and unbounded, while the endpoint sorts
+// and paginates in memory, so the query has to stop somewhere. Callers needing
+// older runs should filter by time once that is supported — see the note on
+// ListTaskRunsByProject.
+const MaxTaskRunWindow int32 = 500

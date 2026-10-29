@@ -1,89 +1,162 @@
+import { Alert, Empty, Tag, Typography } from 'antd';
+import { Link } from 'react-router-dom';
+import { assetLocation } from '../../utils/assetRoutes';
 import { useEffect, useMemo, useRef } from 'react';
 
-import type { Asset, AssetRelation } from '../../api/assets';
+import type { AssetGraphData, AssetGraphNode } from '../../api/assets';
+import { useThemeStore } from '../../stores/themeStore';
+import { describe, assetTypeMeta } from '../../utils/taxonomy';
 
 type AssetGraphProps = {
-  asset: Asset | null;
-  relations: AssetRelation[];
+  graph: AssetGraphData | null;
+  projectId?: number;
 };
 
-export function AssetGraph({ asset, relations }: AssetGraphProps) {
+const relationLabels: Record<string, string> = {
+  contains: '包含',
+  resolves_to: '解析到',
+  redirects_to: '重定向到',
+  cert_binding: '证书绑定',
+  references: '关联'
+};
+
+const nodeColors: Record<string, string> = {
+  domain: '#dbeafe',
+  subdomain: '#e0e7ff',
+  ip: '#cffafe',
+  port: '#fef3c7',
+  service: '#ffedd5',
+  web: '#dcfce7',
+  certificate: '#f3e8ff',
+  cloud_resource: '#fce7f3',
+  third_party: '#e5e7eb'
+};
+
+function nodeLabel(node: AssetGraphNode) {
+  return node.display_name || node.value || `资产 #${node.id}`;
+}
+
+function relationLabel(relationType: string) {
+  return relationLabels[relationType] ?? relationType;
+}
+
+export function AssetGraph({ graph, projectId }: AssetGraphProps) {
+  const themeMode = useThemeStore((state) => state.mode);
+  const labelColor = themeMode === 'dark' ? '#e2e8f0' : '#334155';
   const ref = useRef<HTMLDivElement | null>(null);
-  const data = useMemo(() => buildGraphData(asset, relations), [asset, relations]);
+  const data = useMemo(() => buildGraphData(graph), [graph]);
+  const nodeByID = useMemo(
+    () => new Map((graph?.nodes ?? []).map((node) => [node.id, node])),
+    [graph?.nodes]
+  );
 
   useEffect(() => {
-    if (!ref.current || !asset) return undefined;
+    if (!ref.current || !graph?.nodes.length) return undefined;
     let destroyed = false;
     let cleanup: (() => void) | undefined;
 
     void import('@antv/g6').then(({ Graph }) => {
       if (destroyed || !ref.current) return;
-      const graph = new Graph({
+      const graphInstance = new Graph({
         container: ref.current,
-        width: ref.current.clientWidth || 520,
-        height: 260,
+        width: ref.current.clientWidth || 680,
+        height: 320,
         data,
         autoFit: 'view',
-        layout: { type: 'force', preventOverlap: true },
+        layout: {
+          type: 'dagre',
+          rankdir: 'LR',
+          nodesep: 28,
+          ranksep: 64
+        },
+        behaviors: ['drag-canvas', 'zoom-canvas', 'drag-element'],
         node: {
           style: {
-            labelText: (d) => String(d.data?.label ?? d.id),
+            labelText: (datum) => String(datum.data?.label ?? datum.id),
             labelPlacement: 'bottom',
-            size: (d) => (d.id === String(asset.id) ? 34 : 24),
-            fill: (d) => (d.id === String(asset.id) ? '#176b87' : '#d7e8ef')
+            labelFill: labelColor,
+            labelMaxWidth: 150,
+            size: (datum) => (datum.data?.focus ? 38 : 28),
+            fill: (datum) => String(datum.data?.fill ?? '#e5e7eb'),
+            stroke: (datum) => (datum.data?.focus ? '#176b87' : '#94a3b8'),
+            lineWidth: (datum) => (datum.data?.focus ? 3 : 1),
+            opacity: (datum) => (datum.data?.status === 'inactive' ? 0.48 : 1)
           }
         },
         edge: {
           style: {
-            labelText: (d) => String(d.data?.label ?? ''),
-            stroke: '#9ca3af',
+            labelText: (datum) => String(datum.data?.label ?? ''),
+            labelFill: labelColor,
+            stroke: '#94a3b8',
             endArrow: true
           }
         }
       });
-      void graph.render();
-      cleanup = () => graph.destroy();
+      void graphInstance.render();
+      cleanup = () => graphInstance.destroy();
     });
 
     return () => {
       destroyed = true;
       cleanup?.();
     };
-  }, [asset, data]);
+  }, [data, graph?.nodes.length, labelColor]);
 
-  if (!asset) return <div className="asset-graph-empty">选择资产</div>;
+  if (!graph?.nodes.length) {
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未发现关联资产" />;
+  }
 
   return (
-    <div>
+    <div className="asset-graph-shell">
+      <div className="asset-graph-legend" aria-label="资产类型图例">
+        {Array.from(new Set(graph.nodes.map((node) => node.asset_type))).map((type) => (
+          <Tag key={type} style={{ color: '#334155', background: nodeColors[type] }}>
+            {describe(assetTypeMeta, type).label}
+          </Tag>
+        ))}
+        <Typography.Text type="secondary">箭头表示关系方向，淡色节点表示不活跃</Typography.Text>
+      </div>
+      {graph.truncated ? (
+        <Alert type="warning" showIcon message="关系较多，当前仅展示前 100 条" />
+      ) : null}
       <div className="asset-graph" ref={ref} data-testid="asset-graph" />
       <ul className="asset-graph-list" aria-label="关系列表">
-        {relations.map((rel) => (
-          <li key={rel.id}>
-            {rel.from_asset_id} → {rel.to_asset_id} · {rel.relation_type}
-          </li>
-        ))}
+        {graph.edges.map((edge) => {
+          const from = nodeByID.get(edge.from_asset_id);
+          const to = nodeByID.get(edge.to_asset_id);
+          return (
+            <li key={edge.id}>
+              <strong>{from && projectId ? <Link to={assetLocation(projectId, from.id, from.asset_type)}>{nodeLabel(from)}</Link> : from ? nodeLabel(from) : `资产 #${edge.from_asset_id}`}</strong>
+              {' → '}
+              <strong>{to && projectId ? <Link to={assetLocation(projectId, to.id, to.asset_type)}>{nodeLabel(to)}</Link> : to ? nodeLabel(to) : `资产 #${edge.to_asset_id}`}</strong>
+              {' · '}
+              {relationLabel(edge.relation_type)}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
 }
 
-function buildGraphData(asset: Asset | null, relations: AssetRelation[]) {
-  if (!asset) return { nodes: [], edges: [] };
-  const ids = new Set<string>([String(asset.id)]);
-  for (const rel of relations) {
-    ids.add(String(rel.from_asset_id));
-    ids.add(String(rel.to_asset_id));
-  }
+function buildGraphData(graph: AssetGraphData | null) {
+  if (!graph) return { nodes: [], edges: [] };
   return {
-    nodes: [...ids].map((id) => ({
-      id,
-      data: { label: id === String(asset.id) ? asset.display_name || asset.value : `Asset ${id}` }
+    nodes: graph.nodes.map((node) => ({
+      id: String(node.id),
+      data: {
+        label: nodeLabel(node),
+        assetType: node.asset_type,
+        status: node.status,
+        focus: node.focus,
+        fill: nodeColors[node.asset_type] ?? '#e5e7eb'
+      }
     })),
-    edges: relations.map((rel) => ({
-      id: String(rel.id),
-      source: String(rel.from_asset_id),
-      target: String(rel.to_asset_id),
-      data: { label: rel.relation_type }
+    edges: graph.edges.map((edge) => ({
+      id: String(edge.id),
+      source: String(edge.from_asset_id),
+      target: String(edge.to_asset_id),
+      data: { label: relationLabel(edge.relation_type) }
     }))
   };
 }

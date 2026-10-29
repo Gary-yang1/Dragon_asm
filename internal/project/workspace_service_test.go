@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"testing"
 	"time"
@@ -34,6 +35,8 @@ type workspaceRepoFake struct {
 	tenantListItems []*Project
 	listTenant      string
 	listActor       string
+	activeTaskRuns  map[uint64]int64
+	deleteRuns      int
 }
 
 func (f *workspaceRepoFake) GetByID(_ context.Context, id uint64) (*Project, error) {
@@ -129,6 +132,20 @@ func (f *workspaceRepoFake) TransitionStatus(_ context.Context, projectID uint64
 	return true, nil
 }
 
+func (f *workspaceRepoFake) CountActiveTaskRuns(_ context.Context, projectID uint64) (int64, error) {
+	return f.activeTaskRuns[projectID], nil
+}
+
+func (f *workspaceRepoFake) SoftDeleteProject(_ context.Context, projectID uint64, _ string) (bool, error) {
+	p, ok := f.projects[projectID]
+	if !ok || p.Status != StatusArchived {
+		return false, nil
+	}
+	delete(f.projects, projectID)
+	f.deleteRuns++
+	return true, nil
+}
+
 func (f *workspaceRepoFake) OnboardingCounts(context.Context, uint64) (OnboardingCounts, error) {
 	return f.onboarding, nil
 }
@@ -151,38 +168,43 @@ func newWorkspaceServiceTest(t *testing.T) (*Service, *workspaceRepoFake, *audit
 	enforcer, err := asmcasbin.NewEnforcer(nil)
 	require.NoError(t, err)
 	repo := &workspaceRepoFake{
-		projects:      make(map[uint64]*Project),
-		actorScopes:   make(map[string]ActorScope),
-		globalRoles:   make(map[uint64]string),
-		nextProjectID: 40,
-		members:       make(map[uint64]map[string]string),
+		projects:       make(map[uint64]*Project),
+		actorScopes:    make(map[string]ActorScope),
+		globalRoles:    make(map[uint64]string),
+		nextProjectID:  40,
+		members:        make(map[uint64]map[string]string),
+		activeTaskRuns: make(map[uint64]int64),
 	}
 	auditSink := &auditRecorderFake{}
 	return NewService(repo, enforcer, WithAuditSink(auditSink), WithGlobalRoleResolver(repo)), repo, auditSink
 }
 
-func TestNormalizeRootDomainUsesPublicSuffixRules(t *testing.T) {
+func TestNormalizeManagedDomainUsesPublicSuffixRules(t *testing.T) {
 	tests := []struct {
-		input string
-		want  string
-		ok    bool
+		input     string
+		want      string
+		assetType string
+		ok        bool
 	}{
-		{input: " Example.COM. ", want: "example.com", ok: true},
-		{input: "example.com.cn", want: "example.com.cn", ok: true},
-		{input: "食狮.com.cn", want: "xn--85x722f.com.cn", ok: true},
-		{input: "api.example.com", ok: false},
+		{input: " Example.COM. ", want: "example.com", assetType: "domain", ok: true},
+		{input: "example.com.cn", want: "example.com.cn", assetType: "domain", ok: true},
+		{input: "食狮.com.cn", want: "xn--85x722f.com.cn", assetType: "domain", ok: true},
+		{input: "api.example.com", want: "api.example.com", assetType: "subdomain", ok: true},
+		{input: "cn.bk.example.jp", want: "cn.bk.example.jp", assetType: "subdomain", ok: true},
 		{input: "https://example.com", ok: false},
 		{input: "localhost", ok: false},
+		{input: "127.0.0.1", ok: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got, err := normalizeRootDomain(tt.input)
+			got, assetType, err := normalizeManagedDomain(tt.input)
 			if !tt.ok {
 				require.ErrorIs(t, err, ErrInvalidRootDomain)
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.assetType, assetType)
 		})
 	}
 }
@@ -292,6 +314,7 @@ func TestCapabilitiesViewerIsReadOnlyAndCannotActivate(t *testing.T) {
 	got, err := svc.Capabilities(context.Background(), "7", 1)
 	require.NoError(t, err)
 	assert.Equal(t, asmcasbin.RoleViewer, got.Role)
+	assert.Equal(t, StatusDraft, got.ProjectStatus)
 	assert.Contains(t, got.Permissions, asmcasbin.PermProjectRead)
 	assert.Contains(t, got.Permissions, asmcasbin.PermAssetRead)
 	assert.NotContains(t, got.Permissions, asmcasbin.PermProjectWrite)
@@ -310,6 +333,7 @@ func TestCapabilitiesOwnerCanActivateReadyDraft(t *testing.T) {
 	got, err := svc.Capabilities(context.Background(), "7", 1)
 	require.NoError(t, err)
 	assert.Equal(t, asmcasbin.RoleProjectOwner, got.Role)
+	assert.Equal(t, StatusDraft, got.ProjectStatus)
 	assert.Contains(t, got.Permissions, asmcasbin.PermProjectWrite)
 	assert.True(t, got.CanActivate)
 }
@@ -323,6 +347,7 @@ func TestCapabilitiesOwnerCanReactivateReadySuspendedProject(t *testing.T) {
 
 	got, err := svc.Capabilities(context.Background(), "7", 1)
 	require.NoError(t, err)
+	assert.Equal(t, StatusSuspended, got.ProjectStatus)
 	assert.True(t, got.CanActivate)
 }
 
@@ -449,4 +474,106 @@ func TestTransitionProjectEnforcesReadinessAndAuditsSuccess(t *testing.T) {
 	assert.Equal(t, 1, repo.transitionRuns)
 	require.Len(t, auditSink.events, 1)
 	assert.Equal(t, ActionProjectTransition, auditSink.events[0].Action)
+}
+
+func TestDeleteProjectSoftDeletesArchivedProjectAndAudits(t *testing.T) {
+	svc, repo, auditSink := newWorkspaceServiceTest(t)
+	repo.projects[1] = &Project{
+		ID: 1, TenantID: "tenant-a", OrgID: "org-a", ProjectCode: "alpha",
+		Name: "Alpha Project", Status: StatusArchived,
+	}
+
+	err := svc.DeleteProject(context.Background(), DeleteProjectInput{
+		ProjectID: 1, Confirmation: " Alpha Project ", Reason: " duplicate project ",
+		ActorID: "7", Meta: AuditMeta{RequestID: "req-delete"},
+	})
+
+	require.NoError(t, err)
+	assert.NotContains(t, repo.projects, uint64(1))
+	assert.Equal(t, 1, repo.deleteRuns)
+	require.Len(t, auditSink.events, 1)
+	event := auditSink.events[0]
+	assert.Equal(t, ActionProjectDelete, event.Action)
+	assert.Equal(t, "req-delete", event.RequestID)
+	assert.Equal(t, map[string]any{"reason": "duplicate project"}, event.Metadata)
+}
+
+func TestDeleteProjectRejectsUnsafePreconditions(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       string
+		confirmation string
+		activeRuns   int64
+		wantErr      error
+	}{
+		{name: "not archived", status: StatusActive, confirmation: "Alpha Project", wantErr: ErrDeleteRequiresArchive},
+		{name: "confirmation mismatch", status: StatusArchived, confirmation: "alpha project", wantErr: ErrDeleteConfirmation},
+		{name: "active jobs", status: StatusArchived, confirmation: "Alpha Project", activeRuns: 1, wantErr: ErrProjectHasActiveJobs},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, repo, auditSink := newWorkspaceServiceTest(t)
+			repo.projects[1] = &Project{
+				ID: 1, TenantID: "tenant-a", OrgID: "org-a",
+				Name: "Alpha Project", Status: tt.status,
+			}
+			repo.activeTaskRuns[1] = tt.activeRuns
+
+			err := svc.DeleteProject(context.Background(), DeleteProjectInput{
+				ProjectID: 1, Confirmation: tt.confirmation, Reason: "cleanup", ActorID: "7",
+			})
+
+			require.ErrorIs(t, err, tt.wantErr)
+			assert.Contains(t, repo.projects, uint64(1))
+			assert.Zero(t, repo.deleteRuns)
+			assert.Empty(t, auditSink.events)
+		})
+	}
+}
+
+func TestDeleteProjectRollsBackWhenAuditWriteFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	now := time.Now()
+	projectColumns := []string{
+		"id", "tenant_id", "org_id", "project_code", "name", "owner", "business_unit",
+		"criticality", "status", "description", "created_at", "updated_at", "created_by",
+		"updated_by", "deleted_at",
+	}
+	mock.ExpectQuery("FROM project\\s+WHERE id = \\?").
+		WithArgs(uint64(1)).
+		WillReturnRows(sqlmock.NewRows(projectColumns).AddRow(
+			uint64(1), "tenant-a", "org-a", "alpha", "Alpha Project", "7", "", "medium",
+			StatusArchived, nil, now, now, "7", "7", time.Time{},
+		))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM task_run").
+		WithArgs(uint64(1)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(0)))
+	mock.ExpectExec("UPDATE project").
+		WithArgs("7", uint64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	auditErr := errors.New("audit unavailable")
+	auditArgs := make([]driver.Value, 17)
+	for i := range auditArgs {
+		auditArgs[i] = sqlmock.AnyArg()
+	}
+	mock.ExpectExec("INSERT INTO audit_log").
+		WithArgs(auditArgs...).
+		WillReturnError(auditErr)
+	mock.ExpectRollback()
+
+	repo := NewRepository(dbgen.New(db))
+	enforcer, err := asmcasbin.NewEnforcer(nil)
+	require.NoError(t, err)
+	svc := NewService(repo, enforcer, WithDB(db))
+
+	err = svc.DeleteProject(context.Background(), DeleteProjectInput{
+		ProjectID: 1, Confirmation: "Alpha Project", Reason: "cleanup", ActorID: "7",
+	})
+
+	require.ErrorIs(t, err, auditErr)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

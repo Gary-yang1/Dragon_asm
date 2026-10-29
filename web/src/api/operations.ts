@@ -1,19 +1,30 @@
 import { getJSON, postJSON, putJSON } from './http';
 import type { PageData } from './assets';
 
+// Mirrors the Go response DTO in internal/ticket/handler.go. Fields the backend
+// does not return are optional so a missing one renders empty rather than
+// throwing; note the backend sends due_at, not sla_due_at.
 export type Ticket = {
   id: number;
+  project_id?: number;
   title: string;
-  status: 'open' | 'assigned' | 'in_progress' | 'pending_retest' | 'closed' | 'rejected' | 'cancelled';
+  status: 'open' | 'assigned' | 'in_progress' | 'pending_retest' | 'resolved' | 'closed' | 'rejected' | 'cancelled' | 'extended';
   assignee: string;
-  risk_count: number;
-  sla_due_at?: string;
-  available_actions: string[];
+  business_unit?: string;
+  priority?: 'urgent' | 'high' | 'medium' | 'low';
+  due_at?: string;
+  risk_count?: number;
+  available_actions?: string[];
+  created_at?: string;
 };
 
 export type TicketDetail = Ticket & {
-  risks: Array<{ id: number; title: string; severity: string }>;
-  comments: Array<{ id: number; actor: string; content: string; created_at: string }>;
+  description?: string;
+  resolution?: string;
+  retest_result?: string;
+  external_ticket_id?: string;
+  closed_at?: string;
+  updated_at?: string;
 };
 
 type DashboardLegacySummary = {
@@ -120,8 +131,8 @@ export type NotificationRule = {
 export type SlaPolicyInput = Pick<SlaPolicy, 'severity' | 'business_unit' | 'response_hours' | 'resolution_hours'>;
 export type NotificationRuleInput = Omit<NotificationRule, 'id'>;
 
-export function listTickets(projectId: number) {
-  return getJSON<PageData<Ticket>>(`/projects/${projectId}/tickets`, { page_size: 20, page_number: 1 });
+export function listTickets(projectId: number, pageSize = 20, pageNumber = 1) {
+  return getJSON<PageData<Ticket>>(`/projects/${projectId}/tickets`, { page_size: pageSize, page_number: pageNumber });
 }
 
 export function getTicket(projectId: number, ticketId: number) {
@@ -155,8 +166,8 @@ export function createExport(projectId: number, reportType: string) {
   return postJSON<ExportTask>(`/projects/${projectId}/reports/exports`, { report_type: reportType });
 }
 
-export function listExports(projectId: number) {
-  return getJSON<PageData<ExportTask>>(`/projects/${projectId}/reports/exports`, { page_size: 20, page_number: 1 });
+export function listExports(projectId: number, pageSize = 20, pageNumber = 1) {
+  return getJSON<PageData<ExportTask>>(`/projects/${projectId}/reports/exports`, { page_size: pageSize, page_number: pageNumber });
 }
 
 export function listSlaPolicies(projectId: number) {

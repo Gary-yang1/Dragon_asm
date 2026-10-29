@@ -17,18 +17,21 @@ const (
 )
 
 type Record struct {
-	JobID           string                  `json:"job_id"`
-	IdempotencyKey  string                  `json:"idempotency_key"`
-	RequestHash     string                  `json:"request_hash"`
-	Request         contract.ScanRequest    `json:"request"`
-	Status          string                  `json:"status"`
-	Progress        int                     `json:"progress"`
-	ResultCount     uint64                  `json:"result_count"`
-	ErrorSummary    string                  `json:"error_summary"`
-	LastCallbackSeq uint64                  `json:"last_callback_seq,omitempty"`
-	PendingCallback *contract.CallbackBatch `json:"pending_callback,omitempty"`
-	CreatedAt       time.Time               `json:"created_at"`
-	UpdatedAt       time.Time               `json:"updated_at"`
+	CallbackResultCount uint64                  `json:"callback_result_count,omitempty"`
+	LastCallbackStatus  string                  `json:"last_callback_status,omitempty"`
+	LastCallbackSummary string                  `json:"last_callback_summary,omitempty"`
+	JobID               string                  `json:"job_id"`
+	IdempotencyKey      string                  `json:"idempotency_key"`
+	RequestHash         string                  `json:"request_hash"`
+	Request             contract.ScanRequest    `json:"request"`
+	Status              string                  `json:"status"`
+	Progress            int                     `json:"progress"`
+	ResultCount         uint64                  `json:"result_count"`
+	ErrorSummary        string                  `json:"error_summary"`
+	LastCallbackSeq     uint64                  `json:"last_callback_seq,omitempty"`
+	PendingCallback     *contract.CallbackBatch `json:"pending_callback,omitempty"`
+	CreatedAt           time.Time               `json:"created_at"`
+	UpdatedAt           time.Time               `json:"updated_at"`
 }
 
 type ExecutionResult struct {

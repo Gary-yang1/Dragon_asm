@@ -8,7 +8,6 @@ package dbgen
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"time"
 )
 
@@ -17,9 +16,14 @@ SELECT id, tenant_id, org_id, project_id, report_type, status, format, fields_js
 WHERE status = 'pending' AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 LIMIT 1
-FOR UPDATE
+FOR UPDATE SKIP LOCKED
 `
 
+// Claims the oldest pending export. SKIP LOCKED lets a second worker take the
+// next row instead of blocking on the one already being claimed. The caller must
+// run this inside a transaction together with the status update: on the pool
+// (autocommit) the FOR UPDATE lock is released at statement end, so two workers
+// would claim the same job and the loser would fail later at MarkExportRunning.
 func (q *Queries) ClaimPendingReportExport(ctx context.Context) (ReportExport, error) {
 	row := q.db.QueryRowContext(ctx, claimPendingReportExport)
 	var i ReportExport
@@ -75,8 +79,8 @@ type CreateReportExportParams struct {
 	ProjectID   uint64             `db:"project_id" json:"project_id"`
 	ReportType  string             `db:"report_type" json:"report_type"`
 	Format      ReportExportFormat `db:"format" json:"format"`
-	FieldsJson  json.RawMessage    `db:"fields_json" json:"fields_json"`
-	FiltersJson json.RawMessage    `db:"filters_json" json:"filters_json"`
+	FieldsJson  []byte             `db:"fields_json" json:"fields_json"`
+	FiltersJson []byte             `db:"filters_json" json:"filters_json"`
 	Redacted    bool               `db:"redacted" json:"redacted"`
 	RequestedBy string             `db:"requested_by" json:"requested_by"`
 }

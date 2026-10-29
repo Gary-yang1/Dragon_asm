@@ -8,6 +8,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"baiyan/internal/contract"
@@ -22,9 +23,11 @@ type PassiveProvider interface {
 }
 
 type DNSResult struct {
-	Host   string   `json:"host"`
-	IPs    []string `json:"ips"`
-	CNAMEs []string `json:"cnames"`
+	Host      string   `json:"host"`
+	Status    string   `json:"status,omitempty"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	IPs       []string `json:"ips"`
+	CNAMEs    []string `json:"cnames"`
 }
 
 type Resolver interface {
@@ -41,218 +44,460 @@ type PassiveExecutor struct {
 	sender    BatchSender
 	now       func() time.Time
 	newGate   func(int) (operationGate, error)
+	// randomLabel names wildcard probes; replaceable so tests are deterministic.
+	randomLabel func() string
 }
 
 func NewPassiveExecutor(providers []PassiveProvider, resolver Resolver, sender BatchSender) *PassiveExecutor {
 	return &PassiveExecutor{
 		providers: providers, resolver: resolver, sender: sender,
 		now: func() time.Time { return time.Now().UTC() }, newGate: newOperationGate,
+		randomLabel: randomDNSLabel,
 	}
+}
+
+// StreamingPassiveProvider may publish discoveries before its source finishes.
+type StreamingPassiveProvider interface {
+	DiscoverStream(context.Context, string, func([]string) error) error
+}
+
+type streamResumer interface {
+	ResumeStream(context.Context, contract.ScanRequest) (uint64, uint64, *job.ExecutionResult, error)
 }
 
 func (e *PassiveExecutor) Execute(ctx context.Context, request contract.ScanRequest) (job.ExecutionResult, error) {
 	if e.sender == nil {
 		return job.ExecutionResult{}, errors.New("baiyan passive: callback sender is required")
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	gate, err := e.newGate(request.RateLimit)
 	if err != nil {
 		return job.ExecutionResult{}, err
 	}
-	if err := e.send(ctx, request, contract.CallbackBatch{
-		SchemaVersion: contract.SchemaVersion, RunID: request.RunID, Seq: 1,
-		Phase: "started", Status: "running", ObservedAt: e.now(),
-		Assets: []contract.AssetFact{}, Relations: []contract.RelationFact{}, Exposures: []contract.ExposureFact{}, ProviderErrors: []contract.ProviderError{}, ErrorSummary: "",
-	}); err != nil {
-		return job.ExecutionResult{}, err
+	seq, total := uint64(1), uint64(0)
+	if sender, ok := e.sender.(streamResumer); ok {
+		var done *job.ExecutionResult
+		seq, total, done, err = sender.ResumeStream(ctx, request)
+		if err != nil {
+			return job.ExecutionResult{}, err
+		}
+		if done != nil {
+			return *done, nil
+		}
 	}
-
-	assets := make([]contract.AssetFact, 0)
-	relations := make([]contract.RelationFact, 0)
-	providerErrors := make([]contract.ProviderError, 0)
-	hosts := make(map[string]struct{})
-	hostTypes := make(map[string]string)
-	rootRefs := make(map[string]string)
+	result := func(err error) (job.ExecutionResult, error) { return job.ExecutionResult{ResultCount: total}, err }
+	var sendWith func(string, string, []contract.AssetFact, []contract.RelationFact, []contract.ExposureFact, *contract.StageProgress, []contract.ProviderError, string) error
+	send := func(phase, status string, assets []contract.AssetFact, relations []contract.RelationFact, progress *contract.StageProgress, errs []contract.ProviderError, summary string) error {
+		return sendWith(phase, status, assets, relations, nil, progress, errs, summary)
+	}
+	sendWith = func(phase, status string, assets []contract.AssetFact, relations []contract.RelationFact, exposures []contract.ExposureFact, progress *contract.StageProgress, errs []contract.ProviderError, summary string) error {
+		if exposures == nil {
+			exposures = []contract.ExposureFact{}
+		}
+		if assets == nil {
+			assets = []contract.AssetFact{}
+		}
+		if relations == nil {
+			relations = []contract.RelationFact{}
+		}
+		if errs == nil {
+			errs = []contract.ProviderError{}
+		}
+		batch := contract.CallbackBatch{SchemaVersion: contract.SchemaVersion, RunID: request.RunID, Seq: seq, Phase: phase, Status: status, ObservedAt: e.now(), Assets: assets, Relations: relations, Exposures: exposures, ProviderErrors: errs, ErrorSummary: summary, StageProgress: progress}
+		if progress != nil {
+			snapshot := *progress
+			batch.StageProgress = &snapshot
+		}
+		batch.ResultCount = uint64(batch.FactCount())
+		if err := e.send(ctx, request, batch); err != nil {
+			return err
+		}
+		seq++
+		total += batch.ResultCount
+		return nil
+	}
+	if err := send("started", "running", nil, nil, nil, nil, ""); err != nil {
+		return result(err)
+	}
+	hosts := map[string]string{}
+	roots := map[string]string{}
 	maxResults := requestMaxResults(request.Options)
-	requestedSources := requestedProviderSources(request.Options)
-	requestedRecords := requestedDNSRecordTypes(request.JobType, request.Options)
-	if request.JobType == "passive_intel" && len(e.providers) == 0 {
-		providerErrors = append(providerErrors, contract.ProviderError{
-			Provider: "engine", Code: "NO_PROVIDER_CONFIGURED", Message: "no passive provider is configured", Retryable: false,
-		})
-	} else if request.JobType == "passive_intel" {
-		configured := make(map[string]bool, len(e.providers))
+	requested := requestedProviderSources(request.Options)
+	records := requestedDNSRecordTypes(request.JobType, request.Options)
+	if requested["auto"] {
+		requested = map[string]bool{}
 		for _, provider := range e.providers {
-			configured[strings.ToLower(strings.TrimSpace(provider.Name()))] = true
+			requested[provider.Name()] = true
 		}
-		missingSources := make([]string, 0)
-		for source := range requestedSources {
+	}
+	providerErrors := []contract.ProviderError{}
+	configured := map[string]bool{}
+	for _, p := range e.providers {
+		configured[p.Name()] = true
+	}
+	if request.JobType == "passive_intel" {
+		if len(e.providers) == 0 && len(requested) == 0 {
+			requested["engine"] = true
+		}
+		for source := range requested {
 			if !configured[source] {
-				missingSources = append(missingSources, source)
+				pe := contract.ProviderError{Provider: source, Code: "PROVIDER_NOT_CONFIGURED", Message: "requested provider is not configured", Retryable: false}
+				providerErrors = append(providerErrors, pe)
+				if err := send("progress", "running", nil, nil, &contract.StageProgress{Stage: "collect", Provider: source, Status: "skipped", Message: pe.Message}, []contract.ProviderError{pe}, ""); err != nil {
+					return result(err)
+				}
 			}
-		}
-		sort.Strings(missingSources)
-		for _, source := range missingSources {
-			providerErrors = append(providerErrors, contract.ProviderError{
-				Provider: source, Code: "PROVIDER_NOT_CONFIGURED", Message: "requested provider is not configured", Retryable: false,
-			})
 		}
 	}
 	for _, target := range request.Targets {
 		root := normalizeDomain(target.Value)
-		rootRef := stableRef("root", root)
-		rootRefs[root] = rootRef
-		assetType := "domain"
-		if target.Type == "subdomain" {
-			assetType = "subdomain"
-		}
-		assets = append(assets, assetFact(rootRef, assetType+":"+root, assetType, root, "scope", e.now()))
-		if request.JobType == "dns" {
-			hosts[root] = struct{}{}
-			hostTypes[root] = assetType
+		if root == "" {
 			continue
 		}
+		rootRef := stableRef("root", root)
+		roots[root] = rootRef
+		kind := "domain"
+		if target.Type == "subdomain" {
+			kind = "subdomain"
+		}
+		if err := send("progress", "running", []contract.AssetFact{assetFact(rootRef, kind+":"+root, kind, root, "scope", e.now())}, nil, nil, nil, ""); err != nil {
+			return result(err)
+		}
+		if request.JobType == "dns" {
+			hosts[root] = kind
+			continue
+		}
+		type event struct {
+			provider string
+			found    []string
+			sites    []SiteSnapshot
+			err      error
+			done     bool
+			started  bool
+		}
+		events := make(chan event, 16)
+		var wg sync.WaitGroup
+		workers := min(4, request.Concurrency)
+		if workers < 1 {
+			workers = 1
+		}
+		slots := make(chan struct{}, workers)
+		publish := func(ev event) error {
+			select {
+			case events <- ev:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		for _, provider := range e.providers {
-			if len(requestedSources) > 0 && !requestedSources[provider.Name()] {
+			if len(requested) > 0 && !requested[provider.Name()] {
 				continue
 			}
-			if err := gate.Wait(ctx); err != nil {
-				return job.ExecutionResult{}, err
-			}
-			providerCtx, cancel := context.WithTimeout(ctx, providerTimeout(request.TimeoutSeconds))
-			found, err := provider.Discover(providerCtx, root)
-			cancel()
-			if err != nil {
-				providerErrors = append(providerErrors, contract.ProviderError{
-					Provider: provider.Name(), Code: "PROVIDER_UNAVAILABLE", Message: "provider request failed", Retryable: true,
-				})
-				continue
-			}
-			if len(found) > 1000 {
-				found = found[:1000]
-			}
-			seen := make(map[string]struct{})
-			for _, candidate := range found {
-				if len(hosts) >= maxResults {
-					break
+			provider := provider
+			if scoped, ok := provider.(interface{ WithRateLimit(int) PassiveProvider }); ok {
+				rate := request.RateLimit / workers
+				if rate < 1 {
+					rate = 1
 				}
-				host := normalizeDomain(candidate)
-				if host == "" || host == root || !withinRoot(host, root) {
+				provider = scoped.WithRateLimit(rate)
+			}
+			if scoped, ok := provider.(interface {
+				WithGate(operationGate) PassiveProvider
+			}); ok {
+				provider = scoped.WithGate(gate)
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				select {
+				case slots <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-slots }()
+				if err := publish(event{provider: provider.Name(), started: true}); err != nil {
+					return
+				}
+				err := gate.Wait(ctx)
+				if err == nil {
+					duration := providerTimeout(request.TimeoutSeconds)
+					if provider.Name() == "subfinder" {
+						duration = 5 * time.Minute
+					}
+					child, stop := context.WithTimeout(ctx, duration)
+					if stream, ok := provider.(StreamingPassiveProvider); ok {
+						err = stream.DiscoverStream(child, root, func(items []string) error { return publish(event{provider: provider.Name(), found: items}) })
+					} else {
+						var found []string
+						var sites []SiteSnapshot
+						if crawler, ok := provider.(SiteSnapshotProvider); ok {
+							found, sites, err = crawler.DiscoverSites(child, root)
+						} else {
+							found, err = provider.Discover(child, root)
+						}
+						if len(found) > 0 || len(sites) > 0 {
+							if sendErr := publish(event{provider: provider.Name(), found: found, sites: sites}); sendErr != nil {
+								err = sendErr
+							}
+						}
+					}
+					stop()
+				}
+				_ = publish(event{provider: provider.Name(), err: err, done: true})
+			}()
+		}
+		go func() { wg.Wait(); close(events) }()
+		seen := map[string]map[string]bool{}
+		counts := map[string]int{}
+		running := map[string]bool{}
+		ticker := time.NewTicker(5 * time.Second)
+		loop := true
+		for loop {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return result(ctx.Err())
+			case <-ticker.C:
+				// A heartbeat keeps slow providers visibly alive without inventing percentages.
+				for source := range running {
+					if err := send("progress", "running", nil, nil, &contract.StageProgress{Stage: "collect", Provider: source, Target: root, Status: "running", Discovered: counts[source]}, nil, ""); err != nil {
+						ticker.Stop()
+						return result(err)
+					}
+				}
+			case ev, ok := <-events:
+				if !ok {
+					loop = false
 					continue
 				}
-				if _, duplicate := seen[host]; duplicate {
-					continue
+				if ev.started {
+					running[ev.provider] = true
 				}
-				seen[host] = struct{}{}
-				hosts[host] = struct{}{}
-				hostTypes[host] = "subdomain"
-				ref := stableRef(provider.Name(), host)
-				assets = append(assets, assetFact(ref, "subdomain:"+host, "subdomain", host, provider.Name(), e.now()))
-				relations = append(relations, relationFact(
-					stableRef("contains", provider.Name(), root, host), "contains",
-					rootRef, "domain:"+root, ref, "subdomain:"+host, provider.Name(), e.now(),
-				))
+				if seen[ev.provider] == nil {
+					seen[ev.provider] = map[string]bool{}
+				}
+				assets := []contract.AssetFact{}
+				relations := []contract.RelationFact{}
+				flush := func() error {
+					if len(assets) == 0 {
+						return nil
+					}
+					err := send("progress", "running", assets, relations, &contract.StageProgress{Stage: "collect", Provider: ev.provider, Target: root, Status: "running", Discovered: counts[ev.provider]}, nil, "")
+					assets = nil
+					relations = nil
+					return err
+				}
+				for _, raw := range ev.found {
+					host := normalizeDomain(raw)
+					if host == "" || host == root || !withinRoot(host, root) || seen[ev.provider][host] {
+						continue
+					}
+					if _, exists := hosts[host]; !exists && len(hosts) >= maxResults {
+						continue
+					}
+					seen[ev.provider][host] = true
+					hosts[host] = "subdomain"
+					counts[ev.provider]++
+					ref := stableRef(ev.provider, host)
+					assets = append(assets, assetFact(ref, "subdomain:"+host, "subdomain", host, ev.provider, e.now()))
+					relations = append(relations, relationFact(stableRef("contains", ev.provider, root, host), "contains", rootRef, "domain:"+root, ref, "subdomain:"+host, ev.provider, e.now()))
+					if len(assets) >= 100 {
+						if err := flush(); err != nil {
+							ticker.Stop()
+							return result(err)
+						}
+					}
+				}
+				if err := flush(); err != nil {
+					ticker.Stop()
+					return result(err)
+				}
+				if len(ev.sites) > 0 {
+					// Only sites on hosts this job accepted become facts, so a crawl
+					// can never introduce a host the scope and result cap rejected.
+					siteAssets, siteRelations, siteExposures := siteFacts(ev.provider, ev.sites, func(host string) (string, string, bool) {
+						if host == root {
+							return kind + ":" + root, rootRef, true
+						}
+						if hosts[host] == "subdomain" && withinRoot(host, root) {
+							return "subdomain:" + host, stableRef(ev.provider, host), true
+						}
+						return "", "", false
+					}, e.now())
+					// Each site is three facts; 150 keeps a batch under maxBatchFacts.
+					for start := 0; start < len(siteAssets); start += 150 {
+						end := min(start+150, len(siteAssets))
+						if err := sendWith("progress", "running", siteAssets[start:end], siteRelations[start:end], siteExposures[start:end], nil, nil, ""); err != nil {
+							ticker.Stop()
+							return result(err)
+						}
+					}
+				}
+				if ev.started || ev.done {
+					status, message := "running", ""
+					errs := []contract.ProviderError{}
+					if ev.done {
+						delete(running, ev.provider)
+						status = "success"
+						if ev.err != nil {
+							status = "failed"
+							if counts[ev.provider] > 0 {
+								status = "partial"
+							}
+							message = "provider request failed; available discoveries were retained"
+							pe := contract.ProviderError{Provider: ev.provider, Code: "PROVIDER_UNAVAILABLE", Message: message, Retryable: true}
+							providerErrors = append(providerErrors, pe)
+							errs = append(errs, pe)
+						}
+					}
+					if err := send("progress", "running", nil, nil, &contract.StageProgress{Stage: "collect", Provider: ev.provider, Target: root, Status: status, Discovered: counts[ev.provider], Message: message}, errs, ""); err != nil {
+						ticker.Stop()
+						return result(err)
+					}
+				}
 			}
 		}
+		ticker.Stop()
 	}
-
 	if e.resolver != nil && len(hosts) > 0 {
-		hostList := make([]string, 0, len(hosts))
+		list := make([]string, 0, len(hosts))
 		for host := range hosts {
-			hostList = append(hostList, host)
+			list = append(list, host)
 		}
-		sort.Strings(hostList)
-		resolved, err := e.resolver.Resolve(ctx, hostList, request.Concurrency, gate)
-		if err != nil {
-			providerErrors = append(providerErrors, contract.ProviderError{
-				Provider: "dns", Code: "DNS_PARTIAL_FAILURE", Message: "DNS resolution was incomplete", Retryable: true,
-			})
+		sort.Strings(list)
+		failed, noRecords := 0, 0
+		batchSize := min(25, request.Concurrency*2)
+		if batchSize < 1 {
+			batchSize = 1
 		}
-		for _, result := range resolved {
-			host := normalizeDomain(result.Host)
-			if _, authorized := hosts[host]; !authorized {
-				continue
+		if limited, ok := e.resolver.(interface{ BatchSize() int }); ok {
+			batchSize = min(batchSize, limited.BatchSize())
+			if batchSize < 1 {
+				batchSize = 1
 			}
-			fromRef := stableRef("dns-parent", host)
-			// Provider-specific subdomain refs differ; add a DNS observation so
-			// DNS relations always resolve within the same callback batch.
-			hostType := hostTypes[host]
-			if hostType == "" {
-				hostType = "subdomain"
+		}
+		// Hosts whose only answer is their zone's wildcard are almost always
+		// names a source remembered rather than records that exist. They keep
+		// their asset (a source did report them) but get no address relations,
+		// which would otherwise attach hundreds of phantom names to one IP.
+		wildcards := e.detectWildcards(ctx, list, roots, request.Concurrency, batchSize, gate)
+		if ctx.Err() != nil {
+			return result(ctx.Err())
+		}
+		for start := 0; start < len(list); start += batchSize {
+			end := min(start+batchSize, len(list))
+			progress := &contract.StageProgress{Stage: "dns", Provider: "dns", Status: "running", Completed: start, Total: len(list), Failed: failed, NoRecords: noRecords}
+			if err := send("progress", "running", nil, nil, progress, nil, ""); err != nil {
+				return result(err)
 			}
-			assets = append(assets, assetFact(fromRef, hostType+":"+host, hostType, host, "dns", e.now()))
-			for _, rawIP := range result.IPs {
-				ip := net.ParseIP(strings.TrimSpace(rawIP))
-				if ip == nil {
+			resolved, resolveErr := e.resolver.Resolve(ctx, list[start:end], request.Concurrency, gate)
+			if ctx.Err() != nil {
+				return result(ctx.Err())
+			}
+			assets := []contract.AssetFact{}
+			relations := []contract.RelationFact{}
+			chunkSet := map[string]bool{}
+			for _, host := range list[start:end] {
+				chunkSet[host] = true
+			}
+			detailedFailure := false
+			for _, entry := range resolved {
+				host := normalizeDomain(entry.Host)
+				if !chunkSet[host] {
 					continue
 				}
-				if (ip.To4() != nil && !requestedRecords["A"]) || (ip.To4() == nil && !requestedRecords["AAAA"]) {
+				if entry.Status == "failed" {
+					failed++
+					detailedFailure = true
+				}
+				if entry.Status == "no_records" {
+					noRecords++
+				}
+				kind := hosts[host]
+				ref := stableRef("dns-parent", host)
+				fact := assetFact(ref, kind+":"+host, kind, host, "dns", e.now())
+				fact.Attributes = map[string]string{"dns_status": entry.Status, "dns_error": entry.ErrorCode}
+				if answer, ok := wildcards[parentZone(host)]; ok && entry.Status == "success" && answer.matchesWildcard(entry) {
+					fact.Attributes["dns_wildcard"] = "suspected"
+					assets = append(assets, fact)
 					continue
 				}
-				canonical := ip.String()
-				ipRef := stableRef("ip", canonical)
-				assets = append(assets, assetFact(ipRef, "ip:"+canonical, "ip", canonical, "dns", e.now()))
-				relations = append(relations, relationFact(
-					stableRef("resolve", host, canonical), "resolves_to",
-					fromRef, hostType+":"+host, ipRef, "ip:"+canonical, "dns", e.now(),
-				))
-			}
-			if !requestedRecords["CNAME"] {
-				continue
-			}
-			for _, rawCNAME := range result.CNAMEs {
-				cname := normalizeDomain(rawCNAME)
-				root := matchingRoot(cname, rootRefs)
-				if root == "" || !withinRoot(cname, root) {
-					continue
+				assets = append(assets, fact)
+				for _, raw := range entry.IPs {
+					ip := net.ParseIP(strings.TrimSpace(raw))
+					if ip == nil || ip.To4() != nil && !records["A"] || ip.To4() == nil && !records["AAAA"] {
+						continue
+					}
+					value := ip.String()
+					to := stableRef("ip", value)
+					assets = append(assets, assetFact(to, "ip:"+value, "ip", value, "dns", e.now()))
+					relations = append(relations, relationFact(stableRef("resolve", host, value), "resolves_to", ref, kind+":"+host, to, "ip:"+value, "dns", e.now()))
 				}
-				cnameRef := stableRef("cname", cname)
-				assets = append(assets, assetFact(cnameRef, "subdomain:"+cname, "subdomain", cname, "dns", e.now()))
-				relations = append(relations, relationFact(
-					stableRef("cname-rel", host, cname), "cname_to",
-					fromRef, hostType+":"+host, cnameRef, "subdomain:"+cname, "dns", e.now(),
-				))
+				if records["CNAME"] {
+					for _, raw := range entry.CNAMEs {
+						value := normalizeDomain(raw)
+						if value == "" || matchingRoot(value, roots) == "" {
+							continue
+						}
+						to := stableRef("cname", value)
+						assets = append(assets, assetFact(to, "subdomain:"+value, "subdomain", value, "dns", e.now()))
+						relations = append(relations, relationFact(stableRef("cname-rel", host, value), "cname_to", ref, kind+":"+host, to, "subdomain:"+value, "dns", e.now()))
+					}
+				}
 			}
+			if resolveErr != nil && !detailedFailure {
+				failed++
+			}
+			assets = dedupeAssets(assets)
+			relations = dedupeRelations(relations)
+			for len(assets) > 0 || len(relations) > 0 {
+				ac := min(len(assets), maxBatchFacts)
+				rc := min(len(relations), maxBatchFacts-ac)
+				if err := send("progress", "running", assets[:ac], relations[:rc], nil, nil, ""); err != nil {
+					return result(err)
+				}
+				assets = assets[ac:]
+				relations = relations[rc:]
+			}
+			progress.Completed = end
+			progress.Failed = failed
+			progress.NoRecords = noRecords
+			if end == len(list) {
+				progress.Status = "success"
+				if failed > 0 {
+					progress.Status = "partial"
+				}
+			}
+			if err := send("progress", "running", nil, nil, progress, nil, ""); err != nil {
+				return result(err)
+			}
+		}
+		if failed > 0 {
+			providerErrors = append(providerErrors, contract.ProviderError{Provider: "dns", Code: "DNS_PARTIAL_FAILURE", Message: "DNS resolution was incomplete; available records were retained", Retryable: true})
 		}
 	}
-
-	assets = dedupeAssets(assets)
-	relations = dedupeRelations(relations)
-	seq := uint64(2)
-	total := uint64(0)
-	for len(assets) > 0 || len(relations) > 0 {
-		batch := contract.CallbackBatch{
-			SchemaVersion: contract.SchemaVersion, RunID: request.RunID, Seq: seq,
-			Phase: "progress", Status: "running", ObservedAt: e.now(),
-			Assets: []contract.AssetFact{}, Relations: []contract.RelationFact{}, Exposures: []contract.ExposureFact{}, ProviderErrors: []contract.ProviderError{}, ErrorSummary: "",
-		}
-		remaining := maxBatchFacts
-		if take := min(remaining, len(assets)); take > 0 {
-			batch.Assets, assets = assets[:take], assets[take:]
-			remaining -= take
-		}
-		if take := min(remaining, len(relations)); take > 0 {
-			batch.Relations, relations = relations[:take], relations[take:]
-		}
-		batch.ResultCount = uint64(batch.FactCount())
-		total += batch.ResultCount
-		if err := e.send(ctx, request, batch); err != nil {
-			return job.ExecutionResult{ResultCount: total}, err
-		}
-		seq++
-	}
-	status := job.StatusSuccess
+	status, summary := "success", ""
 	if len(providerErrors) > 0 {
-		status = job.StatusPartialSuccess
+		status = "partial_success"
+		parts := []string{}
+		for _, pe := range providerErrors {
+			parts = append(parts, pe.Provider+": "+pe.Code)
+		}
+		summary = strings.Join(parts, "; ")
+		if len(summary) > 1000 {
+			summary = summary[:1000]
+		}
 	}
-	final := contract.CallbackBatch{
-		SchemaVersion: contract.SchemaVersion, RunID: request.RunID, Seq: seq,
-		Phase: "completed", Status: status, ResultCount: 0, ObservedAt: e.now(),
-		Assets: []contract.AssetFact{}, Relations: []contract.RelationFact{}, Exposures: []contract.ExposureFact{}, ProviderErrors: providerErrors, ErrorSummary: "",
+	// Bound diagnostics independently of the number of configured roots.
+	if len(providerErrors) > 100 {
+		providerErrors = providerErrors[:100]
 	}
-	if err := e.send(ctx, request, final); err != nil {
-		return job.ExecutionResult{ResultCount: total}, err
+	if err := send("completed", status, nil, nil, nil, providerErrors, summary); err != nil {
+		return result(err)
 	}
-	return job.ExecutionResult{Status: status, ResultCount: total}, nil
+	return job.ExecutionResult{Status: status, ResultCount: total, ErrorSummary: summary}, nil
 }
 
 func (e *PassiveExecutor) send(ctx context.Context, request contract.ScanRequest, batch contract.CallbackBatch) error {

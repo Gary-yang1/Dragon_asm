@@ -55,7 +55,45 @@ if [[ $(docker exec "$CONTAINER_NAME" id -u) != "10001" ]]; then
   exit 1
 fi
 docker exec "$CONTAINER_NAME" sh -c 'touch /var/lib/baiyan/jobs/.write-test && test -w /var/lib/baiyan/jobs'
-docker exec "$CONTAINER_NAME" sh -c 'test -x /app/baiyan-engine && test "$(find /app -mindepth 1 -maxdepth 1 | wc -l)" -eq 1'
+docker exec "$CONTAINER_NAME" sh -c 'test -x /app/baiyan-engine'
+# /app holds the engine and the tool directory, and nothing else. A stray file
+# here means the image picked up something the supply chain does not account for.
+app_entries=$(docker exec "$CONTAINER_NAME" sh -c 'find /app -mindepth 1 -maxdepth 1 | sort | tr "\n" " "')
+if [[ "$app_entries" != "/app/baiyan-engine /app/tools " ]]; then
+  echo "unexpected /app contents: $app_entries" >&2
+  exit 1
+fi
+
+# Every tool declared in TOOLS.md must be present and runnable by the engine
+# user. A missing tool has to fail here rather than at scan time, where it would
+# look like a capability that finds nothing.
+for tool in subfinder enscan; do
+  if ! docker exec "$CONTAINER_NAME" test -x "/app/tools/$tool"; then
+    echo "tool /app/tools/$tool is missing or not executable" >&2
+    exit 1
+  fi
+done
+
+# Tools must be root-owned and unwritable. toolrunner refuses a group- or
+# world-writable binary at start-up; this checks the image actually satisfies
+# that, so the refusal never has to fire in production.
+tool_modes=$(docker exec "$CONTAINER_NAME" sh -c 'find /app/tools -type f -exec stat -c "%a %U" {} \; | sort -u')
+if [[ "$tool_modes" != "555 root" ]]; then
+  echo "tool permissions are not 0555 root-owned: $tool_modes" >&2
+  exit 1
+fi
+if docker exec "$CONTAINER_NAME" sh -c 'test -w /app/tools/subfinder'; then
+  echo "the engine user can write to a tool binary" >&2
+  exit 1
+fi
+
+# The whole point of the toolrunner registry is that only registered binaries
+# run. Confirm the image ships no other executable path the engine could reach.
+unexpected_bins=$(docker exec "$CONTAINER_NAME" sh -c 'find /app -type f -perm -u+x ! -name baiyan-engine ! -path "/app/tools/*" | tr "\n" " "')
+if [[ -n "${unexpected_bins// /}" ]]; then
+  echo "unexpected executables under /app: $unexpected_bins" >&2
+  exit 1
+fi
 
 readonly_rootfs=$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$CONTAINER_NAME")
 cap_drop=$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$CONTAINER_NAME")
@@ -65,5 +103,7 @@ if [[ "$readonly_rootfs" != "true" || "$cap_drop" != *"ALL"* || "$security_opt" 
   exit 1
 fi
 
-printf '{"image":"%s","user":"%s","read_only":%s,"cap_drop":%s,"security_opt":%s,"job_store_writable":true,"app_files":1}\n' \
-  "$IMAGE_NAME" "$configured_user" "$readonly_rootfs" "$cap_drop" "$security_opt"
+tool_list=$(docker exec "$CONTAINER_NAME" sh -c 'find /app/tools -type f | sort | tr "\n" "," | sed "s/,$//"')
+
+printf '{"image":"%s","user":"%s","read_only":%s,"cap_drop":%s,"security_opt":%s,"job_store_writable":true,"tools":"%s"}\n' \
+  "$IMAGE_NAME" "$configured_user" "$readonly_rootfs" "$cap_drop" "$security_opt" "$tool_list"

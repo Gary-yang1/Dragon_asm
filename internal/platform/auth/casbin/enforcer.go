@@ -47,6 +47,7 @@ const (
 	PermProjectCreate      = "project:create"
 	PermProjectWrite       = "project:write"
 	PermProjectArchive     = "project:archive"
+	PermProjectDelete      = "project:delete"
 	PermProjectMemberWrite = "project:member:write"
 	PermUserRead           = "user:read"
 	PermUserWrite          = "user:write"

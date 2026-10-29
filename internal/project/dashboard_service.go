@@ -23,6 +23,7 @@ var projectCapabilityPermissions = []string{
 	asmcasbin.PermNotifWrite,
 	asmcasbin.PermProjectArchive,
 	asmcasbin.PermProjectCreate,
+	asmcasbin.PermProjectDelete,
 	asmcasbin.PermProjectMemberWrite,
 	asmcasbin.PermProjectRead,
 	asmcasbin.PermProjectWrite,
@@ -114,7 +115,7 @@ func (s *Service) Capabilities(ctx context.Context, actorID string, projectID ui
 	role := s.effectiveRole(actorID, projectID, memberRole)
 	missing := append([]string{}, onboarding.Missing...)
 	return Capabilities{
-		Role: role, Permissions: permissions,
+		Role: role, Permissions: permissions, ProjectStatus: p.Status,
 		CanActivate:       canActivate(p.Status, onboarding.ReadyToActivate) && containsPermission(permissions, asmcasbin.PermProjectWrite),
 		OnboardingMissing: missing,
 	}, nil

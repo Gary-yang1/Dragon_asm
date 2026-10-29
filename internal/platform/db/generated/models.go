@@ -7,7 +7,6 @@ package dbgen
 import (
 	"database/sql"
 	"database/sql/driver"
-	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -247,156 +246,185 @@ type AuditLogArchive struct {
 }
 
 type ChangeEvent struct {
-	ID         uint64          `db:"id" json:"id"`
-	TenantID   string          `db:"tenant_id" json:"tenant_id"`
-	OrgID      string          `db:"org_id" json:"org_id"`
-	ProjectID  uint64          `db:"project_id" json:"project_id"`
-	EntityType string          `db:"entity_type" json:"entity_type"`
-	EntityID   uint64          `db:"entity_id" json:"entity_id"`
-	ChangeType string          `db:"change_type" json:"change_type"`
-	Severity   string          `db:"severity" json:"severity"`
-	Title      string          `db:"title" json:"title"`
-	Summary    string          `db:"summary" json:"summary"`
-	Source     string          `db:"source" json:"source"`
-	BeforeJson json.RawMessage `db:"before_json" json:"before_json"`
-	AfterJson  json.RawMessage `db:"after_json" json:"after_json"`
-	DetectedAt time.Time       `db:"detected_at" json:"detected_at"`
-	CreatedAt  time.Time       `db:"created_at" json:"created_at"`
+	ID         uint64    `db:"id" json:"id"`
+	TenantID   string    `db:"tenant_id" json:"tenant_id"`
+	OrgID      string    `db:"org_id" json:"org_id"`
+	ProjectID  uint64    `db:"project_id" json:"project_id"`
+	EntityType string    `db:"entity_type" json:"entity_type"`
+	EntityID   uint64    `db:"entity_id" json:"entity_id"`
+	ChangeType string    `db:"change_type" json:"change_type"`
+	Severity   string    `db:"severity" json:"severity"`
+	Title      string    `db:"title" json:"title"`
+	Summary    string    `db:"summary" json:"summary"`
+	Source     string    `db:"source" json:"source"`
+	BeforeJson []byte    `db:"before_json" json:"before_json"`
+	AfterJson  []byte    `db:"after_json" json:"after_json"`
+	DetectedAt time.Time `db:"detected_at" json:"detected_at"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
 }
 
 type ChangeEventArchive struct {
-	ID         uint64          `db:"id" json:"id"`
-	TenantID   string          `db:"tenant_id" json:"tenant_id"`
-	OrgID      string          `db:"org_id" json:"org_id"`
-	ProjectID  uint64          `db:"project_id" json:"project_id"`
-	EntityType string          `db:"entity_type" json:"entity_type"`
-	EntityID   uint64          `db:"entity_id" json:"entity_id"`
-	ChangeType string          `db:"change_type" json:"change_type"`
-	Severity   string          `db:"severity" json:"severity"`
-	Title      string          `db:"title" json:"title"`
-	Summary    string          `db:"summary" json:"summary"`
-	Source     string          `db:"source" json:"source"`
-	BeforeJson json.RawMessage `db:"before_json" json:"before_json"`
-	AfterJson  json.RawMessage `db:"after_json" json:"after_json"`
-	DetectedAt time.Time       `db:"detected_at" json:"detected_at"`
-	CreatedAt  time.Time       `db:"created_at" json:"created_at"`
-	ArchivedAt time.Time       `db:"archived_at" json:"archived_at"`
+	ID         uint64    `db:"id" json:"id"`
+	TenantID   string    `db:"tenant_id" json:"tenant_id"`
+	OrgID      string    `db:"org_id" json:"org_id"`
+	ProjectID  uint64    `db:"project_id" json:"project_id"`
+	EntityType string    `db:"entity_type" json:"entity_type"`
+	EntityID   uint64    `db:"entity_id" json:"entity_id"`
+	ChangeType string    `db:"change_type" json:"change_type"`
+	Severity   string    `db:"severity" json:"severity"`
+	Title      string    `db:"title" json:"title"`
+	Summary    string    `db:"summary" json:"summary"`
+	Source     string    `db:"source" json:"source"`
+	BeforeJson []byte    `db:"before_json" json:"before_json"`
+	AfterJson  []byte    `db:"after_json" json:"after_json"`
+	DetectedAt time.Time `db:"detected_at" json:"detected_at"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+	ArchivedAt time.Time `db:"archived_at" json:"archived_at"`
 }
 
 type DiscoveryCallback struct {
-	ID            uint64          `db:"id" json:"id"`
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	RunID         uint64          `db:"run_id" json:"run_id"`
-	Seq           uint64          `db:"seq" json:"seq"`
-	Phase         string          `db:"phase" json:"phase"`
-	Status        string          `db:"status" json:"status"`
-	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
-	ResultCount   uint64          `db:"result_count" json:"result_count"`
-	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
-	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
-	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
-	SchemaVersion string          `db:"schema_version" json:"schema_version"`
-	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
-	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
-	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
-	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
-	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
-	IngestError   string          `db:"ingest_error" json:"ingest_error"`
-	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
+	ID            uint64       `db:"id" json:"id"`
+	TenantID      string       `db:"tenant_id" json:"tenant_id"`
+	OrgID         string       `db:"org_id" json:"org_id"`
+	ProjectID     uint64       `db:"project_id" json:"project_id"`
+	RunID         uint64       `db:"run_id" json:"run_id"`
+	Seq           uint64       `db:"seq" json:"seq"`
+	Phase         string       `db:"phase" json:"phase"`
+	Status        string       `db:"status" json:"status"`
+	PayloadHash   string       `db:"payload_hash" json:"payload_hash"`
+	ResultCount   uint64       `db:"result_count" json:"result_count"`
+	ErrorSummary  string       `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time    `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time    `db:"enqueued_at" json:"enqueued_at"`
+	CreatedAt     time.Time    `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time    `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time    `db:"deleted_at" json:"deleted_at"`
+	SchemaVersion string       `db:"schema_version" json:"schema_version"`
+	ObservedAt    sql.NullTime `db:"observed_at" json:"observed_at"`
+	PayloadJson   []byte       `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32       `db:"payload_size" json:"payload_size"`
+	IngestStatus  string       `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32       `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string       `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time    `db:"processed_at" json:"processed_at"`
 }
 
 type DiscoveryCallbackArchive struct {
-	ID            uint64          `db:"id" json:"id"`
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	RunID         uint64          `db:"run_id" json:"run_id"`
-	Seq           uint64          `db:"seq" json:"seq"`
-	Phase         string          `db:"phase" json:"phase"`
-	Status        string          `db:"status" json:"status"`
-	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
-	ResultCount   uint64          `db:"result_count" json:"result_count"`
-	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
-	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
-	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
-	ArchivedAt    time.Time       `db:"archived_at" json:"archived_at"`
-	SchemaVersion string          `db:"schema_version" json:"schema_version"`
-	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
-	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
-	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
-	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
-	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
-	IngestError   string          `db:"ingest_error" json:"ingest_error"`
-	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
+	ID            uint64       `db:"id" json:"id"`
+	TenantID      string       `db:"tenant_id" json:"tenant_id"`
+	OrgID         string       `db:"org_id" json:"org_id"`
+	ProjectID     uint64       `db:"project_id" json:"project_id"`
+	RunID         uint64       `db:"run_id" json:"run_id"`
+	Seq           uint64       `db:"seq" json:"seq"`
+	Phase         string       `db:"phase" json:"phase"`
+	Status        string       `db:"status" json:"status"`
+	PayloadHash   string       `db:"payload_hash" json:"payload_hash"`
+	ResultCount   uint64       `db:"result_count" json:"result_count"`
+	ErrorSummary  string       `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time    `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time    `db:"enqueued_at" json:"enqueued_at"`
+	CreatedAt     time.Time    `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time    `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time    `db:"deleted_at" json:"deleted_at"`
+	ArchivedAt    time.Time    `db:"archived_at" json:"archived_at"`
+	SchemaVersion string       `db:"schema_version" json:"schema_version"`
+	ObservedAt    sql.NullTime `db:"observed_at" json:"observed_at"`
+	PayloadJson   []byte       `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32       `db:"payload_size" json:"payload_size"`
+	IngestStatus  string       `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32       `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string       `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time    `db:"processed_at" json:"processed_at"`
 }
 
 type DiscoveryObservation struct {
-	ID             uint64          `db:"id" json:"id"`
-	TenantID       string          `db:"tenant_id" json:"tenant_id"`
-	OrgID          string          `db:"org_id" json:"org_id"`
-	ProjectID      uint64          `db:"project_id" json:"project_id"`
-	RunID          uint64          `db:"run_id" json:"run_id"`
-	Seq            uint64          `db:"seq" json:"seq"`
-	Kind           string          `db:"kind" json:"kind"`
-	NaturalKey     string          `db:"natural_key" json:"natural_key"`
-	ClientRef      string          `db:"client_ref" json:"client_ref"`
-	Provider       string          `db:"provider" json:"provider"`
-	Capability     string          `db:"capability" json:"capability"`
-	ObservedAt     time.Time       `db:"observed_at" json:"observed_at"`
-	Confidence     uint8           `db:"confidence" json:"confidence"`
-	ActiveProbe    bool            `db:"active_probe" json:"active_probe"`
-	EvidenceHash   string          `db:"evidence_hash" json:"evidence_hash"`
-	EvidenceRef    string          `db:"evidence_ref" json:"evidence_ref"`
-	NormalizedJson json.RawMessage `db:"normalized_json" json:"normalized_json"`
-	NormalizedSize uint32          `db:"normalized_size" json:"normalized_size"`
-	IngestStatus   string          `db:"ingest_status" json:"ingest_status"`
-	IngestError    string          `db:"ingest_error" json:"ingest_error"`
-	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
-	DeletedAt      time.Time       `db:"deleted_at" json:"deleted_at"`
+	ID             uint64    `db:"id" json:"id"`
+	TenantID       string    `db:"tenant_id" json:"tenant_id"`
+	OrgID          string    `db:"org_id" json:"org_id"`
+	ProjectID      uint64    `db:"project_id" json:"project_id"`
+	RunID          uint64    `db:"run_id" json:"run_id"`
+	Seq            uint64    `db:"seq" json:"seq"`
+	Kind           string    `db:"kind" json:"kind"`
+	NaturalKey     string    `db:"natural_key" json:"natural_key"`
+	ClientRef      string    `db:"client_ref" json:"client_ref"`
+	Provider       string    `db:"provider" json:"provider"`
+	Capability     string    `db:"capability" json:"capability"`
+	ObservedAt     time.Time `db:"observed_at" json:"observed_at"`
+	Confidence     uint8     `db:"confidence" json:"confidence"`
+	ActiveProbe    bool      `db:"active_probe" json:"active_probe"`
+	EvidenceHash   string    `db:"evidence_hash" json:"evidence_hash"`
+	EvidenceRef    string    `db:"evidence_ref" json:"evidence_ref"`
+	NormalizedJson []byte    `db:"normalized_json" json:"normalized_json"`
+	NormalizedSize uint32    `db:"normalized_size" json:"normalized_size"`
+	IngestStatus   string    `db:"ingest_status" json:"ingest_status"`
+	IngestError    string    `db:"ingest_error" json:"ingest_error"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
+	DeletedAt      time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
+type EngineProjectBinding struct {
+	ProjectID         uint64        `db:"project_id" json:"project_id"`
+	EndpointKey       string        `db:"endpoint_key" json:"endpoint_key"`
+	RemoteName        string        `db:"remote_name" json:"remote_name"`
+	RemoteDescription string        `db:"remote_description" json:"remote_description"`
+	EngineProjectID   sql.NullInt64 `db:"engine_project_id" json:"engine_project_id"`
+	CreationStarted   bool          `db:"creation_started" json:"creation_started"`
+	CreatedAt         time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time     `db:"updated_at" json:"updated_at"`
+}
+
+type EngineRunSetting struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+	Version   uint64 `db:"version" json:"version"`
+}
+
+type EngineSettingsHead struct {
+	ID      uint8  `db:"id" json:"id"`
+	Version uint64 `db:"version" json:"version"`
+}
+
+type EngineSettingsVersion struct {
+	Version          uint64    `db:"version" json:"version"`
+	EncryptedPayload []byte    `db:"encrypted_payload" json:"encrypted_payload"`
+	CreatedBy        string    `db:"created_by" json:"created_by"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 }
 
 type Exposure struct {
-	ID            uint64          `db:"id" json:"id"`
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	AssetID       uint64          `db:"asset_id" json:"asset_id"`
-	ExposureType  string          `db:"exposure_type" json:"exposure_type"`
-	ExposureKey   string          `db:"exposure_key" json:"exposure_key"`
-	Name          string          `db:"name" json:"name"`
-	Value         string          `db:"value" json:"value"`
-	Protocol      string          `db:"protocol" json:"protocol"`
-	Port          uint32          `db:"port" json:"port"`
-	Service       string          `db:"service" json:"service"`
-	Version       string          `db:"version" json:"version"`
-	Cpe           string          `db:"cpe" json:"cpe"`
-	Url           string          `db:"url" json:"url"`
-	Fingerprint   string          `db:"fingerprint" json:"fingerprint"`
-	CertSubject   string          `db:"cert_subject" json:"cert_subject"`
-	CertIssuer    string          `db:"cert_issuer" json:"cert_issuer"`
-	CertSerial    string          `db:"cert_serial" json:"cert_serial"`
-	CertNotBefore time.Time       `db:"cert_not_before" json:"cert_not_before"`
-	CertNotAfter  time.Time       `db:"cert_not_after" json:"cert_not_after"`
-	CertSanJson   json.RawMessage `db:"cert_san_json" json:"cert_san_json"`
-	EvidenceHash  string          `db:"evidence_hash" json:"evidence_hash"`
-	Source        string          `db:"source" json:"source"`
-	Confidence    uint8           `db:"confidence" json:"confidence"`
-	FirstSeen     time.Time       `db:"first_seen" json:"first_seen"`
-	LastSeen      time.Time       `db:"last_seen" json:"last_seen"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	CreatedBy     string          `db:"created_by" json:"created_by"`
-	UpdatedBy     string          `db:"updated_by" json:"updated_by"`
-	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+	ID            uint64    `db:"id" json:"id"`
+	TenantID      string    `db:"tenant_id" json:"tenant_id"`
+	OrgID         string    `db:"org_id" json:"org_id"`
+	ProjectID     uint64    `db:"project_id" json:"project_id"`
+	AssetID       uint64    `db:"asset_id" json:"asset_id"`
+	ExposureType  string    `db:"exposure_type" json:"exposure_type"`
+	ExposureKey   string    `db:"exposure_key" json:"exposure_key"`
+	Name          string    `db:"name" json:"name"`
+	Value         string    `db:"value" json:"value"`
+	Protocol      string    `db:"protocol" json:"protocol"`
+	Port          uint32    `db:"port" json:"port"`
+	Service       string    `db:"service" json:"service"`
+	Version       string    `db:"version" json:"version"`
+	Cpe           string    `db:"cpe" json:"cpe"`
+	Url           string    `db:"url" json:"url"`
+	Fingerprint   string    `db:"fingerprint" json:"fingerprint"`
+	CertSubject   string    `db:"cert_subject" json:"cert_subject"`
+	CertIssuer    string    `db:"cert_issuer" json:"cert_issuer"`
+	CertSerial    string    `db:"cert_serial" json:"cert_serial"`
+	CertNotBefore time.Time `db:"cert_not_before" json:"cert_not_before"`
+	CertNotAfter  time.Time `db:"cert_not_after" json:"cert_not_after"`
+	CertSanJson   []byte    `db:"cert_san_json" json:"cert_san_json"`
+	EvidenceHash  string    `db:"evidence_hash" json:"evidence_hash"`
+	Source        string    `db:"source" json:"source"`
+	Confidence    uint8     `db:"confidence" json:"confidence"`
+	FirstSeen     time.Time `db:"first_seen" json:"first_seen"`
+	LastSeen      time.Time `db:"last_seen" json:"last_seen"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy     string    `db:"created_by" json:"created_by"`
+	UpdatedBy     string    `db:"updated_by" json:"updated_by"`
+	DeletedAt     time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
 type IcpFiling struct {
@@ -435,39 +463,39 @@ type IcpFilingDomain struct {
 }
 
 type NotificationDelivery struct {
-	ID          uint64          `db:"id" json:"id"`
-	TenantID    string          `db:"tenant_id" json:"tenant_id"`
-	OrgID       string          `db:"org_id" json:"org_id"`
-	ProjectID   uint64          `db:"project_id" json:"project_id"`
-	RuleID      uint64          `db:"rule_id" json:"rule_id"`
-	TriggerName string          `db:"trigger_name" json:"trigger_name"`
-	Channel     string          `db:"channel" json:"channel"`
-	ThrottleKey string          `db:"throttle_key" json:"throttle_key"`
-	DedupeKey   string          `db:"dedupe_key" json:"dedupe_key"`
-	Status      string          `db:"status" json:"status"`
-	Subject     string          `db:"subject" json:"subject"`
-	PayloadJson json.RawMessage `db:"payload_json" json:"payload_json"`
-	SentAt      time.Time       `db:"sent_at" json:"sent_at"`
-	CreatedAt   time.Time       `db:"created_at" json:"created_at"`
+	ID          uint64    `db:"id" json:"id"`
+	TenantID    string    `db:"tenant_id" json:"tenant_id"`
+	OrgID       string    `db:"org_id" json:"org_id"`
+	ProjectID   uint64    `db:"project_id" json:"project_id"`
+	RuleID      uint64    `db:"rule_id" json:"rule_id"`
+	TriggerName string    `db:"trigger_name" json:"trigger_name"`
+	Channel     string    `db:"channel" json:"channel"`
+	ThrottleKey string    `db:"throttle_key" json:"throttle_key"`
+	DedupeKey   string    `db:"dedupe_key" json:"dedupe_key"`
+	Status      string    `db:"status" json:"status"`
+	Subject     string    `db:"subject" json:"subject"`
+	PayloadJson []byte    `db:"payload_json" json:"payload_json"`
+	SentAt      time.Time `db:"sent_at" json:"sent_at"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
 }
 
 type NotificationRule struct {
-	ID             uint64          `db:"id" json:"id"`
-	TenantID       string          `db:"tenant_id" json:"tenant_id"`
-	OrgID          string          `db:"org_id" json:"org_id"`
-	ProjectID      uint64          `db:"project_id" json:"project_id"`
-	Name           string          `db:"name" json:"name"`
-	TriggerName    string          `db:"trigger_name" json:"trigger_name"`
-	ConditionJson  json.RawMessage `db:"condition_json" json:"condition_json"`
-	Channel        string          `db:"channel" json:"channel"`
-	RecipientsJson json.RawMessage `db:"recipients_json" json:"recipients_json"`
-	ThrottleWindow uint32          `db:"throttle_window" json:"throttle_window"`
-	Enabled        bool            `db:"enabled" json:"enabled"`
-	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
-	CreatedBy      string          `db:"created_by" json:"created_by"`
-	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
-	DeletedAt      time.Time       `db:"deleted_at" json:"deleted_at"`
+	ID             uint64    `db:"id" json:"id"`
+	TenantID       string    `db:"tenant_id" json:"tenant_id"`
+	OrgID          string    `db:"org_id" json:"org_id"`
+	ProjectID      uint64    `db:"project_id" json:"project_id"`
+	Name           string    `db:"name" json:"name"`
+	TriggerName    string    `db:"trigger_name" json:"trigger_name"`
+	ConditionJson  []byte    `db:"condition_json" json:"condition_json"`
+	Channel        string    `db:"channel" json:"channel"`
+	RecipientsJson []byte    `db:"recipients_json" json:"recipients_json"`
+	ThrottleWindow uint32    `db:"throttle_window" json:"throttle_window"`
+	Enabled        bool      `db:"enabled" json:"enabled"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy      string    `db:"created_by" json:"created_by"`
+	UpdatedBy      string    `db:"updated_by" json:"updated_by"`
+	DeletedAt      time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
 type Project struct {
@@ -551,8 +579,8 @@ type ReportExport struct {
 	ReportType   string             `db:"report_type" json:"report_type"`
 	Status       ReportExportStatus `db:"status" json:"status"`
 	Format       ReportExportFormat `db:"format" json:"format"`
-	FieldsJson   json.RawMessage    `db:"fields_json" json:"fields_json"`
-	FiltersJson  json.RawMessage    `db:"filters_json" json:"filters_json"`
+	FieldsJson   []byte             `db:"fields_json" json:"fields_json"`
+	FiltersJson  []byte             `db:"filters_json" json:"filters_json"`
 	Redacted     bool               `db:"redacted" json:"redacted"`
 	RowCount     uint64             `db:"row_count" json:"row_count"`
 	FilePath     string             `db:"file_path" json:"file_path"`
@@ -566,42 +594,42 @@ type ReportExport struct {
 }
 
 type Risk struct {
-	ID                uint64          `db:"id" json:"id"`
-	TenantID          string          `db:"tenant_id" json:"tenant_id"`
-	OrgID             string          `db:"org_id" json:"org_id"`
-	ProjectID         uint64          `db:"project_id" json:"project_id"`
-	AssetID           uint64          `db:"asset_id" json:"asset_id"`
-	ExposureID        sql.NullInt64   `db:"exposure_id" json:"exposure_id"`
-	VulnDefinitionID  sql.NullInt64   `db:"vuln_definition_id" json:"vuln_definition_id"`
-	RiskKey           string          `db:"risk_key" json:"risk_key"`
-	RiskType          string          `db:"risk_type" json:"risk_type"`
-	Title             string          `db:"title" json:"title"`
-	Severity          string          `db:"severity" json:"severity"`
-	Score             uint8           `db:"score" json:"score"`
-	RuleID            string          `db:"rule_id" json:"rule_id"`
-	Source            string          `db:"source" json:"source"`
-	EvidenceSummary   string          `db:"evidence_summary" json:"evidence_summary"`
-	EvidenceRef       string          `db:"evidence_ref" json:"evidence_ref"`
-	Status            string          `db:"status" json:"status"`
-	Owner             string          `db:"owner" json:"owner"`
-	BusinessUnit      string          `db:"business_unit" json:"business_unit"`
-	SlaDueAt          time.Time       `db:"sla_due_at" json:"sla_due_at"`
-	FirstSeen         time.Time       `db:"first_seen" json:"first_seen"`
-	LastSeen          time.Time       `db:"last_seen" json:"last_seen"`
-	ConfirmedAt       time.Time       `db:"confirmed_at" json:"confirmed_at"`
-	FixedAt           time.Time       `db:"fixed_at" json:"fixed_at"`
-	CreatedAt         time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt         time.Time       `db:"updated_at" json:"updated_at"`
-	CreatedBy         string          `db:"created_by" json:"created_by"`
-	UpdatedBy         string          `db:"updated_by" json:"updated_by"`
-	DeletedAt         time.Time       `db:"deleted_at" json:"deleted_at"`
-	ScoreLevel        string          `db:"score_level" json:"score_level"`
-	ScoreModelVersion string          `db:"score_model_version" json:"score_model_version"`
-	ScoreFactorsJson  json.RawMessage `db:"score_factors_json" json:"score_factors_json"`
-	ScoredAt          time.Time       `db:"scored_at" json:"scored_at"`
-	Suppressed        bool            `db:"suppressed" json:"suppressed"`
-	SuppressionRuleID sql.NullInt64   `db:"suppression_rule_id" json:"suppression_rule_id"`
-	SuppressedUntil   time.Time       `db:"suppressed_until" json:"suppressed_until"`
+	ID                uint64        `db:"id" json:"id"`
+	TenantID          string        `db:"tenant_id" json:"tenant_id"`
+	OrgID             string        `db:"org_id" json:"org_id"`
+	ProjectID         uint64        `db:"project_id" json:"project_id"`
+	AssetID           uint64        `db:"asset_id" json:"asset_id"`
+	ExposureID        sql.NullInt64 `db:"exposure_id" json:"exposure_id"`
+	VulnDefinitionID  sql.NullInt64 `db:"vuln_definition_id" json:"vuln_definition_id"`
+	RiskKey           string        `db:"risk_key" json:"risk_key"`
+	RiskType          string        `db:"risk_type" json:"risk_type"`
+	Title             string        `db:"title" json:"title"`
+	Severity          string        `db:"severity" json:"severity"`
+	Score             uint8         `db:"score" json:"score"`
+	RuleID            string        `db:"rule_id" json:"rule_id"`
+	Source            string        `db:"source" json:"source"`
+	EvidenceSummary   string        `db:"evidence_summary" json:"evidence_summary"`
+	EvidenceRef       string        `db:"evidence_ref" json:"evidence_ref"`
+	Status            string        `db:"status" json:"status"`
+	Owner             string        `db:"owner" json:"owner"`
+	BusinessUnit      string        `db:"business_unit" json:"business_unit"`
+	SlaDueAt          time.Time     `db:"sla_due_at" json:"sla_due_at"`
+	FirstSeen         time.Time     `db:"first_seen" json:"first_seen"`
+	LastSeen          time.Time     `db:"last_seen" json:"last_seen"`
+	ConfirmedAt       time.Time     `db:"confirmed_at" json:"confirmed_at"`
+	FixedAt           time.Time     `db:"fixed_at" json:"fixed_at"`
+	CreatedAt         time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time     `db:"updated_at" json:"updated_at"`
+	CreatedBy         string        `db:"created_by" json:"created_by"`
+	UpdatedBy         string        `db:"updated_by" json:"updated_by"`
+	DeletedAt         time.Time     `db:"deleted_at" json:"deleted_at"`
+	ScoreLevel        string        `db:"score_level" json:"score_level"`
+	ScoreModelVersion string        `db:"score_model_version" json:"score_model_version"`
+	ScoreFactorsJson  []byte        `db:"score_factors_json" json:"score_factors_json"`
+	ScoredAt          time.Time     `db:"scored_at" json:"scored_at"`
+	Suppressed        bool          `db:"suppressed" json:"suppressed"`
+	SuppressionRuleID sql.NullInt64 `db:"suppression_rule_id" json:"suppression_rule_id"`
+	SuppressedUntil   time.Time     `db:"suppressed_until" json:"suppressed_until"`
 }
 
 type RiskDecision struct {
@@ -642,19 +670,19 @@ type RiskRule struct {
 }
 
 type RiskScoreHistory struct {
-	ID                uint64          `db:"id" json:"id"`
-	TenantID          string          `db:"tenant_id" json:"tenant_id"`
-	OrgID             string          `db:"org_id" json:"org_id"`
-	ProjectID         uint64          `db:"project_id" json:"project_id"`
-	RiskID            uint64          `db:"risk_id" json:"risk_id"`
-	Score             uint8           `db:"score" json:"score"`
-	ScoreLevel        string          `db:"score_level" json:"score_level"`
-	ScoreModelVersion string          `db:"score_model_version" json:"score_model_version"`
-	ScoreFactorsJson  json.RawMessage `db:"score_factors_json" json:"score_factors_json"`
-	Reason            string          `db:"reason" json:"reason"`
-	ScoredAt          time.Time       `db:"scored_at" json:"scored_at"`
-	CreatedAt         time.Time       `db:"created_at" json:"created_at"`
-	CreatedBy         string          `db:"created_by" json:"created_by"`
+	ID                uint64    `db:"id" json:"id"`
+	TenantID          string    `db:"tenant_id" json:"tenant_id"`
+	OrgID             string    `db:"org_id" json:"org_id"`
+	ProjectID         uint64    `db:"project_id" json:"project_id"`
+	RiskID            uint64    `db:"risk_id" json:"risk_id"`
+	Score             uint8     `db:"score" json:"score"`
+	ScoreLevel        string    `db:"score_level" json:"score_level"`
+	ScoreModelVersion string    `db:"score_model_version" json:"score_model_version"`
+	ScoreFactorsJson  []byte    `db:"score_factors_json" json:"score_factors_json"`
+	Reason            string    `db:"reason" json:"reason"`
+	ScoredAt          time.Time `db:"scored_at" json:"scored_at"`
+	CreatedAt         time.Time `db:"created_at" json:"created_at"`
+	CreatedBy         string    `db:"created_by" json:"created_by"`
 }
 
 type RiskStatusHistory struct {
@@ -673,36 +701,40 @@ type RiskStatusHistory struct {
 }
 
 type Scope struct {
+	ID            uint64        `db:"id" json:"id"`
+	TenantID      string        `db:"tenant_id" json:"tenant_id"`
+	OrgID         string        `db:"org_id" json:"org_id"`
+	ProjectID     uint64        `db:"project_id" json:"project_id"`
+	Name          string        `db:"name" json:"name"`
+	Status        string        `db:"status" json:"status"`
+	AuthorizedBy  string        `db:"authorized_by" json:"authorized_by"`
+	ValidFrom     time.Time     `db:"valid_from" json:"valid_from"`
+	ValidUntil    time.Time     `db:"valid_until" json:"valid_until"`
+	CreatedAt     time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time     `db:"updated_at" json:"updated_at"`
+	CreatedBy     string        `db:"created_by" json:"created_by"`
+	UpdatedBy     string        `db:"updated_by" json:"updated_by"`
+	DeletedAt     time.Time     `db:"deleted_at" json:"deleted_at"`
+	IsDefault     bool          `db:"is_default" json:"is_default"`
+	DefaultMarker sql.NullInt16 `db:"default_marker" json:"default_marker"`
+}
+
+type ScopeTarget struct {
 	ID           uint64    `db:"id" json:"id"`
 	TenantID     string    `db:"tenant_id" json:"tenant_id"`
 	OrgID        string    `db:"org_id" json:"org_id"`
 	ProjectID    uint64    `db:"project_id" json:"project_id"`
-	Name         string    `db:"name" json:"name"`
-	Status       string    `db:"status" json:"status"`
-	AuthorizedBy string    `db:"authorized_by" json:"authorized_by"`
-	ValidFrom    time.Time `db:"valid_from" json:"valid_from"`
-	ValidUntil   time.Time `db:"valid_until" json:"valid_until"`
+	ScopeID      uint64    `db:"scope_id" json:"scope_id"`
+	TargetType   string    `db:"target_type" json:"target_type"`
+	MatchMode    string    `db:"match_mode" json:"match_mode"`
+	TargetValue  string    `db:"target_value" json:"target_value"`
 	CreatedAt    time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
 	CreatedBy    string    `db:"created_by" json:"created_by"`
 	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
 	DeletedAt    time.Time `db:"deleted_at" json:"deleted_at"`
-}
-
-type ScopeTarget struct {
-	ID          uint64    `db:"id" json:"id"`
-	TenantID    string    `db:"tenant_id" json:"tenant_id"`
-	OrgID       string    `db:"org_id" json:"org_id"`
-	ProjectID   uint64    `db:"project_id" json:"project_id"`
-	ScopeID     uint64    `db:"scope_id" json:"scope_id"`
-	TargetType  string    `db:"target_type" json:"target_type"`
-	MatchMode   string    `db:"match_mode" json:"match_mode"`
-	TargetValue string    `db:"target_value" json:"target_value"`
-	CreatedAt   time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
-	CreatedBy   string    `db:"created_by" json:"created_by"`
-	UpdatedBy   string    `db:"updated_by" json:"updated_by"`
-	DeletedAt   time.Time `db:"deleted_at" json:"deleted_at"`
+	CoverageMode string    `db:"coverage_mode" json:"coverage_mode"`
+	UrlRule      []byte    `db:"url_rule" json:"url_rule"`
 }
 
 type SlaPolicy struct {
@@ -769,28 +801,30 @@ type TaskRun struct {
 	CreatedBy         string    `db:"created_by" json:"created_by"`
 	UpdatedBy         string    `db:"updated_by" json:"updated_by"`
 	DeletedAt         time.Time `db:"deleted_at" json:"deleted_at"`
+	ApprovedBy        string    `db:"approved_by" json:"approved_by"`
+	ApprovalReason    string    `db:"approval_reason" json:"approval_reason"`
 }
 
 type TaskTemplate struct {
-	ID             uint64          `db:"id" json:"id"`
-	TenantID       string          `db:"tenant_id" json:"tenant_id"`
-	OrgID          string          `db:"org_id" json:"org_id"`
-	ProjectID      uint64          `db:"project_id" json:"project_id"`
-	ScopeID        uint64          `db:"scope_id" json:"scope_id"`
-	Name           string          `db:"name" json:"name"`
-	TaskType       string          `db:"task_type" json:"task_type"`
-	Config         json.RawMessage `db:"config" json:"config"`
-	Schedule       string          `db:"schedule" json:"schedule"`
-	Enabled        bool            `db:"enabled" json:"enabled"`
-	TimeoutSeconds int32           `db:"timeout_seconds" json:"timeout_seconds"`
-	RateLimit      int32           `db:"rate_limit" json:"rate_limit"`
-	Concurrency    int32           `db:"concurrency" json:"concurrency"`
-	RetryLimit     int32           `db:"retry_limit" json:"retry_limit"`
-	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
-	CreatedBy      string          `db:"created_by" json:"created_by"`
-	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
-	DeletedAt      time.Time       `db:"deleted_at" json:"deleted_at"`
+	ID             uint64    `db:"id" json:"id"`
+	TenantID       string    `db:"tenant_id" json:"tenant_id"`
+	OrgID          string    `db:"org_id" json:"org_id"`
+	ProjectID      uint64    `db:"project_id" json:"project_id"`
+	ScopeID        uint64    `db:"scope_id" json:"scope_id"`
+	Name           string    `db:"name" json:"name"`
+	TaskType       string    `db:"task_type" json:"task_type"`
+	Config         []byte    `db:"config" json:"config"`
+	Schedule       string    `db:"schedule" json:"schedule"`
+	Enabled        bool      `db:"enabled" json:"enabled"`
+	TimeoutSeconds int32     `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit      int32     `db:"rate_limit" json:"rate_limit"`
+	Concurrency    int32     `db:"concurrency" json:"concurrency"`
+	RetryLimit     int32     `db:"retry_limit" json:"retry_limit"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
+	CreatedBy      string    `db:"created_by" json:"created_by"`
+	UpdatedBy      string    `db:"updated_by" json:"updated_by"`
+	DeletedAt      time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
 type TenantUserRole struct {
@@ -859,4 +893,22 @@ type VulnerabilityDefinition struct {
 	CreatedBy   string    `db:"created_by" json:"created_by"`
 	UpdatedBy   string    `db:"updated_by" json:"updated_by"`
 	DeletedAt   time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
+type WebNetworkEnrichment struct {
+	ObservationID uint64       `db:"observation_id" json:"observation_id"`
+	ProjectID     uint64       `db:"project_id" json:"project_id"`
+	RunID         uint64       `db:"run_id" json:"run_id"`
+	ConfigVersion uint64       `db:"config_version" json:"config_version"`
+	SourceHash    string       `db:"source_hash" json:"source_hash"`
+	State         string       `db:"state" json:"state"`
+	Attempts      uint32       `db:"attempts" json:"attempts"`
+	LeaseToken    string       `db:"lease_token" json:"lease_token"`
+	LeaseUntil    time.Time    `db:"lease_until" json:"lease_until"`
+	NextAttemptAt time.Time    `db:"next_attempt_at" json:"next_attempt_at"`
+	ResultJson    []byte       `db:"result_json" json:"result_json"`
+	ErrorSummary  string       `db:"error_summary" json:"error_summary"`
+	EnrichedAt    sql.NullTime `db:"enriched_at" json:"enriched_at"`
+	CreatedAt     time.Time    `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time    `db:"updated_at" json:"updated_at"`
 }

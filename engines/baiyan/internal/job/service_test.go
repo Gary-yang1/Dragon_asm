@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -225,4 +226,78 @@ func waitForStatus(t *testing.T, service *Service, jobID, status string) {
 	}
 	record, _ := service.Get(jobID)
 	t.Fatalf("job did not reach %s: %+v", status, record)
+}
+
+// panickingExecutor panics on one designated run and succeeds for the rest, so a
+// test can prove the worker survived and kept draining the queue. All fields are
+// write-once at construction; survived is closed exactly once via sync.Once.
+type panickingExecutor struct {
+	panicOn  uint64
+	survived chan struct{}
+	once     sync.Once
+}
+
+func (e *panickingExecutor) Execute(_ context.Context, request contract.ScanRequest) (ExecutionResult, error) {
+	if request.RunID == e.panicOn {
+		panic("executor exploded")
+	}
+	e.once.Do(func() { close(e.survived) })
+	return ExecutionResult{Status: StatusSuccess, ResultCount: 7}, nil
+}
+
+// A panic in an executor used to unwind the worker goroutine and terminate the
+// whole engine process, losing every in-flight job. The worker must survive, mark
+// the offending job failed, and keep serving the queue.
+func TestWorkerSurvivesExecutorPanic(t *testing.T) {
+	store := newMemoryStore()
+	survived := make(chan struct{})
+	executor := &panickingExecutor{panicOn: 1, survived: survived}
+	service := NewService(store, executor, 10)
+	if err := service.Start(1); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer service.Shutdown()
+
+	if _, _, err := service.Submit(testRequest(1), "1"); err != nil {
+		t.Fatalf("Submit(1): %v", err)
+	}
+
+	// The panicking job must end up failed, not stuck running.
+	deadline := time.Now().Add(3 * time.Second)
+	var failed Record
+	for time.Now().Before(deadline) {
+		record, err := store.Get("job-1")
+		if err == nil && record.Status == StatusFailed {
+			failed = record
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if failed.Status != StatusFailed {
+		current, _ := store.Get("job-1")
+		t.Fatalf("panicking job should be marked failed, got status %q", current.Status)
+	}
+	if !strings.Contains(failed.ErrorSummary, "panicked") {
+		t.Fatalf("error summary should record the panic, got %q", failed.ErrorSummary)
+	}
+
+	// The same worker must still pick up subsequent jobs.
+	if _, _, err := service.Submit(testRequest(2), "2"); err != nil {
+		t.Fatalf("Submit(2): %v", err)
+	}
+	select {
+	case <-survived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker died after the panic: second job never executed")
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		record, err := store.Get("job-2")
+		if err == nil && record.Status == StatusSuccess {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("second job never reached success")
 }

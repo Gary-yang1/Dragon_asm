@@ -1,0 +1,119 @@
+name: asm-prod
+x-app-environment: &app-environment
+  REPORT_EXPORT_DIR: /var/lib/asm/reports
+  DB_HOST: mysql
+  DB_PORT: "3306"
+  DB_NAME: asm
+  DB_USER: asm
+  DB_PASSWORD: ${DB_PASSWORD:?}
+  DB_MAX_OPEN_CONNS: "12"
+  DB_MAX_IDLE_CONNS: "4"
+  REDIS_ADDR: redis:6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+  ENGINE_SETTINGS_KEY_FILE: /run/asm-secrets/engine-settings.key
+  DISCOVERY_PASSIVE_ENGINE_BASE_URL: http://baiyan-engine:9090
+  DISCOVERY_PASSIVE_ENGINE_TOKEN: ${BAIYAN_TOKEN:?}
+  DISCOVERY_CALLBACK_BASE_URL: http://api:8080
+  DISCOVERY_CALLBACK_SECRET: ${CALLBACK_SECRET:?}
+  DISCOVERY_CALLBACK_SECRET_REF: baiyan-primary
+  DISCOVERY_ACTIVE_DISPATCH_ENABLED: "false"
+  DISCOVERY_ACTIVE_REQUIRE_APPROVAL: "true"
+  DISCOVERY_ACTIVE_REQUIRE_OWNERSHIP: "true"
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?}
+      MYSQL_DATABASE: asm
+      MYSQL_USER: asm
+      MYSQL_PASSWORD: ${DB_PASSWORD:?}
+    volumes: ["/opt/asm/shared/mysql:/var/lib/mysql"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--default-time-zone=+00:00", "--innodb-buffer-pool-size=128M", "--performance-schema=OFF", "--max-connections=60"]
+    mem_limit: 640m
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin -uroot ping --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    environment: {REDIS_PASSWORD: "${REDIS_PASSWORD:?}"}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
+    volumes: ["/opt/asm/shared/redis:/data"]
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep -q PONG"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+  baiyan-engine:
+    image: asm-runtime:20261009
+    command: ["/app/baiyan-engine"]
+    user: "10001:10001"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=96m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    environment:
+      BAIYAN_LISTEN_ADDR: ":9090"
+      BAIYAN_ENGINE_TOKEN: ${BAIYAN_TOKEN:?}
+      BAIYAN_ENGINE_ID: baiyan-primary
+      BAIYAN_CALLBACK_SECRET: ${CALLBACK_SECRET:?}
+      BAIYAN_CALLBACK_ALLOWED_ORIGIN: http://api:8080
+      BAIYAN_JOB_STORE_DIR: /var/lib/baiyan/jobs
+      BAIYAN_TOOL_DIR: /app/tools
+      BAIYAN_WORKERS: "1"
+      BAIYAN_QUEUE_SIZE: "50"
+      GOMEMLIMIT: 256MiB
+    volumes: ["/opt/asm/shared/baiyan-jobs:/var/lib/baiyan/jobs"]
+    restart: unless-stopped
+  api:
+    image: asm-runtime:20261009
+    command: ["/app/start-service.sh", "api"]
+    environment:
+      <<: *app-environment
+      API_PORT: "8080"
+      GIN_MODE: release
+      APP_VERSION: "20261009"
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?}
+      OWNERSHIP_CHALLENGE_SECRET: ${OWNERSHIP_SECRET:?}
+      TRUSTED_PROXIES: "172.30.64.10"
+      GOMEMLIMIT: 160MiB
+    volumes: ["/opt/asm/shared/secrets:/run/asm-secrets:ro", "/opt/asm/shared/reports:/var/lib/asm/reports"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      retries: 12
+    depends_on: {mysql: {condition: service_healthy}, redis: {condition: service_healthy}}
+    restart: unless-stopped
+  worker:
+    image: asm-runtime:20261009
+    command: ["/app/start-service.sh", "worker"]
+    environment:
+      <<: *app-environment
+      GOMEMLIMIT: 160MiB
+    volumes: ["/opt/asm/shared/secrets:/run/asm-secrets:ro", "/opt/asm/shared/reports:/var/lib/asm/reports"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    depends_on: {mysql: {condition: service_healthy}, redis: {condition: service_healthy}}
+    restart: unless-stopped
+  web:
+    image: nginx:alpine
+    ports: ["80:80"]
+    volumes: ["./web:/usr/share/nginx/html:ro", "./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    mem_limit: 64m
+    depends_on: {api: {condition: service_healthy}}
+    restart: unless-stopped
+    networks:
+      default: {ipv4_address: 172.30.64.10}
+networks:
+  default:
+    ipam:
+      config: [{subnet: 172.30.64.0/24}]

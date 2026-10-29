@@ -8,7 +8,6 @@ package dbgen
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"time"
 )
 
@@ -45,6 +44,62 @@ func (q *Queries) CountRisksByProject(ctx context.Context, projectID uint64) (in
 	return count, err
 }
 
+const countRisksByProjectFiltered = `-- name: CountRisksByProjectFiltered :one
+SELECT COUNT(*) FROM risk
+WHERE project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (? = '' OR severity = ?)
+  AND (? = '' OR status = ?)
+  AND (? = '' OR owner = ?)
+  AND (? = 0 OR asset_id = ?)
+  AND (
+      ? = ''
+      OR title LIKE CONCAT('%', ?, '%')
+      OR business_unit LIKE CONCAT('%', ?, '%')
+  )
+`
+
+type CountRisksByProjectFilteredParams struct {
+	ProjectID uint64      `db:"project_id" json:"project_id"`
+	Severity  string      `db:"severity" json:"severity"`
+	Status    string      `db:"status" json:"status"`
+	Owner     string      `db:"owner" json:"owner"`
+	AssetID   uint64      `db:"asset_id" json:"asset_id"`
+	Keyword   interface{} `db:"keyword" json:"keyword"`
+}
+
+func (q *Queries) CountRisksByProjectFiltered(ctx context.Context, arg CountRisksByProjectFilteredParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRisksByProjectFiltered,
+		arg.ProjectID,
+		arg.Severity,
+		arg.Severity,
+		arg.Status,
+		arg.Status,
+		arg.Owner,
+		arg.Owner,
+		arg.AssetID,
+		arg.AssetID,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countSuppressionRulesByProject = `-- name: CountSuppressionRulesByProject :one
+SELECT COUNT(*) FROM suppression_rule
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+func (q *Queries) CountSuppressionRulesByProject(ctx context.Context, projectID uint64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countSuppressionRulesByProject, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createRisk = `-- name: CreateRisk :execresult
 INSERT INTO risk (
     tenant_id, org_id, project_id, asset_id, exposure_id, vuln_definition_id,
@@ -64,38 +119,38 @@ INSERT INTO risk (
 `
 
 type CreateRiskParams struct {
-	TenantID          string          `db:"tenant_id" json:"tenant_id"`
-	OrgID             string          `db:"org_id" json:"org_id"`
-	ProjectID         uint64          `db:"project_id" json:"project_id"`
-	AssetID           uint64          `db:"asset_id" json:"asset_id"`
-	ExposureID        sql.NullInt64   `db:"exposure_id" json:"exposure_id"`
-	VulnDefinitionID  sql.NullInt64   `db:"vuln_definition_id" json:"vuln_definition_id"`
-	RiskKey           string          `db:"risk_key" json:"risk_key"`
-	RiskType          string          `db:"risk_type" json:"risk_type"`
-	Title             string          `db:"title" json:"title"`
-	Severity          string          `db:"severity" json:"severity"`
-	Score             uint8           `db:"score" json:"score"`
-	RuleID            string          `db:"rule_id" json:"rule_id"`
-	Source            string          `db:"source" json:"source"`
-	ScoreLevel        string          `db:"score_level" json:"score_level"`
-	ScoreModelVersion string          `db:"score_model_version" json:"score_model_version"`
-	ScoreFactorsJson  json.RawMessage `db:"score_factors_json" json:"score_factors_json"`
-	ScoredAt          time.Time       `db:"scored_at" json:"scored_at"`
-	EvidenceSummary   string          `db:"evidence_summary" json:"evidence_summary"`
-	EvidenceRef       string          `db:"evidence_ref" json:"evidence_ref"`
-	Status            string          `db:"status" json:"status"`
-	Owner             string          `db:"owner" json:"owner"`
-	BusinessUnit      string          `db:"business_unit" json:"business_unit"`
-	SlaDueAt          time.Time       `db:"sla_due_at" json:"sla_due_at"`
-	Suppressed        bool            `db:"suppressed" json:"suppressed"`
-	SuppressionRuleID sql.NullInt64   `db:"suppression_rule_id" json:"suppression_rule_id"`
-	SuppressedUntil   time.Time       `db:"suppressed_until" json:"suppressed_until"`
-	FirstSeen         time.Time       `db:"first_seen" json:"first_seen"`
-	LastSeen          time.Time       `db:"last_seen" json:"last_seen"`
-	ConfirmedAt       time.Time       `db:"confirmed_at" json:"confirmed_at"`
-	FixedAt           time.Time       `db:"fixed_at" json:"fixed_at"`
-	CreatedBy         string          `db:"created_by" json:"created_by"`
-	UpdatedBy         string          `db:"updated_by" json:"updated_by"`
+	TenantID          string        `db:"tenant_id" json:"tenant_id"`
+	OrgID             string        `db:"org_id" json:"org_id"`
+	ProjectID         uint64        `db:"project_id" json:"project_id"`
+	AssetID           uint64        `db:"asset_id" json:"asset_id"`
+	ExposureID        sql.NullInt64 `db:"exposure_id" json:"exposure_id"`
+	VulnDefinitionID  sql.NullInt64 `db:"vuln_definition_id" json:"vuln_definition_id"`
+	RiskKey           string        `db:"risk_key" json:"risk_key"`
+	RiskType          string        `db:"risk_type" json:"risk_type"`
+	Title             string        `db:"title" json:"title"`
+	Severity          string        `db:"severity" json:"severity"`
+	Score             uint8         `db:"score" json:"score"`
+	RuleID            string        `db:"rule_id" json:"rule_id"`
+	Source            string        `db:"source" json:"source"`
+	ScoreLevel        string        `db:"score_level" json:"score_level"`
+	ScoreModelVersion string        `db:"score_model_version" json:"score_model_version"`
+	ScoreFactorsJson  []byte        `db:"score_factors_json" json:"score_factors_json"`
+	ScoredAt          time.Time     `db:"scored_at" json:"scored_at"`
+	EvidenceSummary   string        `db:"evidence_summary" json:"evidence_summary"`
+	EvidenceRef       string        `db:"evidence_ref" json:"evidence_ref"`
+	Status            string        `db:"status" json:"status"`
+	Owner             string        `db:"owner" json:"owner"`
+	BusinessUnit      string        `db:"business_unit" json:"business_unit"`
+	SlaDueAt          time.Time     `db:"sla_due_at" json:"sla_due_at"`
+	Suppressed        bool          `db:"suppressed" json:"suppressed"`
+	SuppressionRuleID sql.NullInt64 `db:"suppression_rule_id" json:"suppression_rule_id"`
+	SuppressedUntil   time.Time     `db:"suppressed_until" json:"suppressed_until"`
+	FirstSeen         time.Time     `db:"first_seen" json:"first_seen"`
+	LastSeen          time.Time     `db:"last_seen" json:"last_seen"`
+	ConfirmedAt       time.Time     `db:"confirmed_at" json:"confirmed_at"`
+	FixedAt           time.Time     `db:"fixed_at" json:"fixed_at"`
+	CreatedBy         string        `db:"created_by" json:"created_by"`
+	UpdatedBy         string        `db:"updated_by" json:"updated_by"`
 }
 
 func (q *Queries) CreateRisk(ctx context.Context, arg CreateRiskParams) (sql.Result, error) {
@@ -666,19 +721,19 @@ INSERT INTO change_event (
 `
 
 type InsertRiskChangeEventParams struct {
-	TenantID   string          `db:"tenant_id" json:"tenant_id"`
-	OrgID      string          `db:"org_id" json:"org_id"`
-	ProjectID  uint64          `db:"project_id" json:"project_id"`
-	EntityType string          `db:"entity_type" json:"entity_type"`
-	EntityID   uint64          `db:"entity_id" json:"entity_id"`
-	ChangeType string          `db:"change_type" json:"change_type"`
-	Severity   string          `db:"severity" json:"severity"`
-	Title      string          `db:"title" json:"title"`
-	Summary    string          `db:"summary" json:"summary"`
-	Source     string          `db:"source" json:"source"`
-	BeforeJson json.RawMessage `db:"before_json" json:"before_json"`
-	AfterJson  json.RawMessage `db:"after_json" json:"after_json"`
-	DetectedAt time.Time       `db:"detected_at" json:"detected_at"`
+	TenantID   string    `db:"tenant_id" json:"tenant_id"`
+	OrgID      string    `db:"org_id" json:"org_id"`
+	ProjectID  uint64    `db:"project_id" json:"project_id"`
+	EntityType string    `db:"entity_type" json:"entity_type"`
+	EntityID   uint64    `db:"entity_id" json:"entity_id"`
+	ChangeType string    `db:"change_type" json:"change_type"`
+	Severity   string    `db:"severity" json:"severity"`
+	Title      string    `db:"title" json:"title"`
+	Summary    string    `db:"summary" json:"summary"`
+	Source     string    `db:"source" json:"source"`
+	BeforeJson []byte    `db:"before_json" json:"before_json"`
+	AfterJson  []byte    `db:"after_json" json:"after_json"`
+	DetectedAt time.Time `db:"detected_at" json:"detected_at"`
 }
 
 func (q *Queries) InsertRiskChangeEvent(ctx context.Context, arg InsertRiskChangeEventParams) (sql.Result, error) {
@@ -748,17 +803,17 @@ INSERT INTO risk_score_history (
 `
 
 type InsertRiskScoreHistoryParams struct {
-	TenantID          string          `db:"tenant_id" json:"tenant_id"`
-	OrgID             string          `db:"org_id" json:"org_id"`
-	ProjectID         uint64          `db:"project_id" json:"project_id"`
-	RiskID            uint64          `db:"risk_id" json:"risk_id"`
-	Score             uint8           `db:"score" json:"score"`
-	ScoreLevel        string          `db:"score_level" json:"score_level"`
-	ScoreModelVersion string          `db:"score_model_version" json:"score_model_version"`
-	ScoreFactorsJson  json.RawMessage `db:"score_factors_json" json:"score_factors_json"`
-	Reason            string          `db:"reason" json:"reason"`
-	ScoredAt          time.Time       `db:"scored_at" json:"scored_at"`
-	CreatedBy         string          `db:"created_by" json:"created_by"`
+	TenantID          string    `db:"tenant_id" json:"tenant_id"`
+	OrgID             string    `db:"org_id" json:"org_id"`
+	ProjectID         uint64    `db:"project_id" json:"project_id"`
+	RiskID            uint64    `db:"risk_id" json:"risk_id"`
+	Score             uint8     `db:"score" json:"score"`
+	ScoreLevel        string    `db:"score_level" json:"score_level"`
+	ScoreModelVersion string    `db:"score_model_version" json:"score_model_version"`
+	ScoreFactorsJson  []byte    `db:"score_factors_json" json:"score_factors_json"`
+	Reason            string    `db:"reason" json:"reason"`
+	ScoredAt          time.Time `db:"scored_at" json:"scored_at"`
+	CreatedBy         string    `db:"created_by" json:"created_by"`
 }
 
 func (q *Queries) InsertRiskScoreHistory(ctx context.Context, arg InsertRiskScoreHistoryParams) (sql.Result, error) {
@@ -1267,6 +1322,110 @@ func (q *Queries) ListRisksByProject(ctx context.Context, arg ListRisksByProject
 	return items, nil
 }
 
+const listRisksByProjectFiltered = `-- name: ListRisksByProjectFiltered :many
+SELECT id, tenant_id, org_id, project_id, asset_id, exposure_id, vuln_definition_id, risk_key, risk_type, title, severity, score, rule_id, source, evidence_summary, evidence_ref, status, owner, business_unit, sla_due_at, first_seen, last_seen, confirmed_at, fixed_at, created_at, updated_at, created_by, updated_by, deleted_at, score_level, score_model_version, score_factors_json, scored_at, suppressed, suppression_rule_id, suppressed_until FROM risk
+WHERE project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+  AND (? = '' OR severity = ?)
+  AND (? = '' OR status = ?)
+  AND (? = '' OR owner = ?)
+  AND (? = 0 OR asset_id = ?)
+  AND (
+      ? = ''
+      OR title LIKE CONCAT('%', ?, '%')
+      OR business_unit LIKE CONCAT('%', ?, '%')
+  )
+ORDER BY id
+LIMIT ? OFFSET ?
+`
+
+type ListRisksByProjectFilteredParams struct {
+	ProjectID uint64      `db:"project_id" json:"project_id"`
+	Severity  string      `db:"severity" json:"severity"`
+	Status    string      `db:"status" json:"status"`
+	Owner     string      `db:"owner" json:"owner"`
+	AssetID   uint64      `db:"asset_id" json:"asset_id"`
+	Keyword   interface{} `db:"keyword" json:"keyword"`
+	Limit     int32       `db:"limit" json:"limit"`
+	Offset    int32       `db:"offset" json:"offset"`
+}
+
+// Filtered variants; see the note on ListAssetsByProjectFiltered.
+func (q *Queries) ListRisksByProjectFiltered(ctx context.Context, arg ListRisksByProjectFilteredParams) ([]Risk, error) {
+	rows, err := q.db.QueryContext(ctx, listRisksByProjectFiltered,
+		arg.ProjectID,
+		arg.Severity,
+		arg.Severity,
+		arg.Status,
+		arg.Status,
+		arg.Owner,
+		arg.Owner,
+		arg.AssetID,
+		arg.AssetID,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Keyword,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Risk{}
+	for rows.Next() {
+		var i Risk
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.AssetID,
+			&i.ExposureID,
+			&i.VulnDefinitionID,
+			&i.RiskKey,
+			&i.RiskType,
+			&i.Title,
+			&i.Severity,
+			&i.Score,
+			&i.RuleID,
+			&i.Source,
+			&i.EvidenceSummary,
+			&i.EvidenceRef,
+			&i.Status,
+			&i.Owner,
+			&i.BusinessUnit,
+			&i.SlaDueAt,
+			&i.FirstSeen,
+			&i.LastSeen,
+			&i.ConfirmedAt,
+			&i.FixedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+			&i.ScoreLevel,
+			&i.ScoreModelVersion,
+			&i.ScoreFactorsJson,
+			&i.ScoredAt,
+			&i.Suppressed,
+			&i.SuppressionRuleID,
+			&i.SuppressedUntil,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSLAPoliciesByProject = `-- name: ListSLAPoliciesByProject :many
 SELECT id, tenant_id, org_id, project_id, severity, business_unit, response_hours, resolution_hours, enabled, created_at, updated_at, created_by, updated_by, deleted_at FROM sla_policy
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
@@ -1291,6 +1450,62 @@ func (q *Queries) ListSLAPoliciesByProject(ctx context.Context, projectID uint64
 			&i.BusinessUnit,
 			&i.ResponseHours,
 			&i.ResolutionHours,
+			&i.Enabled,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CreatedBy,
+			&i.UpdatedBy,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSuppressionRulesByProject = `-- name: ListSuppressionRulesByProject :many
+SELECT id, tenant_id, org_id, project_id, name, risk_type, rule_id, asset_id, reason, expires_at, enabled, created_at, updated_at, created_by, updated_by, deleted_at FROM suppression_rule
+WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id DESC
+LIMIT ? OFFSET ?
+`
+
+type ListSuppressionRulesByProjectParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	Limit     int32  `db:"limit" json:"limit"`
+	Offset    int32  `db:"offset" json:"offset"`
+}
+
+// Management listing: unlike ListActiveSuppressionRules this returns disabled and
+// expired rules too, because the console has to show what exists in order to let
+// an operator re-enable or review it.
+func (q *Queries) ListSuppressionRulesByProject(ctx context.Context, arg ListSuppressionRulesByProjectParams) ([]SuppressionRule, error) {
+	rows, err := q.db.QueryContext(ctx, listSuppressionRulesByProject, arg.ProjectID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SuppressionRule{}
+	for rows.Next() {
+		var i SuppressionRule
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.Name,
+			&i.RiskType,
+			&i.RuleID,
+			&i.AssetID,
+			&i.Reason,
+			&i.ExpiresAt,
 			&i.Enabled,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -1382,25 +1597,25 @@ WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
 type RefreshRiskParams struct {
-	Title             string          `db:"title" json:"title"`
-	Severity          string          `db:"severity" json:"severity"`
-	Score             uint8           `db:"score" json:"score"`
-	ScoreLevel        string          `db:"score_level" json:"score_level"`
-	ScoreModelVersion string          `db:"score_model_version" json:"score_model_version"`
-	ScoreFactorsJson  json.RawMessage `db:"score_factors_json" json:"score_factors_json"`
-	ScoredAt          time.Time       `db:"scored_at" json:"scored_at"`
-	Source            string          `db:"source" json:"source"`
-	EvidenceSummary   string          `db:"evidence_summary" json:"evidence_summary"`
-	EvidenceRef       string          `db:"evidence_ref" json:"evidence_ref"`
-	Owner             string          `db:"owner" json:"owner"`
-	BusinessUnit      string          `db:"business_unit" json:"business_unit"`
-	Suppressed        bool            `db:"suppressed" json:"suppressed"`
-	SuppressionRuleID sql.NullInt64   `db:"suppression_rule_id" json:"suppression_rule_id"`
-	SuppressedUntil   time.Time       `db:"suppressed_until" json:"suppressed_until"`
-	LastSeen          time.Time       `db:"last_seen" json:"last_seen"`
-	UpdatedBy         string          `db:"updated_by" json:"updated_by"`
-	ID                uint64          `db:"id" json:"id"`
-	ProjectID         uint64          `db:"project_id" json:"project_id"`
+	Title             string        `db:"title" json:"title"`
+	Severity          string        `db:"severity" json:"severity"`
+	Score             uint8         `db:"score" json:"score"`
+	ScoreLevel        string        `db:"score_level" json:"score_level"`
+	ScoreModelVersion string        `db:"score_model_version" json:"score_model_version"`
+	ScoreFactorsJson  []byte        `db:"score_factors_json" json:"score_factors_json"`
+	ScoredAt          time.Time     `db:"scored_at" json:"scored_at"`
+	Source            string        `db:"source" json:"source"`
+	EvidenceSummary   string        `db:"evidence_summary" json:"evidence_summary"`
+	EvidenceRef       string        `db:"evidence_ref" json:"evidence_ref"`
+	Owner             string        `db:"owner" json:"owner"`
+	BusinessUnit      string        `db:"business_unit" json:"business_unit"`
+	Suppressed        bool          `db:"suppressed" json:"suppressed"`
+	SuppressionRuleID sql.NullInt64 `db:"suppression_rule_id" json:"suppression_rule_id"`
+	SuppressedUntil   time.Time     `db:"suppressed_until" json:"suppressed_until"`
+	LastSeen          time.Time     `db:"last_seen" json:"last_seen"`
+	UpdatedBy         string        `db:"updated_by" json:"updated_by"`
+	ID                uint64        `db:"id" json:"id"`
+	ProjectID         uint64        `db:"project_id" json:"project_id"`
 }
 
 func (q *Queries) RefreshRisk(ctx context.Context, arg RefreshRiskParams) (sql.Result, error) {
@@ -1452,25 +1667,25 @@ WHERE id = ? AND project_id = ? AND status = 'fixed' AND deleted_at = '1970-01-0
 `
 
 type ReopenRiskParams struct {
-	Title             string          `db:"title" json:"title"`
-	Severity          string          `db:"severity" json:"severity"`
-	Score             uint8           `db:"score" json:"score"`
-	ScoreLevel        string          `db:"score_level" json:"score_level"`
-	ScoreModelVersion string          `db:"score_model_version" json:"score_model_version"`
-	ScoreFactorsJson  json.RawMessage `db:"score_factors_json" json:"score_factors_json"`
-	ScoredAt          time.Time       `db:"scored_at" json:"scored_at"`
-	Source            string          `db:"source" json:"source"`
-	EvidenceSummary   string          `db:"evidence_summary" json:"evidence_summary"`
-	EvidenceRef       string          `db:"evidence_ref" json:"evidence_ref"`
-	Owner             string          `db:"owner" json:"owner"`
-	BusinessUnit      string          `db:"business_unit" json:"business_unit"`
-	Suppressed        bool            `db:"suppressed" json:"suppressed"`
-	SuppressionRuleID sql.NullInt64   `db:"suppression_rule_id" json:"suppression_rule_id"`
-	SuppressedUntil   time.Time       `db:"suppressed_until" json:"suppressed_until"`
-	LastSeen          time.Time       `db:"last_seen" json:"last_seen"`
-	UpdatedBy         string          `db:"updated_by" json:"updated_by"`
-	ID                uint64          `db:"id" json:"id"`
-	ProjectID         uint64          `db:"project_id" json:"project_id"`
+	Title             string        `db:"title" json:"title"`
+	Severity          string        `db:"severity" json:"severity"`
+	Score             uint8         `db:"score" json:"score"`
+	ScoreLevel        string        `db:"score_level" json:"score_level"`
+	ScoreModelVersion string        `db:"score_model_version" json:"score_model_version"`
+	ScoreFactorsJson  []byte        `db:"score_factors_json" json:"score_factors_json"`
+	ScoredAt          time.Time     `db:"scored_at" json:"scored_at"`
+	Source            string        `db:"source" json:"source"`
+	EvidenceSummary   string        `db:"evidence_summary" json:"evidence_summary"`
+	EvidenceRef       string        `db:"evidence_ref" json:"evidence_ref"`
+	Owner             string        `db:"owner" json:"owner"`
+	BusinessUnit      string        `db:"business_unit" json:"business_unit"`
+	Suppressed        bool          `db:"suppressed" json:"suppressed"`
+	SuppressionRuleID sql.NullInt64 `db:"suppression_rule_id" json:"suppression_rule_id"`
+	SuppressedUntil   time.Time     `db:"suppressed_until" json:"suppressed_until"`
+	LastSeen          time.Time     `db:"last_seen" json:"last_seen"`
+	UpdatedBy         string        `db:"updated_by" json:"updated_by"`
+	ID                uint64        `db:"id" json:"id"`
+	ProjectID         uint64        `db:"project_id" json:"project_id"`
 }
 
 func (q *Queries) ReopenRisk(ctx context.Context, arg ReopenRiskParams) (sql.Result, error) {
@@ -1553,14 +1768,14 @@ WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
 type UpdateRiskScoreParams struct {
-	Score             uint8           `db:"score" json:"score"`
-	ScoreLevel        string          `db:"score_level" json:"score_level"`
-	ScoreModelVersion string          `db:"score_model_version" json:"score_model_version"`
-	ScoreFactorsJson  json.RawMessage `db:"score_factors_json" json:"score_factors_json"`
-	ScoredAt          time.Time       `db:"scored_at" json:"scored_at"`
-	UpdatedBy         string          `db:"updated_by" json:"updated_by"`
-	ID                uint64          `db:"id" json:"id"`
-	ProjectID         uint64          `db:"project_id" json:"project_id"`
+	Score             uint8     `db:"score" json:"score"`
+	ScoreLevel        string    `db:"score_level" json:"score_level"`
+	ScoreModelVersion string    `db:"score_model_version" json:"score_model_version"`
+	ScoreFactorsJson  []byte    `db:"score_factors_json" json:"score_factors_json"`
+	ScoredAt          time.Time `db:"scored_at" json:"scored_at"`
+	UpdatedBy         string    `db:"updated_by" json:"updated_by"`
+	ID                uint64    `db:"id" json:"id"`
+	ProjectID         uint64    `db:"project_id" json:"project_id"`
 }
 
 func (q *Queries) UpdateRiskScore(ctx context.Context, arg UpdateRiskScoreParams) (sql.Result, error) {

@@ -1,0 +1,2 @@
+DROP TABLE web_network_enrichment;
+ALTER TABLE discovery_observation DROP INDEX uk_observation_project_run_id;

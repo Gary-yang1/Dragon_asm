@@ -159,6 +159,7 @@ export const server = setupServer(
       data: {
         role: storedAuth()?.user?.role ?? 'viewer',
         permissions: storedPermissions(),
+        project_status: 'active',
         can_activate: false,
         onboarding_missing: []
       }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Gary-yang1/Dragon_asm/internal/auth"
 	asmcasbin "github.com/Gary-yang1/Dragon_asm/internal/platform/auth/casbin"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/httpx"
 )
 
 func newProjectHandlerTest(t *testing.T, actorID string) (*gin.Engine, *workspaceRepoFake) {
@@ -78,6 +80,7 @@ func TestProjectCapabilitiesHTTPContractAndTenantBoundary(t *testing.T) {
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 	assert.Equal(t, asmcasbin.RoleProjectOwner, body.Data.Role)
 	assert.Contains(t, body.Data.Permissions, asmcasbin.PermProjectWrite)
+	assert.Equal(t, StatusDraft, body.Data.ProjectStatus)
 	assert.True(t, body.Data.CanActivate)
 
 	request = httptest.NewRequest(http.MethodGet, "/api/v1/projects/2/capabilities", nil)
@@ -85,4 +88,68 @@ func TestProjectCapabilitiesHTTPContractAndTenantBoundary(t *testing.T) {
 	engine.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusForbidden, response.Code)
 	assert.NotContains(t, response.Body.String(), "tenant-b")
+}
+
+func TestDeleteProjectHTTPRequiresSystemAdminAndReturnsNoContent(t *testing.T) {
+	engine, repo := newProjectHandlerTest(t, "7")
+	repo.actorScopes["7"] = ActorScope{TenantID: "tenant-a", OrgID: "org-a"}
+	repo.globalRoles[7] = asmcasbin.RoleSystemAdmin
+	repo.projects[1] = &Project{
+		ID: 1, TenantID: "tenant-a", OrgID: "org-a",
+		Name: "Alpha Project", Status: StatusArchived,
+	}
+
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/1",
+		strings.NewReader(`{"confirmation":"Alpha Project","reason":"duplicate project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusNoContent, response.Code)
+	assert.NotContains(t, repo.projects, uint64(1))
+}
+
+func TestDeleteProjectHTTPRejectsSecurityAdmin(t *testing.T) {
+	engine, repo := newProjectHandlerTest(t, "7")
+	repo.actorScopes["7"] = ActorScope{TenantID: "tenant-a", OrgID: "org-a"}
+	repo.globalRoles[7] = asmcasbin.RoleSecurityAdmin
+	repo.projects[1] = &Project{
+		ID: 1, TenantID: "tenant-a", OrgID: "org-a",
+		Name: "Alpha Project", Status: StatusArchived,
+	}
+
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/1",
+		strings.NewReader(`{"confirmation":"Alpha Project","reason":"duplicate project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusForbidden, response.Code)
+	assert.Contains(t, repo.projects, uint64(1))
+}
+
+func TestDeleteProjectHTTPReportsActiveJobs(t *testing.T) {
+	engine, repo := newProjectHandlerTest(t, "7")
+	repo.actorScopes["7"] = ActorScope{TenantID: "tenant-a", OrgID: "org-a"}
+	repo.globalRoles[7] = asmcasbin.RoleSystemAdmin
+	repo.projects[1] = &Project{
+		ID: 1, TenantID: "tenant-a", OrgID: "org-a",
+		Name: "Alpha Project", Status: StatusArchived,
+	}
+	repo.activeTaskRuns[1] = 1
+
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/1",
+		strings.NewReader(`{"confirmation":"Alpha Project","reason":"duplicate project"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusConflict, response.Code)
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+	assert.Equal(t, httpx.ErrCodeProjectHasActiveJobs, body.Error.Code)
 }

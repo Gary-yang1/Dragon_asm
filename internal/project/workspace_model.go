@@ -91,6 +91,7 @@ type WorkspaceProject struct {
 type Capabilities struct {
 	Role              string   `json:"role"`
 	Permissions       []string `json:"permissions"`
+	ProjectStatus     string   `json:"project_status"`
 	CanActivate       bool     `json:"can_activate"`
 	OnboardingMissing []string `json:"onboarding_missing"`
 }
@@ -126,6 +127,15 @@ type TransitionProjectInput struct {
 	Reason    string
 	ActorID   string
 	Meta      AuditMeta
+}
+
+// DeleteProjectInput requests an audited soft deletion of an archived project.
+type DeleteProjectInput struct {
+	ProjectID    uint64
+	Confirmation string
+	Reason       string
+	ActorID      string
+	Meta         AuditMeta
 }
 
 // Subject represents an organization or person associated with a project.
@@ -164,7 +174,8 @@ type SubjectInput struct {
 	Meta               AuditMeta
 }
 
-// DomainProfile links a registrable root domain asset to project metadata.
+// DomainProfile links a managed root domain or delegated subdomain asset to
+// project metadata. It does not grant scan authorization.
 type DomainProfile struct {
 	ID              uint64    `json:"id"`
 	ProjectID       uint64    `json:"project_id"`

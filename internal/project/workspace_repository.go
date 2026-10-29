@@ -39,15 +39,18 @@ type WorkspaceRepository interface {
 	CreateMember(ctx context.Context, projectID uint64, userID, role, actorID string) error
 	UpdateProject(ctx context.Context, in UpdateProjectParams) error
 	TransitionStatus(ctx context.Context, projectID uint64, from, to, actorID string) (bool, error)
+	CountActiveTaskRuns(ctx context.Context, projectID uint64) (int64, error)
+	SoftDeleteProject(ctx context.Context, projectID uint64, actorID string) (bool, error)
 
 	CreateSubject(ctx context.Context, scope ActorScope, in SubjectInput, subjectKey string) (uint64, error)
 	GetSubject(ctx context.Context, projectID, subjectID uint64) (*Subject, error)
 	ListSubjects(ctx context.Context, projectID uint64) ([]*Subject, error)
 	UpdateSubject(ctx context.Context, in SubjectInput, subjectKey string) error
 
-	UpsertRootDomainAsset(ctx context.Context, p *Project, domain, actorID string) (uint64, error)
+	UpsertManagedDomainAsset(ctx context.Context, p *Project, domain, assetType, actorID string) (uint64, error)
 	CreateDomainProfile(ctx context.Context, scope ActorScope, assetID uint64, in DomainInput) error
 	GetDomainProfile(ctx context.Context, projectID, profileID uint64) (*DomainProfile, error)
+	CountVerifiedDomainOwnership(ctx context.Context, projectID uint64, domain string) (int64, error)
 	GetDomainProfileByAsset(ctx context.Context, projectID, assetID uint64) (*DomainProfile, error)
 	ListDomainProfiles(ctx context.Context, projectID uint64) ([]*DomainProfile, error)
 	UpdateDomainProfile(ctx context.Context, in DomainInput) error
@@ -167,6 +170,22 @@ func (r *sqlcRepository) TransitionStatus(ctx context.Context, projectID uint64,
 	return n == 1, err
 }
 
+func (r *sqlcRepository) CountActiveTaskRuns(ctx context.Context, projectID uint64) (int64, error) {
+	return r.q.CountActiveProjectTaskRuns(ctx, projectID)
+}
+
+func (r *sqlcRepository) SoftDeleteProject(ctx context.Context, projectID uint64, actorID string) (bool, error) {
+	result, err := r.q.SoftDeleteProject(ctx, dbgen.SoftDeleteProjectParams{
+		UpdatedBy: actorID,
+		ID:        projectID,
+	})
+	if err != nil {
+		return false, mapWorkspaceErr(err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
 func (r *sqlcRepository) CreateSubject(ctx context.Context, scope ActorScope, in SubjectInput, subjectKey string) (uint64, error) {
 	if in.IsPrimary {
 		if err := r.q.ClearPrimaryProjectSubjects(ctx, dbgen.ClearPrimaryProjectSubjectsParams{UpdatedBy: in.ActorID, ProjectID: in.ProjectID}); err != nil {
@@ -222,11 +241,12 @@ func (r *sqlcRepository) UpdateSubject(ctx context.Context, in SubjectInput, sub
 	}))
 }
 
-func (r *sqlcRepository) UpsertRootDomainAsset(ctx context.Context, p *Project, domain, actorID string) (uint64, error) {
+func (r *sqlcRepository) UpsertManagedDomainAsset(ctx context.Context, p *Project, domain, assetType, actorID string) (uint64, error) {
 	now := time.Now().UTC()
+	assetKey := assetType + ":" + domain
 	_, err := r.q.UpsertAsset(ctx, dbgen.UpsertAssetParams{
 		TenantID: p.TenantID, OrgID: p.OrgID, ProjectID: p.ID,
-		AssetType: "domain", AssetKey: "domain:" + domain, DisplayName: domain,
+		AssetType: assetType, AssetKey: assetKey, DisplayName: domain,
 		Value: domain, Source: "project_profile", Owner: p.Owner,
 		BusinessUnit: p.BusinessUnit, Confidence: 100, Status: "active",
 		FirstSeen: now, LastSeen: now, CreatedBy: actorID, UpdatedBy: actorID,
@@ -234,7 +254,7 @@ func (r *sqlcRepository) UpsertRootDomainAsset(ctx context.Context, p *Project, 
 	if err != nil {
 		return 0, mapWorkspaceErr(err)
 	}
-	a, err := r.q.GetAssetByKey(ctx, dbgen.GetAssetByKeyParams{ProjectID: p.ID, AssetKey: "domain:" + domain})
+	a, err := r.q.GetAssetByKey(ctx, dbgen.GetAssetByKeyParams{ProjectID: p.ID, AssetKey: assetKey})
 	if err != nil {
 		return 0, mapWorkspaceErr(err)
 	}
@@ -254,6 +274,12 @@ func (r *sqlcRepository) CreateDomainProfile(ctx context.Context, scope ActorSco
 		CreatedBy: in.ActorID, UpdatedBy: in.ActorID,
 	})
 	return mapWorkspaceErr(err)
+}
+
+func (r *sqlcRepository) CountVerifiedDomainOwnership(ctx context.Context, projectID uint64, domain string) (int64, error) {
+	return r.q.CountVerifiedDomainOwnership(ctx, dbgen.CountVerifiedDomainOwnershipParams{
+		ProjectID: projectID, Domain: domain,
+	})
 }
 
 func (r *sqlcRepository) GetDomainProfile(ctx context.Context, projectID, profileID uint64) (*DomainProfile, error) {

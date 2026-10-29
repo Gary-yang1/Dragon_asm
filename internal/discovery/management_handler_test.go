@@ -79,7 +79,33 @@ func TestManagementHandlerScopePermissionAndProjectMetadata(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/projects/7/scopes", nil))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Contains(t, w.Body.String(), `"targets":[{"id":1,"target_type":"domain","match_mode":"include","value":"example.com"}]`)
+	assert.Contains(t, w.Body.String(), `"targets":[{"id":1,"target_type":"domain","match_mode":"include","coverage_mode":"exact","value":"example.com"}]`)
+}
+
+func TestManagementHandlerExplainsScopeWindowTooLong(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC)
+	projects := &fakeDiscoveryProjectAccess{project: &project.Project{
+		ID: 5, TenantID: "tenant-a", OrgID: "org-a", Status: project.StatusActive,
+	}, role: asmcasbin.RoleProjectOwner}
+	router := managementRouter(t, NewService(newFakeRepo()), projects)
+
+	body := []byte(`{
+		"name":"long-lived scope",
+		"status":"active",
+		"authorized_by":"owner-1",
+		"valid_from":"` + now.Format(time.RFC3339) + `",
+		"valid_until":"` + now.Add(MaxScopeWindow+time.Hour).Format(time.RFC3339) + `",
+		"targets":[{"target_type":"domain","match_mode":"include","coverage_mode":"exact","value":"example.com"}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/5/scopes", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), `"code":"`+errCodeScopeWindowTooLong+`"`)
+	assert.Contains(t, w.Body.String(), `"message":"授权有效期最长为 365 天"`)
 }
 
 func TestManagementHandlerSecurityOpsCanReadButCannotWriteScope(t *testing.T) {

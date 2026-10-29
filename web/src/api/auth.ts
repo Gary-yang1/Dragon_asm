@@ -29,8 +29,9 @@ export function loginRequest(username: string, password: string) {
   return postJSON<LoginResponse>('/auth/login', { username, password });
 }
 
+// The server rotates both tokens (internal/auth/handler.go tokenResponse).
 export function refreshRequest(refreshToken: string) {
-  return postJSON<{ access_token: string }>('/auth/refresh', { refresh_token: refreshToken });
+  return postJSON<{ access_token: string; refresh_token?: string }>('/auth/refresh', { refresh_token: refreshToken });
 }
 
 export function permissionsRequest() {

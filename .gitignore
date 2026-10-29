@@ -9,6 +9,8 @@
 /CLAUDE.md
 /docs/
 /.claude/
+/.codex-pet-runs/
+/temp/
 
 # === 环境与密钥（绝不提交） ===
 .env
@@ -51,3 +53,12 @@ yarn-error.log*
 .DS_Store
 *.swp
 *~
+
+# Prebuilt external tool binaries. Tools are compiled from pinned upstream
+# sources during the image build instead — see engines/baiyan/TOOLS.md.
+/engines/baiyan/baiyan-engine
+engines/baiyan/lib/subfinder/subfinder
+engines/baiyan/lib/dirscan/dirscan
+engines/baiyan/lib/ob/observer_ward
+engines/baiyan/lib/masscan/masscan
+engines/baiyan/lib/masscan/masscan-darwin-amd64

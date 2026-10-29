@@ -26,13 +26,14 @@ func TestCreateScopeRollbackOnTargetInsertFailure(t *testing.T) {
 		WithArgs(
 			"t1", "o1", uint64(10),
 			"policy", StatusInactive, "alice", now.Add(-time.Hour), now,
+			false,
 			"alice", "alice",
 		).
 		WillReturnResult(sqlmock.NewResult(7, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scope_target")).
 		WithArgs(
 			"t1", "o1", uint64(10), uint64(7),
-			TargetTypeDomain, MatchModeInclude, "example.com", "alice", "alice",
+			TargetTypeDomain, MatchModeInclude, CoverageModeExact, "example.com", "alice", "alice", []byte(nil),
 		).
 		WillReturnError(sql.ErrConnDone)
 	mock.ExpectRollback()
@@ -70,16 +71,17 @@ func TestCreateScopeRollbackOnAuditFailure(t *testing.T) {
 		WithArgs(
 			"t1", "o1", uint64(11),
 			"policy", StatusActive, "alice", now.Add(-time.Hour), now,
+			false,
 			"alice", "alice",
 		).
 		WillReturnResult(sqlmock.NewResult(8, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scope_target")).
 		WithArgs(
 			"t1", "o1", uint64(11), uint64(8),
-			TargetTypeDomain, MatchModeInclude, "example.com", "alice", "alice",
+			TargetTypeDomain, MatchModeInclude, CoverageModeExact, "example.com", "alice", "alice", []byte(nil),
 		).
 		WillReturnResult(sqlmock.NewResult(9, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at, is_default, default_marker FROM scope")).
 		WithArgs(uint64(8), uint64(11)).
 		WillReturnRows(scopeRows(now, 8, 11, "policy"))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_log")).WillReturnError(auditErr)
@@ -114,7 +116,8 @@ func TestUpdateScopeRollbackOnTargetInsertFailure(t *testing.T) {
 	newName := "new"
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM project WHERE id = ? FOR UPDATE")).WithArgs(uint64(12)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(12))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at, is_default, default_marker FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
 		WithArgs(uint64(12), uint64(12)).
 		WillReturnRows(scopeRows(now, 12, 12, "old"))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE scope_target")).
@@ -126,12 +129,12 @@ func TestUpdateScopeRollbackOnTargetInsertFailure(t *testing.T) {
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE scope")).
-		WithArgs("new", StatusActive, "owner-ok", now.Add(-time.Hour), now.Add(time.Hour), "alice", uint64(12), uint64(12)).
+		WithArgs("new", StatusActive, "owner-ok", now.Add(-time.Hour), now.Add(time.Hour), false, "alice", uint64(12), uint64(12)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scope_target")).
 		WithArgs(
 			"t1", "o1", uint64(12), uint64(12),
-			TargetTypeIP, MatchModeInclude, "1.1.1.1", "alice", "alice",
+			TargetTypeIP, MatchModeInclude, CoverageModeExact, "1.1.1.1", "alice", "alice", []byte(nil),
 		).
 		WillReturnError(sql.ErrConnDone)
 	mock.ExpectRollback()
@@ -166,13 +169,14 @@ func TestDeactivateScopeRollbackOnAuditFailure(t *testing.T) {
 	auditErr := errors.New("audit sink failure")
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM project WHERE id = ? FOR UPDATE")).WithArgs(uint64(13)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(13))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at, is_default, default_marker FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
 		WithArgs(uint64(13), uint64(13)).
 		WillReturnRows(scopeRows(now, 13, 13, "deact"))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE scope")).
-		WithArgs(StatusInactive, "alice", sqlmock.AnyArg(), uint64(13), uint64(13)).
+		WithArgs("alice", sqlmock.AnyArg(), uint64(13), uint64(13)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at, is_default, default_marker FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
 		WithArgs(uint64(13), uint64(13)).
 		WillReturnRows(scopeRows(now, 13, 13, "deact"))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_log")).WillReturnError(auditErr)
@@ -198,7 +202,7 @@ func TestCreateTaskTemplateRollbackOnAuditFailure(t *testing.T) {
 	auditErr := errors.New("audit sink failure")
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at, is_default, default_marker FROM scope WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'")).
 		WithArgs(uint64(160), uint64(16)).
 		WillReturnRows(scopeRows(now, 160, 16, "scope"))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO task_template")).
@@ -257,10 +261,10 @@ func TestCreateTaskRunRollbackOnAuditFailure(t *testing.T) {
 			TaskTypeDNS, TaskRunStatusPending, int32(0),
 			int32(30), int32(20), int32(10), int32(3), int32(0),
 			"", databaseUnsetTime, databaseUnsetTime, uint64(0), "",
-			databaseUnsetTime, databaseUnsetTime, "", "alice", "alice",
+			databaseUnsetTime, databaseUnsetTime, "", "alice", "alice", "", "",
 		).
 		WillReturnResult(sqlmock.NewResult(int64(17000), 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at, approved_by, approval_reason FROM task_run")).
 		WithArgs(uint64(17000), uint64(17)).
 		WillReturnRows(taskRunRows(now, 17000, 17, 1700, 170, TaskTypeDNS, TaskRunStatusPending))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_log")).WillReturnError(auditErr)
@@ -285,7 +289,7 @@ func TestHandleCallbackRollsBackInboxWhenRunUpdateFails(t *testing.T) {
 	now := time.Now().UTC()
 	raw := validCallbackRaw(t, 77, 1, CallbackPhaseProgress, TaskRunStatusRunning, 0)
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at, approved_by, approval_reason FROM task_run")).
 		WithArgs(uint64(77), uint64(6)).
 		WillReturnRows(taskRunRows(now, 77, 6, 10, 11, TaskTypePassiveIntel, TaskRunStatusRunning))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version")).

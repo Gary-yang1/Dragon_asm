@@ -8,21 +8,48 @@ package dbgen
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"time"
 )
+
+const clearDefaultScopes = `-- name: ClearDefaultScopes :exec
+UPDATE scope
+SET is_default = FALSE,
+    updated_by = ?,
+    updated_at = ?
+WHERE project_id = ?
+  AND id <> ?
+  AND is_default = TRUE
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type ClearDefaultScopesParams struct {
+	UpdatedBy string    `db:"updated_by" json:"updated_by"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+	ProjectID uint64    `db:"project_id" json:"project_id"`
+	ID        uint64    `db:"id" json:"id"`
+}
+
+func (q *Queries) ClearDefaultScopes(ctx context.Context, arg ClearDefaultScopesParams) error {
+	_, err := q.db.ExecContext(ctx, clearDefaultScopes,
+		arg.UpdatedBy,
+		arg.UpdatedAt,
+		arg.ProjectID,
+		arg.ID,
+	)
+	return err
+}
 
 const createScope = `-- name: CreateScope :execresult
 
 INSERT INTO scope (
     tenant_id, org_id, project_id,
     name, status, authorized_by,
-    valid_from, valid_until,
+    valid_from, valid_until, is_default,
     created_by, updated_by
 ) VALUES (
     ?, ?, ?,
     ?, ?, ?,
-    ?, ?,
+    ?, ?, ?,
     ?, ?
 )
 `
@@ -36,6 +63,7 @@ type CreateScopeParams struct {
 	AuthorizedBy string    `db:"authorized_by" json:"authorized_by"`
 	ValidFrom    time.Time `db:"valid_from" json:"valid_from"`
 	ValidUntil   time.Time `db:"valid_until" json:"valid_until"`
+	IsDefault    bool      `db:"is_default" json:"is_default"`
 	CreatedBy    string    `db:"created_by" json:"created_by"`
 	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
 }
@@ -53,6 +81,7 @@ func (q *Queries) CreateScope(ctx context.Context, arg CreateScopeParams) (sql.R
 		arg.AuthorizedBy,
 		arg.ValidFrom,
 		arg.ValidUntil,
+		arg.IsDefault,
 		arg.CreatedBy,
 		arg.UpdatedBy,
 	)
@@ -63,12 +92,14 @@ INSERT INTO task_run (
     tenant_id, org_id, project_id, template_id, scope_id, task_type,
     status, progress, timeout_seconds, rate_limit, concurrency, retry_limit,
     attempt, engine_job_id, dispatched_at, last_callback_at, result_count,
-    callback_secret_ref, started_at, finished_at, error_summary, created_by, updated_by
+    callback_secret_ref, started_at, finished_at, error_summary, created_by, updated_by,
+    approved_by, approval_reason
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?,
+    ?, ?
 )
 `
 
@@ -96,6 +127,8 @@ type CreateTaskRunParams struct {
 	ErrorSummary      string    `db:"error_summary" json:"error_summary"`
 	CreatedBy         string    `db:"created_by" json:"created_by"`
 	UpdatedBy         string    `db:"updated_by" json:"updated_by"`
+	ApprovedBy        string    `db:"approved_by" json:"approved_by"`
+	ApprovalReason    string    `db:"approval_reason" json:"approval_reason"`
 }
 
 // Task run queries.
@@ -124,6 +157,8 @@ func (q *Queries) CreateTaskRun(ctx context.Context, arg CreateTaskRunParams) (s
 		arg.ErrorSummary,
 		arg.CreatedBy,
 		arg.UpdatedBy,
+		arg.ApprovedBy,
+		arg.ApprovalReason,
 	)
 }
 
@@ -144,21 +179,21 @@ INSERT INTO task_template (
 `
 
 type CreateTaskTemplateParams struct {
-	TenantID       string          `db:"tenant_id" json:"tenant_id"`
-	OrgID          string          `db:"org_id" json:"org_id"`
-	ProjectID      uint64          `db:"project_id" json:"project_id"`
-	ScopeID        uint64          `db:"scope_id" json:"scope_id"`
-	Name           string          `db:"name" json:"name"`
-	TaskType       string          `db:"task_type" json:"task_type"`
-	Config         json.RawMessage `db:"config" json:"config"`
-	Schedule       string          `db:"schedule" json:"schedule"`
-	Enabled        bool            `db:"enabled" json:"enabled"`
-	TimeoutSeconds int32           `db:"timeout_seconds" json:"timeout_seconds"`
-	RateLimit      int32           `db:"rate_limit" json:"rate_limit"`
-	Concurrency    int32           `db:"concurrency" json:"concurrency"`
-	RetryLimit     int32           `db:"retry_limit" json:"retry_limit"`
-	CreatedBy      string          `db:"created_by" json:"created_by"`
-	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
+	TenantID       string `db:"tenant_id" json:"tenant_id"`
+	OrgID          string `db:"org_id" json:"org_id"`
+	ProjectID      uint64 `db:"project_id" json:"project_id"`
+	ScopeID        uint64 `db:"scope_id" json:"scope_id"`
+	Name           string `db:"name" json:"name"`
+	TaskType       string `db:"task_type" json:"task_type"`
+	Config         []byte `db:"config" json:"config"`
+	Schedule       string `db:"schedule" json:"schedule"`
+	Enabled        bool   `db:"enabled" json:"enabled"`
+	TimeoutSeconds int32  `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit      int32  `db:"rate_limit" json:"rate_limit"`
+	Concurrency    int32  `db:"concurrency" json:"concurrency"`
+	RetryLimit     int32  `db:"retry_limit" json:"retry_limit"`
+	CreatedBy      string `db:"created_by" json:"created_by"`
+	UpdatedBy      string `db:"updated_by" json:"updated_by"`
 }
 
 // Task template queries.
@@ -182,6 +217,32 @@ func (q *Queries) CreateTaskTemplate(ctx context.Context, arg CreateTaskTemplate
 	)
 }
 
+const deactivateScope = `-- name: DeactivateScope :exec
+UPDATE scope
+SET status = 'inactive',
+    is_default = FALSE,
+    updated_by = ?,
+    updated_at = ?
+WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+type DeactivateScopeParams struct {
+	UpdatedBy string    `db:"updated_by" json:"updated_by"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+	ID        uint64    `db:"id" json:"id"`
+	ProjectID uint64    `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) DeactivateScope(ctx context.Context, arg DeactivateScopeParams) error {
+	_, err := q.db.ExecContext(ctx, deactivateScope,
+		arg.UpdatedBy,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.ProjectID,
+	)
+	return err
+}
+
 const getDiscoveryCallback = `-- name: GetDiscoveryCallback :one
 SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
        phase, status, observed_at, payload_hash, payload_json, payload_size,
@@ -199,30 +260,30 @@ type GetDiscoveryCallbackParams struct {
 }
 
 type GetDiscoveryCallbackRow struct {
-	ID            uint64          `db:"id" json:"id"`
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	RunID         uint64          `db:"run_id" json:"run_id"`
-	Seq           uint64          `db:"seq" json:"seq"`
-	SchemaVersion string          `db:"schema_version" json:"schema_version"`
-	Phase         string          `db:"phase" json:"phase"`
-	Status        string          `db:"status" json:"status"`
-	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
-	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
-	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
-	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
-	ResultCount   uint64          `db:"result_count" json:"result_count"`
-	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
-	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
-	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
-	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
-	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
-	IngestError   string          `db:"ingest_error" json:"ingest_error"`
-	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+	ID            uint64       `db:"id" json:"id"`
+	TenantID      string       `db:"tenant_id" json:"tenant_id"`
+	OrgID         string       `db:"org_id" json:"org_id"`
+	ProjectID     uint64       `db:"project_id" json:"project_id"`
+	RunID         uint64       `db:"run_id" json:"run_id"`
+	Seq           uint64       `db:"seq" json:"seq"`
+	SchemaVersion string       `db:"schema_version" json:"schema_version"`
+	Phase         string       `db:"phase" json:"phase"`
+	Status        string       `db:"status" json:"status"`
+	ObservedAt    sql.NullTime `db:"observed_at" json:"observed_at"`
+	PayloadHash   string       `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   []byte       `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32       `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64       `db:"result_count" json:"result_count"`
+	ErrorSummary  string       `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time    `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time    `db:"enqueued_at" json:"enqueued_at"`
+	IngestStatus  string       `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32       `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string       `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time    `db:"processed_at" json:"processed_at"`
+	CreatedAt     time.Time    `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time    `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time    `db:"deleted_at" json:"deleted_at"`
 }
 
 func (q *Queries) GetDiscoveryCallback(ctx context.Context, arg GetDiscoveryCallbackParams) (GetDiscoveryCallbackRow, error) {
@@ -300,7 +361,7 @@ func (q *Queries) GetDiscoveryObservation(ctx context.Context, arg GetDiscoveryO
 }
 
 const getScopeByID = `-- name: GetScopeByID :one
-SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope
+SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at, is_default, default_marker FROM scope
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
@@ -327,12 +388,14 @@ func (q *Queries) GetScopeByID(ctx context.Context, arg GetScopeByIDParams) (Sco
 		&i.CreatedBy,
 		&i.UpdatedBy,
 		&i.DeletedAt,
+		&i.IsDefault,
+		&i.DefaultMarker,
 	)
 	return i, err
 }
 
 const getTaskRunByID = `-- name: GetTaskRunByID :one
-SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run
+SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at, approved_by, approval_reason FROM task_run
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
@@ -372,6 +435,57 @@ func (q *Queries) GetTaskRunByID(ctx context.Context, arg GetTaskRunByIDParams) 
 		&i.CreatedBy,
 		&i.UpdatedBy,
 		&i.DeletedAt,
+		&i.ApprovedBy,
+		&i.ApprovalReason,
+	)
+	return i, err
+}
+
+const getTaskRunForUpdate = `-- name: GetTaskRunForUpdate :one
+SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at, approved_by, approval_reason FROM task_run
+WHERE id = ? AND project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+FOR UPDATE
+`
+
+type GetTaskRunForUpdateParams struct {
+	ID        uint64 `db:"id" json:"id"`
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+}
+
+func (q *Queries) GetTaskRunForUpdate(ctx context.Context, arg GetTaskRunForUpdateParams) (TaskRun, error) {
+	row := q.db.QueryRowContext(ctx, getTaskRunForUpdate, arg.ID, arg.ProjectID)
+	var i TaskRun
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.TemplateID,
+		&i.ScopeID,
+		&i.TaskType,
+		&i.Status,
+		&i.Progress,
+		&i.TimeoutSeconds,
+		&i.RateLimit,
+		&i.Concurrency,
+		&i.RetryLimit,
+		&i.Attempt,
+		&i.EngineJobID,
+		&i.DispatchedAt,
+		&i.LastCallbackAt,
+		&i.ResultCount,
+		&i.CallbackSecretRef,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.ErrorSummary,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CreatedBy,
+		&i.UpdatedBy,
+		&i.DeletedAt,
+		&i.ApprovedBy,
+		&i.ApprovalReason,
 	)
 	return i, err
 }
@@ -453,22 +567,22 @@ INSERT IGNORE INTO discovery_callback (
 `
 
 type InsertDiscoveryCallbackParams struct {
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	RunID         uint64          `db:"run_id" json:"run_id"`
-	Seq           uint64          `db:"seq" json:"seq"`
-	SchemaVersion string          `db:"schema_version" json:"schema_version"`
-	Phase         string          `db:"phase" json:"phase"`
-	Status        string          `db:"status" json:"status"`
-	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
-	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
-	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
-	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
-	ResultCount   uint64          `db:"result_count" json:"result_count"`
-	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
-	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
-	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
+	TenantID      string       `db:"tenant_id" json:"tenant_id"`
+	OrgID         string       `db:"org_id" json:"org_id"`
+	ProjectID     uint64       `db:"project_id" json:"project_id"`
+	RunID         uint64       `db:"run_id" json:"run_id"`
+	Seq           uint64       `db:"seq" json:"seq"`
+	SchemaVersion string       `db:"schema_version" json:"schema_version"`
+	Phase         string       `db:"phase" json:"phase"`
+	Status        string       `db:"status" json:"status"`
+	ObservedAt    sql.NullTime `db:"observed_at" json:"observed_at"`
+	PayloadHash   string       `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   []byte       `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32       `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64       `db:"result_count" json:"result_count"`
+	ErrorSummary  string       `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time    `db:"received_at" json:"received_at"`
+	IngestStatus  string       `db:"ingest_status" json:"ingest_status"`
 }
 
 // Discovery callback queries.
@@ -496,25 +610,27 @@ func (q *Queries) InsertDiscoveryCallback(ctx context.Context, arg InsertDiscove
 const insertScopeTarget = `-- name: InsertScopeTarget :exec
 INSERT INTO scope_target (
     tenant_id, org_id, project_id,
-    scope_id, target_type, match_mode, target_value,
-    created_by, updated_by
+    scope_id, target_type, match_mode, coverage_mode, target_value,
+    created_by, updated_by, url_rule
 ) VALUES (
     ?, ?, ?,
-    ?, ?, ?, ?,
-    ?, ?
+    ?, ?, ?, ?, ?,
+    ?, ?, ?
 )
 `
 
 type InsertScopeTargetParams struct {
-	TenantID    string `db:"tenant_id" json:"tenant_id"`
-	OrgID       string `db:"org_id" json:"org_id"`
-	ProjectID   uint64 `db:"project_id" json:"project_id"`
-	ScopeID     uint64 `db:"scope_id" json:"scope_id"`
-	TargetType  string `db:"target_type" json:"target_type"`
-	MatchMode   string `db:"match_mode" json:"match_mode"`
-	TargetValue string `db:"target_value" json:"target_value"`
-	CreatedBy   string `db:"created_by" json:"created_by"`
-	UpdatedBy   string `db:"updated_by" json:"updated_by"`
+	TenantID     string `db:"tenant_id" json:"tenant_id"`
+	OrgID        string `db:"org_id" json:"org_id"`
+	ProjectID    uint64 `db:"project_id" json:"project_id"`
+	ScopeID      uint64 `db:"scope_id" json:"scope_id"`
+	TargetType   string `db:"target_type" json:"target_type"`
+	MatchMode    string `db:"match_mode" json:"match_mode"`
+	CoverageMode string `db:"coverage_mode" json:"coverage_mode"`
+	TargetValue  string `db:"target_value" json:"target_value"`
+	CreatedBy    string `db:"created_by" json:"created_by"`
+	UpdatedBy    string `db:"updated_by" json:"updated_by"`
+	UrlRule      []byte `db:"url_rule" json:"url_rule"`
 }
 
 func (q *Queries) InsertScopeTarget(ctx context.Context, arg InsertScopeTargetParams) error {
@@ -525,9 +641,11 @@ func (q *Queries) InsertScopeTarget(ctx context.Context, arg InsertScopeTargetPa
 		arg.ScopeID,
 		arg.TargetType,
 		arg.MatchMode,
+		arg.CoverageMode,
 		arg.TargetValue,
 		arg.CreatedBy,
 		arg.UpdatedBy,
+		arg.UrlRule,
 	)
 	return err
 }
@@ -587,30 +705,30 @@ type ListDiscoveryCallbacksForRunForUpdateParams struct {
 }
 
 type ListDiscoveryCallbacksForRunForUpdateRow struct {
-	ID            uint64          `db:"id" json:"id"`
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	RunID         uint64          `db:"run_id" json:"run_id"`
-	Seq           uint64          `db:"seq" json:"seq"`
-	SchemaVersion string          `db:"schema_version" json:"schema_version"`
-	Phase         string          `db:"phase" json:"phase"`
-	Status        string          `db:"status" json:"status"`
-	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
-	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
-	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
-	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
-	ResultCount   uint64          `db:"result_count" json:"result_count"`
-	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
-	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
-	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
-	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
-	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
-	IngestError   string          `db:"ingest_error" json:"ingest_error"`
-	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+	ID            uint64       `db:"id" json:"id"`
+	TenantID      string       `db:"tenant_id" json:"tenant_id"`
+	OrgID         string       `db:"org_id" json:"org_id"`
+	ProjectID     uint64       `db:"project_id" json:"project_id"`
+	RunID         uint64       `db:"run_id" json:"run_id"`
+	Seq           uint64       `db:"seq" json:"seq"`
+	SchemaVersion string       `db:"schema_version" json:"schema_version"`
+	Phase         string       `db:"phase" json:"phase"`
+	Status        string       `db:"status" json:"status"`
+	ObservedAt    sql.NullTime `db:"observed_at" json:"observed_at"`
+	PayloadHash   string       `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   []byte       `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32       `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64       `db:"result_count" json:"result_count"`
+	ErrorSummary  string       `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time    `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time    `db:"enqueued_at" json:"enqueued_at"`
+	IngestStatus  string       `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32       `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string       `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time    `db:"processed_at" json:"processed_at"`
+	CreatedAt     time.Time    `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time    `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time    `db:"deleted_at" json:"deleted_at"`
 }
 
 func (q *Queries) ListDiscoveryCallbacksForRunForUpdate(ctx context.Context, arg ListDiscoveryCallbacksForRunForUpdateParams) ([]ListDiscoveryCallbacksForRunForUpdateRow, error) {
@@ -903,6 +1021,118 @@ func (q *Queries) ListDiscoveryObservationsByRunSeq(ctx context.Context, arg Lis
 	return items, nil
 }
 
+const listInheritanceObservations = `-- name: ListInheritanceObservations :many
+SELECT id, tenant_id, org_id, project_id, run_id, seq, kind, natural_key, client_ref, provider, capability, observed_at, confidence, active_probe, evidence_hash, evidence_ref, normalized_json, normalized_size, ingest_status, ingest_error, created_at, updated_at, deleted_at FROM discovery_observation
+WHERE project_id = ? AND run_id = ? AND id > ?
+  AND kind = 'asset' AND ingest_status = 'materialized'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id LIMIT ?
+`
+
+type ListInheritanceObservationsParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+	ID        uint64 `db:"id" json:"id"`
+	Limit     int32  `db:"limit" json:"limit"`
+}
+
+func (q *Queries) ListInheritanceObservations(ctx context.Context, arg ListInheritanceObservationsParams) ([]DiscoveryObservation, error) {
+	rows, err := q.db.QueryContext(ctx, listInheritanceObservations,
+		arg.ProjectID,
+		arg.RunID,
+		arg.ID,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DiscoveryObservation{}
+	for rows.Next() {
+		var i DiscoveryObservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.OrgID,
+			&i.ProjectID,
+			&i.RunID,
+			&i.Seq,
+			&i.Kind,
+			&i.NaturalKey,
+			&i.ClientRef,
+			&i.Provider,
+			&i.Capability,
+			&i.ObservedAt,
+			&i.Confidence,
+			&i.ActiveProbe,
+			&i.EvidenceHash,
+			&i.EvidenceRef,
+			&i.NormalizedJson,
+			&i.NormalizedSize,
+			&i.IngestStatus,
+			&i.IngestError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingDiscoveryCallbackRefs = `-- name: ListPendingDiscoveryCallbackRefs :many
+SELECT project_id, run_id, seq
+FROM discovery_callback
+WHERE (
+      ingest_status = 'pending'
+      OR (ingest_status = 'failed' AND ingest_attempt < 10)
+      OR (ingest_status = 'processing' AND ingest_attempt < 10 AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE))
+  )
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY received_at ASC, id ASC
+LIMIT ?
+`
+
+type ListPendingDiscoveryCallbackRefsRow struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	RunID     uint64 `db:"run_id" json:"run_id"`
+	Seq       uint64 `db:"seq" json:"seq"`
+}
+
+// The recovery scan only needs to re-enqueue work, and the queue payload carries
+// just these three identifiers. Selecting payload_json here read up to 100 rows of
+// 4 MiB each (~400 MB) into the worker on every 30s tick for no reason.
+func (q *Queries) ListPendingDiscoveryCallbackRefs(ctx context.Context, limit int32) ([]ListPendingDiscoveryCallbackRefsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingDiscoveryCallbackRefs, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingDiscoveryCallbackRefsRow{}
+	for rows.Next() {
+		var i ListPendingDiscoveryCallbackRefsRow
+		if err := rows.Scan(&i.ProjectID, &i.RunID, &i.Seq); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingDiscoveryCallbacks = `-- name: ListPendingDiscoveryCallbacks :many
 SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
        phase, status, observed_at, payload_hash, payload_json, payload_size,
@@ -920,30 +1150,30 @@ LIMIT ?
 `
 
 type ListPendingDiscoveryCallbacksRow struct {
-	ID            uint64          `db:"id" json:"id"`
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	RunID         uint64          `db:"run_id" json:"run_id"`
-	Seq           uint64          `db:"seq" json:"seq"`
-	SchemaVersion string          `db:"schema_version" json:"schema_version"`
-	Phase         string          `db:"phase" json:"phase"`
-	Status        string          `db:"status" json:"status"`
-	ObservedAt    sql.NullTime    `db:"observed_at" json:"observed_at"`
-	PayloadHash   string          `db:"payload_hash" json:"payload_hash"`
-	PayloadJson   json.RawMessage `db:"payload_json" json:"payload_json"`
-	PayloadSize   uint32          `db:"payload_size" json:"payload_size"`
-	ResultCount   uint64          `db:"result_count" json:"result_count"`
-	ErrorSummary  string          `db:"error_summary" json:"error_summary"`
-	ReceivedAt    time.Time       `db:"received_at" json:"received_at"`
-	EnqueuedAt    time.Time       `db:"enqueued_at" json:"enqueued_at"`
-	IngestStatus  string          `db:"ingest_status" json:"ingest_status"`
-	IngestAttempt uint32          `db:"ingest_attempt" json:"ingest_attempt"`
-	IngestError   string          `db:"ingest_error" json:"ingest_error"`
-	ProcessedAt   time.Time       `db:"processed_at" json:"processed_at"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	DeletedAt     time.Time       `db:"deleted_at" json:"deleted_at"`
+	ID            uint64       `db:"id" json:"id"`
+	TenantID      string       `db:"tenant_id" json:"tenant_id"`
+	OrgID         string       `db:"org_id" json:"org_id"`
+	ProjectID     uint64       `db:"project_id" json:"project_id"`
+	RunID         uint64       `db:"run_id" json:"run_id"`
+	Seq           uint64       `db:"seq" json:"seq"`
+	SchemaVersion string       `db:"schema_version" json:"schema_version"`
+	Phase         string       `db:"phase" json:"phase"`
+	Status        string       `db:"status" json:"status"`
+	ObservedAt    sql.NullTime `db:"observed_at" json:"observed_at"`
+	PayloadHash   string       `db:"payload_hash" json:"payload_hash"`
+	PayloadJson   []byte       `db:"payload_json" json:"payload_json"`
+	PayloadSize   uint32       `db:"payload_size" json:"payload_size"`
+	ResultCount   uint64       `db:"result_count" json:"result_count"`
+	ErrorSummary  string       `db:"error_summary" json:"error_summary"`
+	ReceivedAt    time.Time    `db:"received_at" json:"received_at"`
+	EnqueuedAt    time.Time    `db:"enqueued_at" json:"enqueued_at"`
+	IngestStatus  string       `db:"ingest_status" json:"ingest_status"`
+	IngestAttempt uint32       `db:"ingest_attempt" json:"ingest_attempt"`
+	IngestError   string       `db:"ingest_error" json:"ingest_error"`
+	ProcessedAt   time.Time    `db:"processed_at" json:"processed_at"`
+	CreatedAt     time.Time    `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time    `db:"updated_at" json:"updated_at"`
+	DeletedAt     time.Time    `db:"deleted_at" json:"deleted_at"`
 }
 
 func (q *Queries) ListPendingDiscoveryCallbacks(ctx context.Context, limit int32) ([]ListPendingDiscoveryCallbacksRow, error) {
@@ -995,7 +1225,7 @@ func (q *Queries) ListPendingDiscoveryCallbacks(ctx context.Context, limit int32
 }
 
 const listRunningTaskRunsForReconcile = `-- name: ListRunningTaskRunsForReconcile :many
-SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run
+SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at, approved_by, approval_reason FROM task_run
 WHERE status = 'running'
   AND engine_job_id <> ''
   AND dispatched_at <> '1970-01-01 00:00:00.000'
@@ -1041,6 +1271,8 @@ func (q *Queries) ListRunningTaskRunsForReconcile(ctx context.Context, limit int
 			&i.CreatedBy,
 			&i.UpdatedBy,
 			&i.DeletedAt,
+			&i.ApprovedBy,
+			&i.ApprovalReason,
 		); err != nil {
 			return nil, err
 		}
@@ -1056,7 +1288,7 @@ func (q *Queries) ListRunningTaskRunsForReconcile(ctx context.Context, limit int
 }
 
 const listScopeTargetsByScope = `-- name: ListScopeTargetsByScope :many
-SELECT id, tenant_id, org_id, project_id, scope_id, target_type, match_mode, target_value, created_at, updated_at, created_by, updated_by, deleted_at FROM scope_target
+SELECT id, tenant_id, org_id, project_id, scope_id, target_type, match_mode, target_value, created_at, updated_at, created_by, updated_by, deleted_at, coverage_mode, url_rule FROM scope_target
 WHERE scope_id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 `
@@ -1089,6 +1321,8 @@ func (q *Queries) ListScopeTargetsByScope(ctx context.Context, arg ListScopeTarg
 			&i.CreatedBy,
 			&i.UpdatedBy,
 			&i.DeletedAt,
+			&i.CoverageMode,
+			&i.UrlRule,
 		); err != nil {
 			return nil, err
 		}
@@ -1104,7 +1338,7 @@ func (q *Queries) ListScopeTargetsByScope(ctx context.Context, arg ListScopeTarg
 }
 
 const listScopesByProject = `-- name: ListScopesByProject :many
-SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at FROM scope
+SELECT id, tenant_id, org_id, project_id, name, status, authorized_by, valid_from, valid_until, created_at, updated_at, created_by, updated_by, deleted_at, is_default, default_marker FROM scope
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY id
 `
@@ -1133,6 +1367,8 @@ func (q *Queries) ListScopesByProject(ctx context.Context, projectID uint64) ([]
 			&i.CreatedBy,
 			&i.UpdatedBy,
 			&i.DeletedAt,
+			&i.IsDefault,
+			&i.DefaultMarker,
 		); err != nil {
 			return nil, err
 		}
@@ -1148,13 +1384,23 @@ func (q *Queries) ListScopesByProject(ctx context.Context, projectID uint64) ([]
 }
 
 const listTaskRunsByProject = `-- name: ListTaskRunsByProject :many
-SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run
+SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at, approved_by, approval_reason FROM task_run
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
-ORDER BY id
+ORDER BY id DESC
+LIMIT ?
 `
 
-func (q *Queries) ListTaskRunsByProject(ctx context.Context, projectID uint64) ([]TaskRun, error) {
-	rows, err := q.db.QueryContext(ctx, listTaskRunsByProject, projectID)
+type ListTaskRunsByProjectParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	Limit     int32  `db:"limit" json:"limit"`
+}
+
+// Bounded to the most recent runs. task_run grows by one row per scheduled
+// execution forever, and this feeds an API endpoint that sorts and paginates in
+// memory, so an unbounded SELECT meant a project with cron templates loaded tens
+// of thousands of rows on every page view.
+func (q *Queries) ListTaskRunsByProject(ctx context.Context, arg ListTaskRunsByProjectParams) ([]TaskRun, error) {
+	rows, err := q.db.QueryContext(ctx, listTaskRunsByProject, arg.ProjectID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1190,6 +1436,8 @@ func (q *Queries) ListTaskRunsByProject(ctx context.Context, projectID uint64) (
 			&i.CreatedBy,
 			&i.UpdatedBy,
 			&i.DeletedAt,
+			&i.ApprovedBy,
+			&i.ApprovalReason,
 		); err != nil {
 			return nil, err
 		}
@@ -1251,6 +1499,61 @@ func (q *Queries) ListTaskTemplatesByProject(ctx context.Context, projectID uint
 		return nil, err
 	}
 	return items, nil
+}
+
+const listWebBlueprintAssets = `-- name: ListWebBlueprintAssets :many
+SELECT id, asset_type, value FROM asset
+WHERE project_id = ? AND id > ? AND status = 'active'
+  AND asset_type IN ('domain', 'subdomain', 'web')
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id LIMIT 1000
+`
+
+type ListWebBlueprintAssetsParams struct {
+	ProjectID uint64 `db:"project_id" json:"project_id"`
+	AfterID   uint64 `db:"after_id" json:"after_id"`
+}
+
+type ListWebBlueprintAssetsRow struct {
+	ID        uint64 `db:"id" json:"id"`
+	AssetType string `db:"asset_type" json:"asset_type"`
+	Value     string `db:"value" json:"value"`
+}
+
+func (q *Queries) ListWebBlueprintAssets(ctx context.Context, arg ListWebBlueprintAssetsParams) ([]ListWebBlueprintAssetsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listWebBlueprintAssets, arg.ProjectID, arg.AfterID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListWebBlueprintAssetsRow{}
+	for rows.Next() {
+		var i ListWebBlueprintAssetsRow
+		if err := rows.Scan(&i.ID, &i.AssetType, &i.Value); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockProjectForScopeDefault = `-- name: LockProjectForScopeDefault :one
+SELECT id FROM project
+WHERE id = ?
+FOR UPDATE
+`
+
+func (q *Queries) LockProjectForScopeDefault(ctx context.Context, id uint64) (uint64, error) {
+	row := q.db.QueryRowContext(ctx, lockProjectForScopeDefault, id)
+	var id_2 uint64
+	err := row.Scan(&id_2)
+	return id_2, err
 }
 
 const markDiscoveryCallbackEnqueued = `-- name: MarkDiscoveryCallbackEnqueued :exec
@@ -1717,6 +2020,7 @@ SET name = ?,
     authorized_by = ?,
     valid_from = ?,
     valid_until = ?,
+    is_default = ?,
     updated_by = ?
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
@@ -1727,6 +2031,7 @@ type UpdateScopeParams struct {
 	AuthorizedBy string    `db:"authorized_by" json:"authorized_by"`
 	ValidFrom    time.Time `db:"valid_from" json:"valid_from"`
 	ValidUntil   time.Time `db:"valid_until" json:"valid_until"`
+	IsDefault    bool      `db:"is_default" json:"is_default"`
 	UpdatedBy    string    `db:"updated_by" json:"updated_by"`
 	ID           uint64    `db:"id" json:"id"`
 	ProjectID    uint64    `db:"project_id" json:"project_id"`
@@ -1739,34 +2044,8 @@ func (q *Queries) UpdateScope(ctx context.Context, arg UpdateScopeParams) error 
 		arg.AuthorizedBy,
 		arg.ValidFrom,
 		arg.ValidUntil,
+		arg.IsDefault,
 		arg.UpdatedBy,
-		arg.ID,
-		arg.ProjectID,
-	)
-	return err
-}
-
-const updateScopeStatus = `-- name: UpdateScopeStatus :exec
-UPDATE scope
-SET status = ?,
-    updated_by = ?,
-    updated_at = ?
-WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
-`
-
-type UpdateScopeStatusParams struct {
-	Status    string    `db:"status" json:"status"`
-	UpdatedBy string    `db:"updated_by" json:"updated_by"`
-	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
-	ID        uint64    `db:"id" json:"id"`
-	ProjectID uint64    `db:"project_id" json:"project_id"`
-}
-
-func (q *Queries) UpdateScopeStatus(ctx context.Context, arg UpdateScopeStatusParams) error {
-	_, err := q.db.ExecContext(ctx, updateScopeStatus,
-		arg.Status,
-		arg.UpdatedBy,
-		arg.UpdatedAt,
 		arg.ID,
 		arg.ProjectID,
 	)
@@ -1788,17 +2067,17 @@ WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
 `
 
 type UpdateTaskTemplateParams struct {
-	Name           string          `db:"name" json:"name"`
-	TaskType       string          `db:"task_type" json:"task_type"`
-	Config         json.RawMessage `db:"config" json:"config"`
-	Schedule       string          `db:"schedule" json:"schedule"`
-	TimeoutSeconds int32           `db:"timeout_seconds" json:"timeout_seconds"`
-	RateLimit      int32           `db:"rate_limit" json:"rate_limit"`
-	Concurrency    int32           `db:"concurrency" json:"concurrency"`
-	RetryLimit     int32           `db:"retry_limit" json:"retry_limit"`
-	UpdatedBy      string          `db:"updated_by" json:"updated_by"`
-	ID             uint64          `db:"id" json:"id"`
-	ProjectID      uint64          `db:"project_id" json:"project_id"`
+	Name           string `db:"name" json:"name"`
+	TaskType       string `db:"task_type" json:"task_type"`
+	Config         []byte `db:"config" json:"config"`
+	Schedule       string `db:"schedule" json:"schedule"`
+	TimeoutSeconds int32  `db:"timeout_seconds" json:"timeout_seconds"`
+	RateLimit      int32  `db:"rate_limit" json:"rate_limit"`
+	Concurrency    int32  `db:"concurrency" json:"concurrency"`
+	RetryLimit     int32  `db:"retry_limit" json:"retry_limit"`
+	UpdatedBy      string `db:"updated_by" json:"updated_by"`
+	ID             uint64 `db:"id" json:"id"`
+	ProjectID      uint64 `db:"project_id" json:"project_id"`
 }
 
 func (q *Queries) UpdateTaskTemplate(ctx context.Context, arg UpdateTaskTemplateParams) error {
@@ -1845,25 +2124,25 @@ ON DUPLICATE KEY UPDATE
 `
 
 type UpsertDiscoveryObservationParams struct {
-	TenantID       string          `db:"tenant_id" json:"tenant_id"`
-	OrgID          string          `db:"org_id" json:"org_id"`
-	ProjectID      uint64          `db:"project_id" json:"project_id"`
-	RunID          uint64          `db:"run_id" json:"run_id"`
-	Seq            uint64          `db:"seq" json:"seq"`
-	Kind           string          `db:"kind" json:"kind"`
-	NaturalKey     string          `db:"natural_key" json:"natural_key"`
-	ClientRef      string          `db:"client_ref" json:"client_ref"`
-	Provider       string          `db:"provider" json:"provider"`
-	Capability     string          `db:"capability" json:"capability"`
-	ObservedAt     time.Time       `db:"observed_at" json:"observed_at"`
-	Confidence     uint8           `db:"confidence" json:"confidence"`
-	ActiveProbe    bool            `db:"active_probe" json:"active_probe"`
-	EvidenceHash   string          `db:"evidence_hash" json:"evidence_hash"`
-	EvidenceRef    string          `db:"evidence_ref" json:"evidence_ref"`
-	NormalizedJson json.RawMessage `db:"normalized_json" json:"normalized_json"`
-	NormalizedSize uint32          `db:"normalized_size" json:"normalized_size"`
-	IngestStatus   string          `db:"ingest_status" json:"ingest_status"`
-	IngestError    string          `db:"ingest_error" json:"ingest_error"`
+	TenantID       string    `db:"tenant_id" json:"tenant_id"`
+	OrgID          string    `db:"org_id" json:"org_id"`
+	ProjectID      uint64    `db:"project_id" json:"project_id"`
+	RunID          uint64    `db:"run_id" json:"run_id"`
+	Seq            uint64    `db:"seq" json:"seq"`
+	Kind           string    `db:"kind" json:"kind"`
+	NaturalKey     string    `db:"natural_key" json:"natural_key"`
+	ClientRef      string    `db:"client_ref" json:"client_ref"`
+	Provider       string    `db:"provider" json:"provider"`
+	Capability     string    `db:"capability" json:"capability"`
+	ObservedAt     time.Time `db:"observed_at" json:"observed_at"`
+	Confidence     uint8     `db:"confidence" json:"confidence"`
+	ActiveProbe    bool      `db:"active_probe" json:"active_probe"`
+	EvidenceHash   string    `db:"evidence_hash" json:"evidence_hash"`
+	EvidenceRef    string    `db:"evidence_ref" json:"evidence_ref"`
+	NormalizedJson []byte    `db:"normalized_json" json:"normalized_json"`
+	NormalizedSize uint32    `db:"normalized_size" json:"normalized_size"`
+	IngestStatus   string    `db:"ingest_status" json:"ingest_status"`
+	IngestError    string    `db:"ingest_error" json:"ingest_error"`
 }
 
 // Discovery observation queries.

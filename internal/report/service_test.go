@@ -2,6 +2,7 @@ package report
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -91,6 +92,59 @@ func TestProcessNextExportWritesRedactedJSONL(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"[REDACTED]"`) || strings.Contains(string(data), "alice") {
 		t.Fatalf("export not redacted: %s", data)
+	}
+}
+
+func TestProcessNextExportNeutralisesCSVFormulaInjection(t *testing.T) {
+	repo := newFakeRepo()
+	repo.riskRows = []map[string]any{
+		{"id": uint64(1), "title": `=HYPERLINK("http://evil.test","click")`, "owner": "+cmd|calc", "score": -3},
+		{"id": uint64(2), "title": "@SUM(A1)", "owner": "-2+3", "score": 7},
+		{"id": uint64(3), "title": "normal.example.com", "owner": "alice", "score": 5},
+	}
+	dir := t.TempDir()
+	svc := NewService(repo, WithExportDir(dir), WithNow(func() time.Time { return time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC) }))
+	if _, err := svc.CreateExport(context.Background(), ExportRequest{
+		ProjectID: 1, ReportType: ReportTypeRisk, ActorID: "u1", Format: ExportFormatCSV,
+		Fields: []string{"id", "title", "owner", "score"}, CanExport: true,
+	}); err != nil {
+		t.Fatalf("CreateExport: %v", err)
+	}
+
+	job, err := svc.ProcessNextExport(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessNextExport: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Clean(job.FilePath))
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	records, err := csv.NewReader(strings.NewReader(string(data))).ReadAll()
+	if err != nil {
+		t.Fatalf("parse csv: %v", err)
+	}
+	if len(records) != 4 {
+		t.Fatalf("expected header + 3 rows, got %d: %#v", len(records), records)
+	}
+	// title and owner are the text columns an external target can influence.
+	for _, row := range records[1:] {
+		for _, idx := range []int{1, 2} {
+			cell := row[idx]
+			if cell == "" {
+				continue
+			}
+			if strings.ContainsRune(csvFormulaPrefixes, rune(cell[0])) {
+				t.Fatalf("cell %q still starts with a formula character in row %#v", cell, row)
+			}
+		}
+	}
+	// Numeric columns keep their machine-readable form: a negative score must not
+	// be quoted, otherwise downstream spreadsheets read it as text.
+	if got := records[1][3]; got != "-3" {
+		t.Fatalf("numeric score altered: got %q, want %q", got, "-3")
+	}
+	if got := records[3][1]; got != "normal.example.com" {
+		t.Fatalf("benign value altered: got %q", got)
 	}
 }
 

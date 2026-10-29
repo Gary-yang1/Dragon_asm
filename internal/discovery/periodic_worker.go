@@ -60,7 +60,7 @@ func RegisterPeriodicTasks(registrar PeriodicTaskRegistrar, queue string) ([]str
 	if err != nil {
 		return nil, err
 	}
-	reconcileBody, err := json.Marshal(ReconcileTimedOutRunsPayload{Limit: 100, ActorID: "scheduler"})
+	reconcileBody, err := json.Marshal(ReconcileRunningRunsPayload{Limit: 100, ActorID: "scheduler"})
 	if err != nil {
 		return nil, err
 	}
@@ -71,8 +71,8 @@ func RegisterPeriodicTasks(registrar PeriodicTaskRegistrar, queue string) ([]str
 		return nil, err
 	}
 	entries = append(entries, entry)
-	entry, err = registrar.Register("@every 1m", asynq.NewTask(TaskTypeReconcileTimedOutRun, reconcileBody),
-		asynq.Queue(queue), asynq.MaxRetry(5), asynq.Timeout(45*time.Second))
+	entry, err = registrar.Register("@every 1m", asynq.NewTask(TaskTypeReconcileRunningRuns, reconcileBody),
+		asynq.Queue(queue), asynq.MaxRetry(5), asynq.Timeout(2*time.Minute))
 	if err != nil {
 		return nil, err
 	}

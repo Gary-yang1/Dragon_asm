@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
@@ -41,6 +43,12 @@ const maxMissCount = 1<<32 - 1
 var (
 	// ErrInvalidStatus is returned when a caller supplies a status outside the enum.
 	ErrInvalidStatus = errors.New("asset: invalid status")
+	// ErrInvalidAssetType is returned when a filter names an unknown asset_type.
+	ErrInvalidAssetType = errors.New("asset: invalid asset_type")
+	// ErrInvalidAssetCategory is returned when a filter names an unknown business view.
+	ErrInvalidAssetCategory = errors.New("asset: invalid category")
+	// ErrKeywordTooLong is returned when a search term exceeds maxKeywordLen.
+	ErrKeywordTooLong = errors.New("asset: keyword too long")
 	// ErrInvalidProjectID is returned when ProjectID is unset (0).
 	ErrInvalidProjectID = errors.New("asset: invalid project id")
 	// ErrMetadataTooLong is returned when a metadata field exceeds its column width.
@@ -261,6 +269,29 @@ func (s *Service) Count(ctx context.Context, projectID uint64) (int64, error) {
 	return s.repo.Count(ctx, projectID)
 }
 
+const (
+	assetSummaryLowConfidenceBelow = uint8(50)
+	assetSummaryFreshWindow        = 24 * time.Hour
+	assetSummaryStaleWindow        = 30 * 24 * time.Hour
+)
+
+// Summary returns project-wide asset inventory counts. It deliberately uses
+// first_seen for new assets and last_seen for recently observed / stale assets.
+func (s *Service) Summary(ctx context.Context, projectID uint64) (*AssetSummary, error) {
+	if projectID == 0 {
+		return nil, ErrInvalidProjectID
+	}
+	now := nowFn()
+	return s.repo.Summary(
+		ctx,
+		projectID,
+		now.Add(-assetSummaryFreshWindow),
+		now.Add(-assetSummaryFreshWindow),
+		now.Add(-assetSummaryStaleWindow),
+		assetSummaryLowConfidenceBelow,
+	)
+}
+
 // List returns live assets in projectID, paginated. limit is clamped to
 // [1, maxPageSize]; a non-positive limit uses defaultPageSize.
 func (s *Service) List(ctx context.Context, projectID uint64, limit, offset int32) ([]*Asset, error) {
@@ -270,6 +301,51 @@ func (s *Service) List(ctx context.Context, projectID uint64, limit, offset int3
 	}
 	return s.repo.List(ctx, projectID, limit, offset)
 }
+
+// ListFiltered returns one page of assets narrowed by type, status and keyword,
+// together with the matching total so the caller can paginate the filtered set.
+//
+// Enum filters are validated rather than passed through: an unknown asset_type
+// would otherwise silently match nothing and read as "no such assets".
+func (s *Service) ListFiltered(ctx context.Context, in ListFilter) ([]*Asset, int64, error) {
+	if in.ProjectID == 0 {
+		return nil, 0, ErrInvalidProjectID
+	}
+	in.AssetType = strings.TrimSpace(in.AssetType)
+	if in.AssetType != "" && !IsValidType(in.AssetType) {
+		return nil, 0, ErrInvalidAssetType
+	}
+	in.Category = strings.TrimSpace(in.Category)
+	if in.Category != "" && !IsValidCategory(in.Category) {
+		return nil, 0, ErrInvalidAssetCategory
+	}
+	in.Status = strings.TrimSpace(in.Status)
+	if in.Status != "" && !IsValidStatus(in.Status) {
+		return nil, 0, ErrInvalidStatus
+	}
+	in.Keyword = strings.TrimSpace(in.Keyword)
+	if len(in.Keyword) > maxKeywordLen {
+		return nil, 0, ErrKeywordTooLong
+	}
+	in.Limit = clampLimit(in.Limit)
+	if in.Offset < 0 {
+		in.Offset = 0
+	}
+
+	items, err := s.repo.ListFiltered(ctx, in)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountFiltered(ctx, in)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+// maxKeywordLen bounds the LIKE pattern; the search is a leading-wildcard scan
+// within one project, so an unbounded term is pointless work.
+const maxKeywordLen = 128
 
 const (
 	defaultPageSize int32 = 50
@@ -755,6 +831,67 @@ func (s *Service) ListRelations(ctx context.Context, projectID, assetID uint64, 
 		return nil, 0, err
 	}
 	return rows, total, nil
+}
+
+const maxAssetGraphEdges int32 = 100
+
+// Graph returns a bounded one-hop topology around assetID. Endpoint assets are
+// loaded in one project-scoped batch so graph rendering never creates an N+1
+// request pattern or leaks cross-project node data.
+func (s *Service) Graph(ctx context.Context, projectID, assetID uint64) (*AssetGraph, error) {
+	if projectID == 0 {
+		return nil, ErrInvalidProjectID
+	}
+	if s.relationRepo == nil {
+		return nil, errors.New("asset: relation store not configured")
+	}
+	focus, err := s.repo.GetByID(ctx, projectID, assetID)
+	if err != nil {
+		return nil, err
+	}
+
+	relations, err := s.relationRepo.ListByAsset(ctx, projectID, assetID, maxAssetGraphEdges+1, 0)
+	if err != nil {
+		return nil, err
+	}
+	truncated := len(relations) > int(maxAssetGraphEdges)
+	if truncated {
+		relations = relations[:maxAssetGraphEdges]
+	}
+
+	nodeIDs := map[uint64]struct{}{focus.ID: {}}
+	for _, relation := range relations {
+		nodeIDs[relation.FromAssetID] = struct{}{}
+		nodeIDs[relation.ToAssetID] = struct{}{}
+	}
+	ids := make([]uint64, 0, len(nodeIDs))
+	for id := range nodeIDs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	assets, err := s.repo.ListByIDs(ctx, projectID, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	nodes := make([]AssetGraphNode, 0, len(assets))
+	for _, item := range assets {
+		nodes = append(nodes, AssetGraphNode{
+			ID: item.ID, AssetType: item.AssetType, DisplayName: item.DisplayName,
+			Value: item.Value, Status: item.Status, Source: item.Source,
+			Owner: item.Owner, BusinessUnit: item.BusinessUnit,
+			Confidence: item.Confidence, LastSeen: item.LastSeen, Focus: item.ID == assetID,
+		})
+	}
+	edges := make([]AssetGraphEdge, 0, len(relations))
+	for _, relation := range relations {
+		edges = append(edges, AssetGraphEdge{
+			ID: relation.ID, FromAssetID: relation.FromAssetID, ToAssetID: relation.ToAssetID,
+			RelationType: relation.RelationType, Source: relation.Source,
+			Confidence: relation.Confidence, LastSeen: relation.LastSeen,
+		})
+	}
+	return &AssetGraph{Nodes: nodes, Edges: edges, Truncated: truncated}, nil
 }
 
 // RecordMiss increments an active asset's consecutive-miss count and, when the

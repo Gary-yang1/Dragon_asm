@@ -1,13 +1,15 @@
 import { Alert, Button, Spin } from 'antd';
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Navigate, useLocation, useParams } from 'react-router-dom';
 
-import { getProjectCapabilities, listProjects, type ProjectCapabilities } from '../api/projects';
+import { getProjectCapabilities, listProjects, type ProjectCapabilities, type ProjectStatus } from '../api/projects';
 import { useAuth } from '../auth/AuthProvider';
+import { sessionRefreshedEvent } from '../api/http';
 
 type ProjectWorkspaceState = {
   projectId: number;
   capabilities: ProjectCapabilities | null;
+  projectStatus: ProjectStatus | null;
   loading: boolean;
   error: string;
   refresh: () => Promise<void>;
@@ -23,31 +25,47 @@ export function ProjectWorkspaceProvider({ children }: { children: ReactNode }) 
   const [capabilityProjectId, setCapabilityProjectId] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const loadedProject = useRef(0);
+  const requestSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++requestSequence.current;
     if (!projectId) {
+      loadedProject.current = 0;
       setCapabilities(null);
       setCapabilityProjectId(0);
       setError('');
+      setLoading(false);
       return;
     }
-    setLoading(true);
+    if (loadedProject.current !== projectId) setLoading(true);
     setError('');
     try {
-      setCapabilities(await getProjectCapabilities(projectId));
+      const next = await getProjectCapabilities(projectId);
+      if (sequence !== requestSequence.current) return;
+      loadedProject.current = projectId;
+      setCapabilities(next);
       setCapabilityProjectId(projectId);
       localStorage.setItem('asm.lastProject', String(projectId));
     } catch (err) {
+      if (sequence !== requestSequence.current) return;
+      loadedProject.current = 0;
       setCapabilities(null);
       setCapabilityProjectId(projectId);
       setError(err instanceof Error ? err.message : '项目权限加载失败');
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
     void refresh();
+    const refreshSessionPermissions = () => { void refresh(); };
+    globalThis.addEventListener(sessionRefreshedEvent, refreshSessionPermissions);
+    return () => {
+      requestSequence.current += 1;
+      globalThis.removeEventListener(sessionRefreshedEvent, refreshSessionPermissions);
+    };
   }, [refresh]);
 
   const value = useMemo(() => {
@@ -55,6 +73,7 @@ export function ProjectWorkspaceProvider({ children }: { children: ReactNode }) 
     return {
       projectId,
       capabilities: current ? capabilities : null,
+      projectStatus: current ? capabilities?.project_status ?? null : null,
       loading: projectId > 0 && (!current || loading),
       error: current ? error : '',
       refresh

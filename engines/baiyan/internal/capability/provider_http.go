@@ -123,9 +123,11 @@ func withoutRedirects(client *http.Client) *http.Client {
 	return &clientCopy
 }
 
+func (r *HTTPResolver) BatchSize() int { return r.max }
+
 func (r *HTTPResolver) Resolve(ctx context.Context, hosts []string, _ int, gate operationGate) ([]DNSResult, error) {
 	if len(hosts) > r.max {
-		hosts = hosts[:r.max]
+		return nil, errors.New("DNS batch exceeds configured limit")
 	}
 	results := make([]DNSResult, 0, len(hosts))
 	var hadError bool
@@ -147,12 +149,14 @@ func (r *HTTPResolver) Resolve(ctx context.Context, hosts []string, _ int, gate 
 		resp, err := r.client.Do(req)
 		if err != nil {
 			hadError = true
+			results = append(results, DNSResult{Host: host, Status: "failed", ErrorCode: "DNS_PROVIDER_UNAVAILABLE"})
 			continue
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 		closeErr := resp.Body.Close()
 		if readErr != nil || closeErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || len(raw) > 1<<20 {
 			hadError = true
+			results = append(results, DNSResult{Host: host, Status: "failed", ErrorCode: "DNS_PROVIDER_UNAVAILABLE"})
 			continue
 		}
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -160,11 +164,13 @@ func (r *HTTPResolver) Resolve(ctx context.Context, hosts []string, _ int, gate 
 		var result DNSResult
 		if err := decoder.Decode(&result); err != nil || normalizeDomain(result.Host) != normalizeDomain(host) {
 			hadError = true
+			results = append(results, DNSResult{Host: host, Status: "failed", ErrorCode: "DNS_PROVIDER_UNAVAILABLE"})
 			continue
 		}
 		var extra any
 		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 			hadError = true
+			results = append(results, DNSResult{Host: host, Status: "failed", ErrorCode: "DNS_PROVIDER_UNAVAILABLE"})
 			continue
 		}
 		if len(result.IPs) > 16 {
@@ -172,6 +178,13 @@ func (r *HTTPResolver) Resolve(ctx context.Context, hosts []string, _ int, gate 
 		}
 		if len(result.CNAMEs) > 16 {
 			result.CNAMEs = result.CNAMEs[:16]
+		}
+		if result.Status == "failed" {
+			hadError = true
+		} else if len(result.IPs) == 0 && len(result.CNAMEs) == 0 {
+			result.Status = "no_records"
+		} else {
+			result.Status = "success"
 		}
 		results = append(results, result)
 	}
@@ -198,8 +211,8 @@ func (r *NetResolver) Resolve(ctx context.Context, hosts []string, concurrency i
 	if concurrency > 50 {
 		concurrency = 50
 	}
-	if len(hosts) > 500 {
-		hosts = hosts[:500]
+	if len(hosts) > 10000 {
+		return nil, errors.New("too many DNS targets")
 	}
 	type indexed struct {
 		index  int
@@ -236,10 +249,31 @@ func (r *NetResolver) Resolve(ctx context.Context, hosts []string, concurrency i
 			if normalized := normalizeDomain(cname); normalized != "" && normalized != host {
 				item.CNAMEs = append(item.CNAMEs, normalized)
 			}
-			if ipErr != nil && cnameErr != nil {
+			item.Status = "success"
+			failed := false
+			for _, lookupErr := range []error{ipErr, cnameErr} {
+				if lookupErr == nil {
+					continue
+				}
+				var dnsErr *net.DNSError
+				if errors.As(lookupErr, &dnsErr) && dnsErr.IsNotFound {
+					continue
+				}
+				failed = true
+				item.ErrorCode = "DNS_LOOKUP_FAILED"
+				if errors.As(lookupErr, &dnsErr) && dnsErr.IsTimeout {
+					item.ErrorCode = "DNS_TIMEOUT"
+				}
+			}
+			if failed {
+				item.Status = "failed"
 				results <- indexed{index: index, result: item, err: errors.New("dns lookup failed")}
 				return
 			}
+			if len(item.IPs) == 0 && len(item.CNAMEs) == 0 {
+				item.Status = "no_records"
+			}
+
 			results <- indexed{index: index, result: item}
 		}()
 	}

@@ -8,7 +8,6 @@ package dbgen
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"time"
 )
 
@@ -137,19 +136,19 @@ INSERT INTO change_event (
 `
 
 type InsertChangeEventParams struct {
-	TenantID   string          `db:"tenant_id" json:"tenant_id"`
-	OrgID      string          `db:"org_id" json:"org_id"`
-	ProjectID  uint64          `db:"project_id" json:"project_id"`
-	EntityType string          `db:"entity_type" json:"entity_type"`
-	EntityID   uint64          `db:"entity_id" json:"entity_id"`
-	ChangeType string          `db:"change_type" json:"change_type"`
-	Severity   string          `db:"severity" json:"severity"`
-	Title      string          `db:"title" json:"title"`
-	Summary    string          `db:"summary" json:"summary"`
-	Source     string          `db:"source" json:"source"`
-	BeforeJson json.RawMessage `db:"before_json" json:"before_json"`
-	AfterJson  json.RawMessage `db:"after_json" json:"after_json"`
-	DetectedAt time.Time       `db:"detected_at" json:"detected_at"`
+	TenantID   string    `db:"tenant_id" json:"tenant_id"`
+	OrgID      string    `db:"org_id" json:"org_id"`
+	ProjectID  uint64    `db:"project_id" json:"project_id"`
+	EntityType string    `db:"entity_type" json:"entity_type"`
+	EntityID   uint64    `db:"entity_id" json:"entity_id"`
+	ChangeType string    `db:"change_type" json:"change_type"`
+	Severity   string    `db:"severity" json:"severity"`
+	Title      string    `db:"title" json:"title"`
+	Summary    string    `db:"summary" json:"summary"`
+	Source     string    `db:"source" json:"source"`
+	BeforeJson []byte    `db:"before_json" json:"before_json"`
+	AfterJson  []byte    `db:"after_json" json:"after_json"`
+	DetectedAt time.Time `db:"detected_at" json:"detected_at"`
 }
 
 func (q *Queries) InsertChangeEvent(ctx context.Context, arg InsertChangeEventParams) (sql.Result, error) {
@@ -276,34 +275,34 @@ ON DUPLICATE KEY UPDATE
 `
 
 type UpsertExposureParams struct {
-	TenantID      string          `db:"tenant_id" json:"tenant_id"`
-	OrgID         string          `db:"org_id" json:"org_id"`
-	ProjectID     uint64          `db:"project_id" json:"project_id"`
-	AssetID       uint64          `db:"asset_id" json:"asset_id"`
-	ExposureType  string          `db:"exposure_type" json:"exposure_type"`
-	ExposureKey   string          `db:"exposure_key" json:"exposure_key"`
-	Name          string          `db:"name" json:"name"`
-	Value         string          `db:"value" json:"value"`
-	Protocol      string          `db:"protocol" json:"protocol"`
-	Port          uint32          `db:"port" json:"port"`
-	Service       string          `db:"service" json:"service"`
-	Version       string          `db:"version" json:"version"`
-	Cpe           string          `db:"cpe" json:"cpe"`
-	Url           string          `db:"url" json:"url"`
-	Fingerprint   string          `db:"fingerprint" json:"fingerprint"`
-	CertSubject   string          `db:"cert_subject" json:"cert_subject"`
-	CertIssuer    string          `db:"cert_issuer" json:"cert_issuer"`
-	CertSerial    string          `db:"cert_serial" json:"cert_serial"`
-	CertNotBefore time.Time       `db:"cert_not_before" json:"cert_not_before"`
-	CertNotAfter  time.Time       `db:"cert_not_after" json:"cert_not_after"`
-	CertSanJson   json.RawMessage `db:"cert_san_json" json:"cert_san_json"`
-	EvidenceHash  string          `db:"evidence_hash" json:"evidence_hash"`
-	Source        string          `db:"source" json:"source"`
-	Confidence    uint8           `db:"confidence" json:"confidence"`
-	FirstSeen     time.Time       `db:"first_seen" json:"first_seen"`
-	LastSeen      time.Time       `db:"last_seen" json:"last_seen"`
-	CreatedBy     string          `db:"created_by" json:"created_by"`
-	UpdatedBy     string          `db:"updated_by" json:"updated_by"`
+	TenantID      string    `db:"tenant_id" json:"tenant_id"`
+	OrgID         string    `db:"org_id" json:"org_id"`
+	ProjectID     uint64    `db:"project_id" json:"project_id"`
+	AssetID       uint64    `db:"asset_id" json:"asset_id"`
+	ExposureType  string    `db:"exposure_type" json:"exposure_type"`
+	ExposureKey   string    `db:"exposure_key" json:"exposure_key"`
+	Name          string    `db:"name" json:"name"`
+	Value         string    `db:"value" json:"value"`
+	Protocol      string    `db:"protocol" json:"protocol"`
+	Port          uint32    `db:"port" json:"port"`
+	Service       string    `db:"service" json:"service"`
+	Version       string    `db:"version" json:"version"`
+	Cpe           string    `db:"cpe" json:"cpe"`
+	Url           string    `db:"url" json:"url"`
+	Fingerprint   string    `db:"fingerprint" json:"fingerprint"`
+	CertSubject   string    `db:"cert_subject" json:"cert_subject"`
+	CertIssuer    string    `db:"cert_issuer" json:"cert_issuer"`
+	CertSerial    string    `db:"cert_serial" json:"cert_serial"`
+	CertNotBefore time.Time `db:"cert_not_before" json:"cert_not_before"`
+	CertNotAfter  time.Time `db:"cert_not_after" json:"cert_not_after"`
+	CertSanJson   []byte    `db:"cert_san_json" json:"cert_san_json"`
+	EvidenceHash  string    `db:"evidence_hash" json:"evidence_hash"`
+	Source        string    `db:"source" json:"source"`
+	Confidence    uint8     `db:"confidence" json:"confidence"`
+	FirstSeen     time.Time `db:"first_seen" json:"first_seen"`
+	LastSeen      time.Time `db:"last_seen" json:"last_seen"`
+	CreatedBy     string    `db:"created_by" json:"created_by"`
+	UpdatedBy     string    `db:"updated_by" json:"updated_by"`
 }
 
 func (q *Queries) UpsertExposure(ctx context.Context, arg UpsertExposureParams) (sql.Result, error) {

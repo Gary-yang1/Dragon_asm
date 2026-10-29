@@ -202,3 +202,12 @@ func observationsFromDB(rows []dbgen.DiscoveryObservation) []*DiscoveryObservati
 	}
 	return items
 }
+
+// ListInheritanceObservations bounds the source facts examined by a single UI request.
+func (r *sqlcRepository) ListInheritanceObservations(ctx context.Context, projectID, runID, afterID uint64, limit int32) ([]*DiscoveryObservation, error) {
+	rows, err := r.q.ListInheritanceObservations(ctx, dbgen.ListInheritanceObservationsParams{ProjectID: projectID, RunID: runID, ID: afterID, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	return observationsFromDB(rows), nil
+}

@@ -1,3 +1,10 @@
+# Engine image.
+#
+# Two builder stages: one for the engine itself, one for the external tools it
+# is permitted to execute. Tools are compiled from pinned upstream sources here
+# rather than copied from the repository — see TOOLS.md for why, and for what
+# has to be true before a tool may be added.
+
 FROM golang:1.22-alpine AS builder
 
 WORKDIR /src
@@ -7,9 +14,46 @@ COPY internal/capability ./internal/capability
 COPY internal/contract ./internal/contract
 COPY internal/engine ./internal/engine
 COPY internal/job ./internal/job
+COPY internal/networkenrich ./internal/networkenrich
+COPY internal/toolrunner ./internal/toolrunner
 COPY cmd/baiyan-engine ./cmd/baiyan-engine
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/baiyan-engine ./cmd/baiyan-engine
+
+# Tool builder. `go install module@version` resolves through the module proxy and
+# verifies the download against sum.golang.org before compiling, so the pinned
+# version is the provenance check; a separate checksum would add nothing.
+#
+# Versions are pinned deliberately. Bumping one is a reviewed change, not a
+# rebuild side effect — which is the whole difference between this and pulling a
+# "latest" release at build time.
+# A newer Go than the engine's: upstream tools set their own minimum, and pinning
+# the tool builder to the engine's toolchain would force old tool versions.
+FROM golang:1.24-alpine AS toolbuilder
+
+ARG SUBFINDER_VERSION=v2.14.0
+# ENScan_GO declares its module as github.com/wgpsec/ENScan while living at
+# github.com/wgpsec/ENScan_GO, so `go install` cannot resolve it. It is pinned by
+# commit instead — a git object hash is as strong a pin as a module checksum.
+ARG ENSCAN_COMMIT=9969d5156c2fec80d5f4724b8d6d6bbb45471933
+ARG ENSCAN_TAG=v2.0.5
+
+ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath GOBIN=/tools
+
+RUN apk add --no-cache git && \
+    go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@${SUBFINDER_VERSION} && \
+    git clone --quiet https://github.com/wgpsec/ENScan_GO /src/enscan && \
+    cd /src/enscan && \
+    git checkout --quiet ${ENSCAN_COMMIT} && \
+    # Refuse to build if the pinned commit is not the pinned tag: a moved tag
+    # would otherwise silently change what ships.
+    test "$(git rev-list -n 1 ${ENSCAN_TAG})" = "${ENSCAN_COMMIT}" && \
+    go build -trimpath -ldflags="-s -w" -o /tools/enscan . && \
+    rm -rf /src/enscan && \
+    # A tool that failed to build must fail the image build, not surface later as
+    # a capability that silently does nothing.
+    test -x /tools/subfinder && test -x /tools/enscan && \
+    chmod 0555 /tools/*
 
 FROM alpine:3.19
 
@@ -22,6 +66,12 @@ RUN apk add --no-cache ca-certificates tzdata && \
 WORKDIR /app
 
 COPY --from=builder --chown=10001:10001 /out/baiyan-engine /app/baiyan-engine
+
+# Tools are owned by root and mode 0555: the engine user may execute them, and
+# nobody in the container may replace them. toolrunner refuses to register a
+# group- or world-writable binary, so a mistake here fails at start-up rather
+# than during a customer's scan.
+COPY --from=toolbuilder --chown=0:0 --chmod=0555 /tools/ /app/tools/
 
 USER 10001:10001
 

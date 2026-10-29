@@ -60,7 +60,7 @@ func (f *fakeRelationRepo) GetByEndpoints(_ context.Context, projectID, from, to
 	return nil, asset.ErrNotFound
 }
 
-func (f *fakeRelationRepo) ListByAsset(_ context.Context, projectID, assetID uint64, _, _ int32) ([]*asset.Relation, error) {
+func (f *fakeRelationRepo) ListByAsset(_ context.Context, projectID, assetID uint64, limit, offset int32) ([]*asset.Relation, error) {
 	var out []*asset.Relation
 	for _, r := range f.rows {
 		if r.ProjectID != projectID {
@@ -77,7 +77,14 @@ func (f *fakeRelationRepo) ListByAsset(_ context.Context, projectID, assetID uin
 		}
 		out = append(out, &cp)
 	}
-	return out, nil
+	if offset >= int32(len(out)) {
+		return []*asset.Relation{}, nil
+	}
+	end := offset + limit
+	if end > int32(len(out)) {
+		end = int32(len(out))
+	}
+	return out[offset:end], nil
 }
 
 func (f *fakeRelationRepo) CountByAsset(_ context.Context, projectID, assetID uint64) (int64, error) {

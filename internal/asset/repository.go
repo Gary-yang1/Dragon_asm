@@ -26,9 +26,13 @@ type Repository interface {
 	GetByKey(ctx context.Context, projectID uint64, assetKey string) (*Asset, error)
 	GetByID(ctx context.Context, projectID, id uint64) (*Asset, error)
 	List(ctx context.Context, projectID uint64, limit, offset int32) ([]*Asset, error)
+	ListByIDs(ctx context.Context, projectID uint64, ids []uint64) ([]*Asset, error)
+	ListFiltered(ctx context.Context, in ListFilter) ([]*Asset, error)
 	// Count returns the number of live assets in a project (for list pagination
 	// totals). It uses the same project + soft-delete scoping as List.
 	Count(ctx context.Context, projectID uint64) (int64, error)
+	CountFiltered(ctx context.Context, in ListFilter) (int64, error)
+	Summary(ctx context.Context, projectID uint64, newSince, observedSince, staleBefore time.Time, lowConfidenceBelow uint8) (*AssetSummary, error)
 	// Update mutates the non-key metadata fields of one project-scoped live asset.
 	// The WHERE clause carries project_id so a cross-project update is impossible
 	// at the DB layer. It returns ErrNotFound when no live row matched.
@@ -164,6 +168,95 @@ func (r *sqlcRepository) List(ctx context.Context, projectID uint64, limit, offs
 		out = append(out, toDomain(a))
 	}
 	return out, nil
+}
+
+func (r *sqlcRepository) ListByIDs(ctx context.Context, projectID uint64, ids []uint64) ([]*Asset, error) {
+	if len(ids) == 0 {
+		return []*Asset{}, nil
+	}
+	rows, err := r.q.ListAssetsByProjectIDs(ctx, dbgen.ListAssetsByProjectIDsParams{
+		ProjectID: projectID,
+		Ids:       ids,
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*Asset, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, toDomain(a))
+	}
+	return out, nil
+}
+
+func (r *sqlcRepository) ListFiltered(ctx context.Context, in ListFilter) ([]*Asset, error) {
+	rows, err := r.q.ListAssetsByProjectFiltered(ctx, dbgen.ListAssetsByProjectFilteredParams{
+		ProjectID: in.ProjectID,
+		AssetType: in.AssetType,
+		Category:  in.Category,
+		Status:    in.Status,
+		Keyword:   in.Keyword,
+		Limit:     in.Limit,
+		Offset:    in.Offset,
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*Asset, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, toDomain(a))
+	}
+	return out, nil
+}
+
+func (r *sqlcRepository) CountFiltered(ctx context.Context, in ListFilter) (int64, error) {
+	total, err := r.q.CountAssetsByProjectFiltered(ctx, dbgen.CountAssetsByProjectFilteredParams{
+		ProjectID: in.ProjectID,
+		AssetType: in.AssetType,
+		Category:  in.Category,
+		Status:    in.Status,
+		Keyword:   in.Keyword,
+	})
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return total, nil
+}
+
+func (r *sqlcRepository) Summary(
+	ctx context.Context,
+	projectID uint64,
+	newSince, observedSince, staleBefore time.Time,
+	lowConfidenceBelow uint8,
+) (*AssetSummary, error) {
+	row, err := r.q.GetAssetSummary(ctx, dbgen.GetAssetSummaryParams{
+		NewSince:           newSince,
+		ObservedSince:      observedSince,
+		StaleBefore:        staleBefore,
+		LowConfidenceBelow: lowConfidenceBelow,
+		ProjectID:          projectID,
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &AssetSummary{
+		Inventory: AssetInventorySummary{
+			Total: row.Total, ManagedTotal: row.ManagedTotal,
+			Active: row.Active, Inactive: row.Inactive, Ignored: row.Ignored,
+		},
+		ByType: AssetTypeSummary{
+			Domain: row.DomainCount, Subdomain: row.SubdomainCount, IP: row.IpCount,
+			Port: row.PortCount, Service: row.ServiceCount, Web: row.WebCount,
+			Certificate: row.CertificateCount, CloudResource: row.CloudResourceCount,
+			ThirdParty: row.ThirdPartyCount,
+		},
+		Freshness: AssetFreshnessSummary{
+			New24H: row.New24h, Observed24H: row.Observed24h, Stale30D: row.Stale30d,
+		},
+		Governance: AssetGovernanceSummary{
+			Unowned: row.Unowned, UnassignedBusinessUnit: row.UnassignedBusinessUnit,
+			LowConfidence: row.LowConfidence, LowConfidenceBelow: lowConfidenceBelow,
+		},
+	}, nil
 }
 
 func (r *sqlcRepository) Count(ctx context.Context, projectID uint64) (int64, error) {

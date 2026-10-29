@@ -6,12 +6,12 @@
 INSERT INTO scope (
     tenant_id, org_id, project_id,
     name, status, authorized_by,
-    valid_from, valid_until,
+    valid_from, valid_until, is_default,
     created_by, updated_by
 ) VALUES (
     ?, ?, ?,
     ?, ?, ?,
-    ?, ?,
+    ?, ?, ?,
     ?, ?
 );
 
@@ -31,25 +31,42 @@ SET name = ?,
     authorized_by = ?,
     valid_from = ?,
     valid_until = ?,
+    is_default = ?,
     updated_by = ?
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
--- name: UpdateScopeStatus :exec
+-- name: DeactivateScope :exec
 UPDATE scope
-SET status = ?,
+SET status = 'inactive',
+    is_default = FALSE,
     updated_by = ?,
     updated_at = ?
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
+-- name: LockProjectForScopeDefault :one
+SELECT id FROM project
+WHERE id = ?
+FOR UPDATE;
+
+-- name: ClearDefaultScopes :exec
+UPDATE scope
+SET is_default = FALSE,
+    updated_by = ?,
+    updated_at = ?
+WHERE project_id = ?
+  AND id <> ?
+  AND is_default = TRUE
+  AND deleted_at = '1970-01-01 00:00:00.000';
+
 -- name: InsertScopeTarget :exec
 INSERT INTO scope_target (
     tenant_id, org_id, project_id,
-    scope_id, target_type, match_mode, target_value,
-    created_by, updated_by
+    scope_id, target_type, match_mode, coverage_mode, target_value,
+    created_by, updated_by, url_rule
 ) VALUES (
     ?, ?, ?,
-    ?, ?, ?, ?,
-    ?, ?
+    ?, ?, ?, ?, ?,
+    ?, ?, ?
 );
 
 -- name: ListScopeTargetsByScope :many
@@ -119,22 +136,35 @@ INSERT INTO task_run (
     tenant_id, org_id, project_id, template_id, scope_id, task_type,
     status, progress, timeout_seconds, rate_limit, concurrency, retry_limit,
     attempt, engine_job_id, dispatched_at, last_callback_at, result_count,
-    callback_secret_ref, started_at, finished_at, error_summary, created_by, updated_by
+    callback_secret_ref, started_at, finished_at, error_summary, created_by, updated_by,
+    approved_by, approval_reason
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?,
+    ?, ?
 );
 
 -- name: GetTaskRunByID :one
 SELECT * FROM task_run
 WHERE id = ? AND project_id = ? AND deleted_at = '1970-01-01 00:00:00.000';
 
+-- Bounded to the most recent runs. task_run grows by one row per scheduled
+-- execution forever, and this feeds an API endpoint that sorts and paginates in
+-- memory, so an unbounded SELECT meant a project with cron templates loaded tens
+-- of thousands of rows on every page view.
 -- name: ListTaskRunsByProject :many
 SELECT * FROM task_run
 WHERE project_id = ? AND deleted_at = '1970-01-01 00:00:00.000'
-ORDER BY id;
+ORDER BY id DESC
+LIMIT ?;
+
+-- name: GetTaskRunForUpdate :one
+SELECT * FROM task_run
+WHERE id = ? AND project_id = ?
+  AND deleted_at = '1970-01-01 00:00:00.000'
+FOR UPDATE;
 
 -- name: ListRunningTaskRunsForReconcile :many
 SELECT * FROM task_run
@@ -251,6 +281,21 @@ SELECT id, tenant_id, org_id, project_id, run_id, seq, schema_version,
        phase, status, observed_at, payload_hash, payload_json, payload_size,
        result_count, error_summary, received_at, enqueued_at, ingest_status,
        ingest_attempt, ingest_error, processed_at, created_at, updated_at, deleted_at
+FROM discovery_callback
+WHERE (
+      ingest_status = 'pending'
+      OR (ingest_status = 'failed' AND ingest_attempt < 10)
+      OR (ingest_status = 'processing' AND ingest_attempt < 10 AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE))
+  )
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY received_at ASC, id ASC
+LIMIT ?;
+
+-- The recovery scan only needs to re-enqueue work, and the queue payload carries
+-- just these three identifiers. Selecting payload_json here read up to 100 rows of
+-- 4 MiB each (~400 MB) into the worker on every 30s tick for no reason.
+-- name: ListPendingDiscoveryCallbackRefs :many
+SELECT project_id, run_id, seq
 FROM discovery_callback
 WHERE (
       ingest_status = 'pending'
@@ -380,3 +425,17 @@ WHERE a.project_id = ? AND o.capability = ? AND o.kind = 'asset'
   AND a.deleted_at = '1970-01-01 00:00:00.000'
   AND o.deleted_at = '1970-01-01 00:00:00.000'
 ORDER BY a.id;
+
+-- name: ListInheritanceObservations :many
+SELECT * FROM discovery_observation
+WHERE project_id = ? AND run_id = ? AND id > ?
+  AND kind = 'asset' AND ingest_status = 'materialized'
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id LIMIT ?;
+
+-- name: ListWebBlueprintAssets :many
+SELECT id, asset_type, value FROM asset
+WHERE project_id = sqlc.arg(project_id) AND id > sqlc.arg(after_id) AND status = 'active'
+  AND asset_type IN ('domain', 'subdomain', 'web')
+  AND deleted_at = '1970-01-01 00:00:00.000'
+ORDER BY id LIMIT 1000;

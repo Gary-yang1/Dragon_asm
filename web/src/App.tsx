@@ -12,9 +12,11 @@ import { LoginPage } from './pages/LoginPage';
 import { ChangePasswordPage } from './pages/ChangePasswordPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { ReportsPage } from './pages/reports/ReportsPage';
+import { EngineManagementPage } from './pages/admin/EngineManagementPage';
 import { PlatformUsersPage } from './pages/admin/PlatformUsersPage';
 import { RolePermissionsPage } from './pages/admin/RolePermissionsPage';
 import { RisksPage } from './pages/risks/RisksPage';
+import { SystemSettingsPage } from './pages/settings/SystemSettingsPage';
 import { SettingsPage } from './pages/settings/SettingsPage';
 import { TicketsPage } from './pages/tickets/TicketsPage';
 import { ProjectsPage } from './pages/projects/ProjectsPage';
@@ -116,11 +118,13 @@ export function App() {
             </RequirePermission>
           }
         />
+        <Route path="platform" element={<Navigate to="/platform/settings" replace />} />
+        <Route path="platform/settings" element={<SystemSettingsPage />} />
         <Route
-          path="platform"
+          path="platform/engines"
           element={
-            <RequirePermission permission={Permission.UserRead}>
-              <Navigate to="/platform/users" replace />
+            <RequirePermission permission={Permission.AdminManage}>
+              <EngineManagementPage />
             </RequirePermission>
           }
         />

@@ -117,3 +117,34 @@ func TestHTTPFacadeRejectsBodyAboveContractLimit(t *testing.T) {
 		t.Fatalf("want %d got %d: %s", http.StatusRequestEntityTooLarge, w.Code, w.Body.String())
 	}
 }
+
+func TestBlueprintOptionsReproduce422UntilASMMetadataIsRemoved(t *testing.T) {
+	for _, kind := range []string{"passive_intel", "dns"} {
+		t.Run(kind, func(t *testing.T) {
+			body := validHTTPScanRequest()
+			body["job_type"] = kind
+			options := map[string]any{"profile": "subdomain_passive", "sources": []any{"auto"}, "max_results": 1000, "blueprint_key": "domain_asset_inventory", "blueprint_version": "1.0.0", "blueprint_scope_id": 6, "blueprint_step_key": "passive_intel", "depends_on": []any{}}
+			if kind == "dns" {
+				options["profile"] = "resolve"
+				delete(options, "sources")
+				options["record_types"] = []any{"A", "AAAA", "CNAME"}
+			}
+			body["options"] = options
+			validate := func() error {
+				raw, _ := json.Marshal(body)
+				var req contract.ScanRequest
+				json.Unmarshal(raw, &req)
+				return validateScanRequest(req, "https://asm.example.com")
+			}
+			if err := validate(); err == nil || err.Error() != "unknown or unsafe option" {
+				t.Fatalf("expected metadata rejection, got %v", err)
+			}
+			for _, key := range []string{"blueprint_key", "blueprint_version", "blueprint_scope_id", "blueprint_step_key", "depends_on"} {
+				delete(options, key)
+			}
+			if err := validate(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

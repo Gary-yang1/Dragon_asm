@@ -28,6 +28,7 @@ export enum Permission {
   ProjectCreate = 'project:create',
   ProjectWrite = 'project:write',
   ProjectArchive = 'project:archive',
+  ProjectDelete = 'project:delete',
   ProjectMemberWrite = 'project:member:write'
 }
 
@@ -64,6 +65,7 @@ export const rolePermissions: Record<Role, Permission[]> = {
     Permission.ProjectCreate,
     Permission.ProjectWrite,
     Permission.ProjectArchive,
+    Permission.ProjectDelete,
     Permission.ProjectMemberWrite
   ],
   security_admin: [

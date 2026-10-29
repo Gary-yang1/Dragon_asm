@@ -7,11 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
 	"baiyan/internal/contract"
 	"baiyan/internal/job"
+	"baiyan/internal/networkenrich"
 )
 
 const maxScanRequestBody = 2 << 20
@@ -23,12 +25,31 @@ type JobService interface {
 }
 
 type Handler struct {
+	configurations        *ConfigurationManager
 	jobs                  JobService
 	token                 string
 	allowedCallbackOrigin string
+	management            managementStatus
+	networkEnricher       NetworkEnricher
 }
 
 func NewHandler(jobs JobService, token, allowedCallbackOrigin string) (*Handler, error) {
+	return newHandler(jobs, token, allowedCallbackOrigin, managementStatus{
+		Status: managementStatusReady, Capabilities: []string{}, Providers: []managementProvider{},
+	})
+}
+
+// NewHandlerWithManagement configures the authenticated, read-only management
+// status snapshot. Raw credential inputs are masked before the Handler is built.
+func NewHandlerWithManagement(jobs JobService, token, allowedCallbackOrigin string, config ManagementConfig) (*Handler, error) {
+	status, err := buildManagementStatus(config)
+	if err != nil {
+		return nil, err
+	}
+	return newHandler(jobs, token, allowedCallbackOrigin, status)
+}
+
+func newHandler(jobs JobService, token, allowedCallbackOrigin string, management managementStatus) (*Handler, error) {
 	token = strings.TrimSpace(token)
 	if jobs == nil || token == "" {
 		return nil, errors.New("baiyan engine: jobs and token are required")
@@ -37,14 +58,56 @@ func NewHandler(jobs JobService, token, allowedCallbackOrigin string) (*Handler,
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{jobs: jobs, token: token, allowedCallbackOrigin: origin}, nil
+	capabilities := append([]string(nil), management.Capabilities...)
+	found := false
+	for _, capability := range capabilities {
+		found = found || capability == networkenrich.Capability
+	}
+	if !found {
+		capabilities = append(capabilities, networkenrich.Capability)
+	}
+	sort.Strings(capabilities)
+	management.Capabilities = capabilities
+	return &Handler{jobs: jobs, token: token, allowedCallbackOrigin: origin, management: management, networkEnricher: networkenrich.New(nil)}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/management/status", h.managementStatus)
+	mux.HandleFunc("/management/configuration", h.configuration)
+	mux.HandleFunc("/management/configurations/", h.configuration)
 	mux.HandleFunc("/scan", h.scan)
 	mux.HandleFunc("/scan/", h.job)
+	mux.HandleFunc("/enrich/network", h.enrichNetwork)
 	return mux
+}
+
+func (h *Handler) managementStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.authorized(r) {
+		writeError(w, http.StatusUnauthorized, "INVALID_AUTH", "invalid engine authentication")
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	status := h.management
+	if h.configurations != nil {
+		if c, err := h.configurations.Current(); err == nil {
+			status.Providers = []managementProvider{
+				{Key: "subfinder", Name: "Subfinder", Configured: !c.SubfinderDisabled && h.configurations.tools != nil && h.configurations.tools.Has("subfinder"), Credentials: []managementCredential{}},
+				{Key: "fofa", Name: "FOFA", Configured: c.FOFAEnabled && c.FOFAKey != "" && c.FOFAEmail != "", Credentials: []managementCredential{maskManagementCredential("email", CredentialKindEmail, c.FOFAEmail), maskManagementCredential("key", CredentialKindSecret, c.FOFAKey)}},
+				{Key: "quake", Name: "Quake", Configured: c.QuakeEnabled && c.QuakeKey != "", Credentials: []managementCredential{maskManagementCredential("key", CredentialKindSecret, c.QuakeKey)}},
+				{Key: "hunter", Name: "Hunter", Configured: c.HunterEnabled && c.HunterKey != "", Credentials: []managementCredential{maskManagementCredential("key", CredentialKindSecret, c.HunterKey)}},
+			}
+			if c.PassiveURL != "" {
+				status.Providers = append(status.Providers, managementProvider{Key: c.PassiveName, Name: c.PassiveName, Configured: true, Credentials: []managementCredential{maskManagementCredential("token", CredentialKindSecret, c.PassiveToken)}})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (h *Handler) scan(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +140,16 @@ func (h *Handler) scan(w http.ResponseWriter, r *http.Request) {
 	if err := validateScanRequest(request, h.allowedCallbackOrigin); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "INVALID_PROFILE", "scan request violates passive profile policy")
 		return
+	}
+	if request.ConfigurationVersion > 0 {
+		if h.configurations == nil {
+			writeError(w, 503, "CONFIGURATION_UNAVAILABLE", "configuration version is not available")
+			return
+		}
+		if _, err := h.configurations.Load(request.ConfigurationVersion); err != nil {
+			writeError(w, 422, "CONFIGURATION_UNAVAILABLE", "configuration version is not available")
+			return
+		}
 	}
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if err := job.ValidateIdempotencyKey(request.RunID, idempotencyKey); err != nil {
@@ -179,9 +252,16 @@ func validateScanRequest(request contract.ScanRequest, allowedOrigin string) err
 	switch request.JobType {
 	case "passive_intel":
 		if profile != contract.ProfileSubdomainPassive || !validStringListOption(request.Options["sources"], 1, 16, map[string]bool{
-			"subfinder": true, "fofa": true, "quake": true, "hunter": true, "certificate_transparency": true,
+			"auto": true, "subfinder": true, "fofa": true, "quake": true, "hunter": true, "certificate_transparency": true,
 		}) {
 			return errors.New("invalid passive options")
+		}
+		if sources, ok := request.Options["sources"].([]any); ok && len(sources) > 1 {
+			for _, source := range sources {
+				if source == "auto" {
+					return errors.New("auto source cannot be combined with explicit sources")
+				}
+			}
 		}
 		allowedOptionKeys["sources"] = true
 		for _, target := range request.Targets {

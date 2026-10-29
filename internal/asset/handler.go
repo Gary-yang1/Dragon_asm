@@ -30,6 +30,7 @@ import (
 	asmcasbin "github.com/Gary-yang1/Dragon_asm/internal/platform/auth/casbin"
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/httpx"
 	"github.com/Gary-yang1/Dragon_asm/internal/project"
+	"github.com/Gary-yang1/Dragon_asm/internal/webview"
 )
 
 // timeRFC3339Millis is the canonical timestamp format for API responses.
@@ -65,7 +66,10 @@ func (h *Handler) RegisterRoutes(protected *gin.RouterGroup) {
 	g.Use(auth.ProjectIDFromParam("project_id"))
 
 	g.GET("", h.list)
+	g.GET("/summary", h.summary)
+	g.GET("/web-results", h.webResults)
 	g.GET("/:id", h.detail)
+	g.GET("/:id/graph", h.graph)
 	g.POST("/import", h.importAssets)
 	g.PATCH("/:id", h.update)
 
@@ -73,6 +77,18 @@ func (h *Handler) RegisterRoutes(protected *gin.RouterGroup) {
 	// from-asset on POST). Both routes reuse the project access + action permit.
 	g.GET("/:id/relations", h.listRelations)
 	g.POST("/:id/relations", h.createRelation)
+}
+
+func (h *Handler) webResults(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	_, role, ok := h.access(c, pid)
+	if !ok || !h.permit(c, role, pid, asmcasbin.PermAssetRead) {
+		return
+	}
+	webview.Serve(c, h.svc.db, pid, 0)
 }
 
 // assetResponse is the external representation of an Asset.
@@ -157,6 +173,25 @@ func (h *Handler) auditMetaFromContext(c *gin.Context) AuditMeta {
 	}
 }
 
+// writeListErr maps filter-validation failures to 400 so a bad enum reads as a
+// client error rather than an empty result set or a 500.
+func writeListErr(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrInvalidAssetType):
+		httpx.BadRequest(c, "invalid asset_type")
+	case errors.Is(err, ErrInvalidAssetCategory):
+		httpx.BadRequest(c, "invalid category")
+	case errors.Is(err, ErrInvalidStatus):
+		httpx.BadRequest(c, "invalid status")
+	case errors.Is(err, ErrKeywordTooLong):
+		httpx.BadRequest(c, "keyword too long")
+	case errors.Is(err, ErrInvalidProjectID):
+		httpx.BadRequest(c, "invalid project_id")
+	default:
+		httpx.InternalError(c, err)
+	}
+}
+
 // list handles GET /projects/:project_id/assets.
 func (h *Handler) list(c *gin.Context) {
 	pid, ok := parseProjectID(c)
@@ -186,14 +221,20 @@ func (h *Handler) list(c *gin.Context) {
 		httpx.BadRequest(c, "page_number out of range")
 		return
 	}
-	rows, err := h.svc.List(c.Request.Context(), pid, limit, int32(offset)) //nolint:gosec // G115: guarded above
+	// asset_type / status / keyword were accepted and dropped, so the console could
+	// only filter the rows already on screen. They now narrow the query itself, and
+	// total reflects the filtered set so pagination stays correct.
+	rows, total, err := h.svc.ListFiltered(c.Request.Context(), ListFilter{
+		ProjectID: pid,
+		AssetType: c.Query("asset_type"),
+		Category:  c.Query("category"),
+		Status:    c.Query("status"),
+		Keyword:   c.Query("keyword"),
+		Limit:     limit,
+		Offset:    int32(offset), //nolint:gosec // G115: guarded above
+	})
 	if err != nil {
-		httpx.Internal(c)
-		return
-	}
-	total, err := h.svc.Count(c.Request.Context(), pid)
-	if err != nil {
-		httpx.Internal(c)
+		writeListErr(c, err)
 		return
 	}
 
@@ -207,6 +248,103 @@ func (h *Handler) list(c *gin.Context) {
 		PageSize:   pq.PageSize,
 		PageNumber: pq.PageNumber,
 	})
+}
+
+// summary handles GET /projects/:project_id/assets/summary.
+func (h *Handler) summary(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	_, role, ok := h.access(c, pid)
+	if !ok {
+		return
+	}
+	if !h.permit(c, role, pid, asmcasbin.PermAssetRead) {
+		return
+	}
+	summary, err := h.svc.Summary(c.Request.Context(), pid)
+	if err != nil {
+		writeListErr(c, err)
+		return
+	}
+	httpx.OK(c, summary)
+}
+
+type graphNodeResponse struct {
+	ID           uint64 `json:"id"`
+	AssetType    string `json:"asset_type"`
+	DisplayName  string `json:"display_name"`
+	Value        string `json:"value"`
+	Status       string `json:"status"`
+	Source       string `json:"source"`
+	Owner        string `json:"owner"`
+	BusinessUnit string `json:"business_unit"`
+	Confidence   uint8  `json:"confidence"`
+	LastSeen     string `json:"last_seen"`
+	Focus        bool   `json:"focus"`
+}
+
+type graphEdgeResponse struct {
+	ID           uint64 `json:"id"`
+	FromAssetID  uint64 `json:"from_asset_id"`
+	ToAssetID    uint64 `json:"to_asset_id"`
+	RelationType string `json:"relation_type"`
+	Source       string `json:"source"`
+	Confidence   uint8  `json:"confidence"`
+	LastSeen     string `json:"last_seen"`
+}
+
+type graphResponse struct {
+	Nodes     []graphNodeResponse `json:"nodes"`
+	Edges     []graphEdgeResponse `json:"edges"`
+	Truncated bool                `json:"truncated"`
+}
+
+// graph handles GET /projects/:project_id/assets/:id/graph.
+func (h *Handler) graph(c *gin.Context) {
+	pid, ok := parseProjectID(c)
+	if !ok {
+		return
+	}
+	_, role, ok := h.access(c, pid)
+	if !ok {
+		return
+	}
+	if !h.permit(c, role, pid, asmcasbin.PermAssetRead) {
+		return
+	}
+	id, ok := parseAssetID(c)
+	if !ok {
+		return
+	}
+	graph, err := h.svc.Graph(c.Request.Context(), pid, id)
+	if err != nil {
+		writeAssetErr(c, err)
+		return
+	}
+	response := graphResponse{
+		Nodes:     make([]graphNodeResponse, 0, len(graph.Nodes)),
+		Edges:     make([]graphEdgeResponse, 0, len(graph.Edges)),
+		Truncated: graph.Truncated,
+	}
+	for _, node := range graph.Nodes {
+		response.Nodes = append(response.Nodes, graphNodeResponse{
+			ID: node.ID, AssetType: node.AssetType, DisplayName: node.DisplayName,
+			Value: node.Value, Status: node.Status, Source: node.Source,
+			Owner: node.Owner, BusinessUnit: node.BusinessUnit,
+			Confidence: node.Confidence, LastSeen: node.LastSeen.UTC().Format(timeRFC3339Millis),
+			Focus: node.Focus,
+		})
+	}
+	for _, edge := range graph.Edges {
+		response.Edges = append(response.Edges, graphEdgeResponse{
+			ID: edge.ID, FromAssetID: edge.FromAssetID, ToAssetID: edge.ToAssetID,
+			RelationType: edge.RelationType, Source: edge.Source,
+			Confidence: edge.Confidence, LastSeen: edge.LastSeen.UTC().Format(timeRFC3339Millis),
+		})
+	}
+	httpx.OK(c, response)
 }
 
 // detail handles GET /projects/:project_id/assets/:id.

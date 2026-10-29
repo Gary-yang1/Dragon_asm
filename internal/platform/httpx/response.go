@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -56,16 +57,19 @@ const (
 
 // ErrCodeProjectNotFound and related constants are business-domain error codes extended by each module.
 const (
-	ErrCodeProjectNotFound     = "PROJECT_NOT_FOUND"
-	ErrCodeAssetNotFound       = "ASSET_NOT_FOUND"
-	ErrCodeRiskNotFound        = "RISK_NOT_FOUND"
-	ErrCodeTicketNotFound      = "TICKET_NOT_FOUND"
-	ErrCodeInvalidTransition   = "INVALID_STATE_TRANSITION"
-	ErrCodeScopeExpired        = "SCOPE_EXPIRED"
-	ErrCodeDangerousTarget     = "DANGEROUS_TARGET"
-	ErrCodeProjectCodeConflict = "PROJECT_CODE_CONFLICT"
-	ErrCodeProjectNotReady     = "PROJECT_NOT_READY"
-	ErrCodeInvalidRootDomain   = "INVALID_ROOT_DOMAIN"
+	ErrCodeProjectNotFound              = "PROJECT_NOT_FOUND"
+	ErrCodeAssetNotFound                = "ASSET_NOT_FOUND"
+	ErrCodeRiskNotFound                 = "RISK_NOT_FOUND"
+	ErrCodeTicketNotFound               = "TICKET_NOT_FOUND"
+	ErrCodeInvalidTransition            = "INVALID_STATE_TRANSITION"
+	ErrCodeScopeExpired                 = "SCOPE_EXPIRED"
+	ErrCodeDangerousTarget              = "DANGEROUS_TARGET"
+	ErrCodeProjectCodeConflict          = "PROJECT_CODE_CONFLICT"
+	ErrCodeProjectNotReady              = "PROJECT_NOT_READY"
+	ErrCodeInvalidRootDomain            = "INVALID_ROOT_DOMAIN"
+	ErrCodeProjectDeleteRequiresArchive = "PROJECT_DELETE_REQUIRES_ARCHIVE"
+	ErrCodeProjectHasActiveJobs         = "PROJECT_HAS_ACTIVE_JOBS"
+	ErrCodeProjectDeleteConfirmation    = "PROJECT_DELETE_CONFIRMATION_MISMATCH"
 )
 
 // ── Response helpers ──────────────────────────────────────────────────────────
@@ -142,4 +146,22 @@ func Unprocessable(c *gin.Context, message string, details ...any) {
 // Internal writes a 500 response and avoids leaking internal detail to callers.
 func Internal(c *gin.Context) {
 	Fail(c, http.StatusInternalServerError, ErrCodeInternalServer, "an unexpected error occurred")
+}
+
+// InternalError writes the same opaque 500 as Internal but records the cause.
+//
+// A bare Internal(c) discards the only copy of the error: a NULL JSON column that
+// made an entire list endpoint fail scanned as a silent 500 with nothing in the
+// logs, and could only be found by reproducing it locally. The response body is
+// unchanged — the detail goes to the operator, never to the caller.
+func InternalError(c *gin.Context, err error) {
+	if err != nil {
+		slog.Default().Error("request failed",
+			"error", err,
+			"path", c.FullPath(),
+			"method", c.Request.Method,
+			"request_id", c.GetString(RequestIDKey),
+		)
+	}
+	Internal(c)
 }

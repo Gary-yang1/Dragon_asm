@@ -1,23 +1,35 @@
 import { ProTable, type ProColumns } from '@ant-design/pro-components';
-import { Button, Card, Select, Tag, Typography } from 'antd';
+import { Button, Card, Empty, Select, message } from 'antd';
 import { Download, RotateCcw, ShieldAlert, ShieldCheck, TimerReset, TrendingUp } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   createExport,
   getDashboardReport,
+  getReportRemediation,
+  getReportTrend,
   listExports,
   type DashboardReport,
   type ExportTask,
+  type ReportRemediation,
   type ReportTrendResponse
 } from '../../api/operations';
 import { errorMessage } from '../../api/errorMessage';
+import { EnumChip } from '../../components/StatusChip';
+import { exportStatusMeta } from '../../utils/taxonomy';
 import { Permission } from '../../auth/permissions';
 import { usePermission } from '../../auth/usePermission';
 import { PageHeader } from '../../components/PageHeader';
 import { StatCard } from '../../components/StatCard';
 import { StateView } from '../../components/StateView';
 import { useProjectId } from '../../projects/ProjectContext';
+
+/** Renders an API day value as MM-DD, tolerating both date and RFC3339 forms. */
+function shortDay(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return `${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+}
 
 export function ReportsPage() {
   const { can } = usePermission();
@@ -27,8 +39,21 @@ export function ReportsPage() {
   const [reportType, setReportType] = useState('risk_summary');
   const [reloadKey, setReloadKey] = useState(0);
   const chartRef = useRef<HTMLDivElement | null>(null);
+  const [remediation, setRemediation] = useState<ReportRemediation | null>(null);
+  const [trend, setTrend] = useState<ReportTrendResponse[]>([]);
 
-  const trendData = useMemo<ReportTrendResponse[]>(() => report?.trend ?? [], [report?.trend]);
+  const trendData = useMemo<ReportTrendResponse[]>(() => (trend.length ? trend : report?.trend ?? []), [report?.trend, trend]);
+
+  // sla_hit_rate and recurrence_rate are 0-1 ratios (report/repository.go:161).
+  const summary = useMemo(() => {
+    const pct = (ratio: number | undefined) => (typeof ratio === 'number' ? Number((ratio * 100).toFixed(1)) : undefined);
+    return {
+      riskTotal: remediation?.total_risks ?? report?.risk?.total ?? report?.risk_total,
+      mttr: remediation?.mttr_hours ?? report?.mttr_hours,
+      slaRate: pct(remediation?.sla_hit_rate) ?? report?.sla_rate,
+      recurrenceRate: pct(remediation?.recurrence_rate) ?? report?.recurrence_rate
+    };
+  }, [remediation, report]);
 
   const reportTrendData = useMemo(
     () =>
@@ -41,11 +66,27 @@ export function ReportsPage() {
   );
 
   useEffect(() => {
+    let active = true;
     setLoadError('');
-    void getDashboardReport(projectId)
-      .then(setReport)
-      .catch((error: unknown) => setLoadError(errorMessage(error)));
-  }, [projectId]);
+    void Promise.all([
+      getDashboardReport(projectId),
+      getReportRemediation(projectId).catch(() => null),
+      getReportTrend(projectId).catch(() => [] as ReportTrendResponse[])
+    ])
+      .then(([dashboardData, remediationData, trend]) => {
+        if (!active) return;
+        setReport(dashboardData);
+        setRemediation(remediationData);
+        setTrend(trend);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setLoadError(errorMessage(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [projectId, reloadKey]);
 
   useEffect(() => {
     if (!chartRef.current || !report) return undefined;
@@ -73,7 +114,9 @@ export function ReportsPage() {
           boundaryGap: false,
           axisTick: { show: false },
           axisLine: { lineStyle: { color: '#e6edf7' } },
-          axisLabel: { color: '#68758a' }
+          // The API returns full RFC3339 timestamps; printing them verbatim made
+          // the axis a wall of overlapping "2026-07-02T00:00:00Z" strings.
+          axisLabel: { color: '#68758a', formatter: (value: string) => shortDay(value) }
         },
         yAxis: {
           type: 'value',
@@ -142,28 +185,12 @@ export function ReportsPage() {
                   </Button>
                 </div>
               }
-              summary={
-                <div className="page-summary-stats">
-                  <div className="page-summary-stat">
-                    <Typography.Text type="secondary">风险总量</Typography.Text>
-                    <Typography.Text strong>{report.risk_total}</Typography.Text>
-                  </div>
-                  <div className="page-summary-stat">
-                    <Typography.Text type="secondary">SLA 达成率</Typography.Text>
-                    <Typography.Text strong>{report.sla_rate}%</Typography.Text>
-                  </div>
-                  <div className="page-summary-stat">
-                    <Typography.Text type="secondary">复发率</Typography.Text>
-                    <Typography.Text strong>{report.recurrence_rate}%</Typography.Text>
-                  </div>
-                </div>
-              }
             />
             <div className="metric-grid">
-              <StatCard label="风险总量" value={report.risk_total} icon={<ShieldAlert size={18} />} tone={(report.risk_total ?? 0) > 0 ? 'high' : 'good'} />
-              <StatCard label="MTTR" value={report.mttr_hours} suffix="h" icon={<TimerReset size={18} />} tone="neutral" hint="平均修复耗时" />
-              <StatCard label="SLA 达成率" value={report.sla_rate} suffix="%" icon={<ShieldCheck size={18} />} tone={(report.sla_rate ?? 0) >= 80 ? 'good' : 'high'} />
-              <StatCard label="复发率" value={report.recurrence_rate} suffix="%" icon={<RotateCcw size={18} />} tone={(report.recurrence_rate ?? 0) > 10 ? 'high' : 'neutral'} hint="同一资产再次出现风险" />
+              <StatCard label="风险总量" value={summary.riskTotal ?? '-'} icon={<ShieldAlert size={18} />} tone={(summary.riskTotal ?? 0) > 0 ? 'high' : 'good'} />
+              <StatCard label="MTTR" value={summary.mttr ?? '-'} suffix="h" icon={<TimerReset size={18} />} tone="neutral" hint="平均修复耗时" />
+              <StatCard label="SLA 达成率" value={summary.slaRate ?? '-'} suffix="%" icon={<ShieldCheck size={18} />} tone={summary.riskTotal ? ((summary.slaRate ?? 0) >= 80 ? 'good' : 'high') : 'neutral'} />
+              <StatCard label="复发率" value={summary.recurrenceRate ?? '-'} suffix="%" icon={<RotateCcw size={18} />} tone={(summary.recurrenceRate ?? 0) > 10 ? 'high' : 'neutral'} hint="同一资产再次出现风险" />
             </div>
             <Card
               className="surface-card"
@@ -174,7 +201,7 @@ export function ReportsPage() {
                 </div>
               }
             >
-              <div ref={chartRef} className="report-chart" data-testid="report-chart" />
+              {reportTrendData.length ? <div ref={chartRef} className="report-chart" data-testid="report-chart" /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="所选时间范围内暂无风险趋势数据" />}
             </Card>
             <Card className="surface-card" title="导出记录">
               <ProTable<ExportTask>
@@ -188,14 +215,21 @@ export function ReportsPage() {
                     column.dataIndex === 'status'
                       ? {
                           ...column,
-                          render: (_, row) => <Tag color={row.status === 'success' ? 'green' : row.status === 'failed' ? 'red' : 'blue'}>{row.status}</Tag>
+                          render: (_, row) => <EnumChip map={exportStatusMeta} value={row.status} />
                         }
                       : column
                   )
                 }
-                request={async () => {
-                  const page = await listExports(projectId);
-                  return { data: page.items, total: page.total, success: true };
+                request={async (params) => {
+                  // Previously always requested page 1, so page 2 of the export
+                  // history silently repeated page 1.
+                  try {
+                    const page = await listExports(projectId, params.pageSize ?? 20, params.current ?? 1);
+                    return { data: page.items, total: page.total, success: true };
+                  } catch (error) {
+                    message.error(errorMessage(error));
+                    return { data: [], total: 0, success: false };
+                  }
                 }}
               />
             </Card>

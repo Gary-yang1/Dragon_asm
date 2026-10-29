@@ -14,6 +14,7 @@ import (
 const (
 	TaskTypeIngestScanResult     = "ingest_scan_result"
 	TaskTypeReconcileTimedOutRun = "reconcile_timed_out_runs"
+	TaskTypeReconcileRunningRuns = "reconcile_running_runs"
 	TaskTypeDispatchTaskRun      = "dispatch_task_run"
 	TaskTypeRecoverCallbacks     = "recover_discovery_callbacks"
 )

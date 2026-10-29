@@ -1,12 +1,14 @@
 import { ProLayout } from '@ant-design/pro-components';
-import { Avatar, Button, Dropdown, Input, Space, Tooltip } from 'antd';
-import { BarChart3, Bell, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FolderKanban, FolderOpen, LayoutDashboard, LogOut, Moon, Radar, Server, Settings, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
+import { Alert, Avatar, Button, Dropdown, Input, Space, Tooltip } from 'antd';
+import { BarChart3, Bell, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Moon, Radar, Server, Settings, ShieldCheck, SlidersHorizontal, Sun } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthProvider';
 import { Permission } from '../auth/permissions';
-import { usePermission } from '../auth/usePermission';
+import { platformSettingsEntries } from './platformSettings';
+import { useProjectNavigation } from './useProjectNavigation';
+import { ProjectStatusBanner } from '../components/ProjectStatusGate';
 import { sanitizeDisplayName } from '../utils/text';
 import { listProjects, type Project } from '../api/projects';
 import { useThemeStore } from '../stores/themeStore';
@@ -17,27 +19,30 @@ export function AppLayout() {
   const toggleMode = useThemeStore((s) => s.toggleMode);
   const themeMode = useThemeStore((s) => s.mode);
   const { user, logout, can: canGlobal } = useAuth();
-  const { can } = usePermission();
+  const navigation = useProjectNavigation();
+  const { clear: clearProjectNavigation } = navigation;
+  const [globalQuery, setGlobalQuery] = useState('');
+  useEffect(() => { setGlobalQuery(new globalThis.URLSearchParams(location.search).get('q') ?? ''); }, [location.pathname, location.search]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [collapsed, setCollapsed] = useState(false);
-  const projectMatch = location.pathname.match(/^\/projects\/(\d+)(?:\/|$)/);
-  const projectId = projectMatch ? Number(projectMatch[1]) : 0;
+  const projectId = navigation.projectId;
   const projectPrefix = projectId ? `/projects/${projectId}` : '';
   const selectedProject = projects.find((project) => project.id === projectId);
   const routes = useMemo(() => {
+    const platformRoutes = [
+      { path: '/platform/settings', name: '设置中心' },
+      ...platformSettingsEntries.filter((entry) => canGlobal(entry.permission)).map(({ path, name }) => ({ path, name }))
+    ];
     const globalItems = [
       { path: '/workspace', name: '工作台', icon: <LayoutDashboard size={16} /> },
       { path: '/projects', name: '项目', icon: <FolderKanban size={16} /> },
       { path: '/work-items', name: '我的待办', icon: <ClipboardList size={16} /> },
-      ...(canGlobal(Permission.UserRead)
+      ...(platformRoutes.length > 0
         ? [{
             path: '/platform',
-            name: '平台管理',
+            name: '系统设置',
             icon: <ShieldCheck size={16} />,
-            routes: [
-              { path: '/platform/users', name: '用户管理' },
-              { path: '/platform/roles', name: '角色权限' }
-            ]
+            routes: platformRoutes
           }]
         : [])
     ];
@@ -55,15 +60,13 @@ export function AppLayout() {
     ];
 
     return [
-      ...globalItems,
-      {
-        path: projectPrefix,
-        name: selectedProject?.name ?? `项目 ${projectId}`,
-        icon: <FolderOpen size={16} />,
-        routes: projectItems.filter((item) => can(item.permission))
-      }
+      { path: '/workspace', name: '返回全局工作台', icon: <ChevronLeft size={16} /> },
+      ...projectItems
+        .filter((item) => navigation.loading || navigation.permissions?.includes(item.permission))
+        .map((item) => ({ ...item, disabled: navigation.loading })),
+      ...(platformRoutes.length ? [{ path: '/platform', name: '系统设置', icon: <ShieldCheck size={16} />, routes: platformRoutes }] : [])
     ];
-  }, [can, canGlobal, projectId, projectPrefix, selectedProject?.name]);
+  }, [canGlobal, navigation.loading, navigation.permissions, projectId, projectPrefix]);
 
   const loadProjects = useCallback(() => {
     let active = true;
@@ -104,7 +107,7 @@ export function AppLayout() {
     return [
       {
         key: 'all',
-        label: '全部项目 (全局视图)',
+        label: '返回全局工作台',
       },
       ...(canGlobal(Permission.ProjectCreate) ? [{
         key: 'create',
@@ -120,17 +123,19 @@ export function AppLayout() {
 
   const handleDropdownClick = useCallback(({ key }: { key: string }) => {
     if (key === 'all') {
+      clearProjectNavigation();
       navigate('/workspace');
       return;
     }
     if (key === 'create') {
+      clearProjectNavigation();
       navigate('/projects/new');
       return;
     }
     const nextProjectId = Number(key);
     localStorage.setItem('asm.lastProject', String(nextProjectId));
     navigate(`/projects/${nextProjectId}/overview`);
-  }, [navigate]);
+  }, [navigate, clearProjectNavigation]);
 
   const jumpToSearchPage = useCallback((value: string) => {
     const keyword = value.trim();
@@ -139,7 +144,12 @@ export function AppLayout() {
     const lower = keyword.toLowerCase();
     const hasChinese = /[\u4e00-\u9fa5]/.test(keyword);
 
+    const prefix = lower.match(/^(a|asset|r|risk|t|ticket):/)?.[1];
     const target = (() => {
+      if (prefix) {
+        const section = prefix === 'r' || prefix === 'risk' ? 'risks' : prefix === 't' || prefix === 'ticket' ? 'tickets' : 'assets';
+        return projectId ? `${projectPrefix}/${section}` : '/projects';
+      }
       if (lower.startsWith('a:') || lower.startsWith('asset:') || lower.includes('资产') || lower.includes('域名') || lower.includes('ip') || lower.includes('端口')) {
         return projectId ? `${projectPrefix}/assets` : '/projects';
       }
@@ -155,16 +165,17 @@ export function AppLayout() {
       if (lower.startsWith('t:') || lower.startsWith('ticket:') || lower.includes('工单') || lower.includes('ticket')) {
         return projectId ? `${projectPrefix}/tickets` : '/projects';
       }
-      return projectId ? `${projectPrefix}/assets` : '/projects';
+      const currentSection = location.pathname.endsWith('/risks') ? 'risks' : location.pathname.endsWith('/tickets') ? 'tickets' : 'assets';
+      return projectId ? `${projectPrefix}/${currentSection}` : '/projects';
     })();
 
-    const nextKeyword = keyword.replace(/^[art]:\s*/i, '').trim();
+    const nextKeyword = keyword.replace(/^(?:[art]|asset|risk|ticket):\s*/i, '').trim();
     const params = new globalThis.URLSearchParams();
     if (nextKeyword) params.set('q', nextKeyword);
     const query = params.toString();
     const destination = `${target}${query ? `?${query}` : ''}`;
     navigate(destination);
-  }, [navigate, projectId, projectPrefix]);
+  }, [location.pathname, navigate, projectId, projectPrefix]);
 
   return (
       <ProLayout
@@ -182,7 +193,7 @@ export function AppLayout() {
             trigger={['click']}
             placement="bottomLeft"
           >
-            <div className="layout-brand-dropdown-trigger" role="button" tabIndex={0}>
+            <button type="button" className="layout-brand-dropdown-trigger" aria-label={projectId ? `切换项目：${selectedProject?.name ?? `项目 ${projectId}`}` : '选择项目'}>
               {logo}
               <div className="brand-text-wrapper">
                 <div className="brand-project-title-row">
@@ -193,20 +204,26 @@ export function AppLayout() {
                 </div>
                 <div className="brand-project-subtitle">ArgusASM 攻击面平台</div>
               </div>
-            </div>
+            </button>
           </Dropdown>
         )}
         menuItemRender={(item, dom) => (
           <div
             role="button"
-            tabIndex={0}
+            tabIndex={item.disabled ? -1 : 0}
+            aria-disabled={item.disabled || undefined}
             className={`menu-link ${isMenuPathActive(location.pathname, item.path) ? 'menu-link-active' : ''}`}
             aria-current={isMenuPathActive(location.pathname, item.path) ? 'page' : undefined}
-            onClick={() => item.path && navigate(item.path)}
+            onClick={() => {
+              if (!item.path || item.disabled) return;
+              if (item.path === '/workspace') clearProjectNavigation();
+              navigate(item.path);
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
-                if (item.path) {
+                if (item.path && !item.disabled) {
+                  if (item.path === '/workspace') clearProjectNavigation();
                   navigate(item.path);
                 }
               }
@@ -247,8 +264,8 @@ export function AppLayout() {
         <header className="app-topbar">
           <div className="app-topbar-project">
             {projectId
-              ? <span className="app-topbar-title">{selectedProject?.name ?? '项目工作区'}</span>
-              : <span className="app-topbar-title">全局工作台</span>}
+              ? <span className="app-topbar-title">{selectedProject?.name ?? `项目 ${projectId}`}<span className="workspace-context-label">{navigation.inPlatform ? '系统设置 · 全局' : '项目工作区'}</span></span>
+              : <span className="app-topbar-title">{navigation.inPlatform ? '系统设置 · 全局' : '全局工作台'}</span>}
           </div>
           <Space className="layout-top-actions" align="center" size={8}>
             <Input.Search
@@ -257,6 +274,8 @@ export function AppLayout() {
               size="middle"
               placeholder="搜索资产 / 风险 / 工单"
               allowClear
+              value={globalQuery}
+              onChange={(event) => setGlobalQuery(event.target.value)}
               onSearch={(value) => jumpToSearchPage(value)}
             />
             <span className="layout-top-divider" aria-hidden="true" />
@@ -269,19 +288,22 @@ export function AppLayout() {
                 onClick={toggleMode}
               />
             </Tooltip>
-            <Button
-              aria-label="通知"
-              type="text"
-              className="layout-top-action"
-              icon={<Bell size={16} />}
-            />
-            <Tooltip title="设置">
+            <Tooltip title="通知规则">
               <Button
-                aria-label="设置"
+                aria-label="通知规则"
+                type="text"
+                className="layout-top-action"
+                icon={<Bell size={16} />}
+                onClick={() => navigate(projectId ? `${projectPrefix}/settings` : '/projects')}
+              />
+            </Tooltip>
+            <Tooltip title="系统设置">
+              <Button
+                aria-label="系统设置"
                 type="text"
                 className="layout-top-action"
                 icon={<Settings size={16} />}
-                onClick={() => void navigate(projectId ? `${projectPrefix}/settings` : '/projects')}
+                onClick={() => navigate('/platform/settings')}
               />
             </Tooltip>
             <Dropdown
@@ -298,6 +320,7 @@ export function AppLayout() {
                 ],
                 onClick: ({ key }) => {
                   if (key === 'logout') {
+                    clearProjectNavigation();
                     logout();
                     navigate('/login', { replace: true });
                   }
@@ -317,6 +340,12 @@ export function AppLayout() {
           </Space>
         </header>
         <main className="app-main">
+          {navigation.inPlatform && projectId > 0 && <div className="project-return-bar">
+            <span>当前为全局系统设置，项目工作区已保留。</span>
+            <Button disabled={!navigation.returnPath} onClick={() => navigation.returnPath && navigate(navigation.returnPath)}>返回项目工作区</Button>
+          </div>}
+          {navigation.error && <Alert className="list-error-alert" type="warning" showIcon message={navigation.error} action={<Button onClick={navigation.retry}>重试</Button>} />}
+          <ProjectStatusBanner />
           <Outlet />
         </main>
       </div>

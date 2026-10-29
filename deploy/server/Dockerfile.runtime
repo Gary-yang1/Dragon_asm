@@ -1,0 +1,8 @@
+FROM nginx:alpine AS certificates
+FROM alpine:3.19
+COPY --from=certificates /etc/ssl/certs/ /etc/ssl/certs/
+COPY --from=certificates /etc/ssl/cert.pem /etc/ssl/cert.pem
+WORKDIR /app
+COPY bin/ /app/
+ENTRYPOINT []
+CMD ["/app/api"]

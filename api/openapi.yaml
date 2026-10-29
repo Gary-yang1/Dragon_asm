@@ -13,6 +13,7 @@ security:
 tags:
   - name: auth
   - name: platform-users
+  - name: platform-engines
   - name: workspace
   - name: projects
   - name: assets
@@ -250,6 +251,99 @@ paths:
         "200": { description: Fixed role matrix., content: { application/json: { schema: { $ref: "#/components/schemas/AdminRolesEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /platform/discovery-engines:
+    get:
+      tags: [platform-engines]
+      summary: List passive and active discovery-engine status.
+      description: |
+        Requires the system-administrator `admin:manage` permission. Returns
+        local configuration and cached check results without contacting engines.
+        Credentials are represented only by `configured` and `masked_value`;
+        raw Engine Token, AK, SK, and FOFA Key values are never returned.
+        Permission denial uses error code `FORBIDDEN`; management dependency
+        failure uses `ENGINE_MANAGEMENT_UNAVAILABLE`.
+      responses:
+        "200":
+          description: Current engine configuration, health, dispatch policy, and worker heartbeat summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EngineManagementOverviewEnvelope"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /platform/discovery-engines/configuration:
+    get:
+      tags: [platform-engines]
+      summary: Read editable engine configuration with masked secrets.
+      description: Requires admin:manage. Legacy provider settings are inherited through authenticated service-to-service retrieval; raw secrets never reach the browser. Cache-Control is no-store.
+      responses:
+        "200": { description: Configuration view, content: { application/json: { schema: { $ref: "#/components/schemas/EngineConfigurationEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    put:
+      tags: [platform-engines]
+      summary: Save an encrypted immutable configuration version.
+      description: |
+        Requires admin:manage. Only newly created runs use the new version; existing runs retain their immutable configuration.
+        Empty secret inputs preserve stored values. clear_secrets explicitly clears named secrets. No scans or connection tests are started.
+        The update and audit event platform.discovery_engine.configuration.update commit in one transaction.
+        A stale version returns ENGINE_SETTINGS_CONFLICT (409); unavailable persistence returns ENGINE_SETTINGS_UNAVAILABLE (503).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [version, values, reason]
+              properties:
+                version: { type: integer, minimum: 1 }
+                values: { type: object, maxProperties: 32, additionalProperties: { type: string, maxLength: 16384, writeOnly: true } }
+                clear_secrets:
+                  type: array
+                  maxItems: 7
+                  items: { type: string, enum: [passive_token, active_access_key, active_secret_key, fofa_email, fofa_key, provider_token, dns_token] }
+                reason: { type: string, minLength: 1, maxLength: 512 }
+      responses:
+        "200": { description: Saved masked configuration, content: { application/json: { schema: { $ref: "#/components/schemas/EngineConfigurationEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Configuration changed; reload before saving. }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /platform/discovery-engines/{route}/check:
+    post:
+      tags: [platform-engines]
+      summary: Re-run one read-only discovery-engine connection check.
+      description: |
+        Requires the system-administrator `admin:manage` permission. The check
+        is audit logged as `platform.discovery_engine.check`; audit data omits
+        endpoint URLs and credential summaries. A completed check returns 200
+        with its health summary even when the engine is degraded or unreachable.
+        An unsupported route uses error code `UNPROCESSABLE_ENTITY`.
+        A 503 with code `ENGINE_MANAGEMENT_UNAVAILABLE` means the management or
+        audit service itself could not complete the operation.
+      parameters:
+        - name: route
+          in: path
+          required: true
+          description: Logical discovery-engine route to check.
+          schema:
+            type: string
+            enum: [passive, active]
+      responses:
+        "200":
+          description: Completed connection-check summary; inspect health and ready for the outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedEngineSummaryEnvelope"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /workspace/summary:
     get:
       tags: [workspace]
@@ -304,6 +398,22 @@ paths:
             schema: { $ref: "#/components/schemas/ProjectUpdateRequest" }
       responses:
         "200": { description: Updated project, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectEnvelope" } } } }
+    delete:
+      tags: [projects]
+      summary: Soft-delete an archived project.
+      description: Requires project:delete. The project must be archived and have no pending or running discovery jobs.
+      parameters: [{ $ref: "#/components/parameters/ProjectID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProjectDeleteRequest" }
+      responses:
+        "204": { description: Project soft-deleted. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Project is not archived or still has active jobs, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: Project name confirmation does not match, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /projects/{project_id}/transitions:
     post:
       tags: [projects]
@@ -371,22 +481,22 @@ paths:
   /projects/{project_id}/domains:
     get:
       tags: [projects]
-      summary: List registrable root-domain profiles.
+      summary: List managed root-domain and delegated-subdomain profiles.
       parameters: [{ $ref: "#/components/parameters/ProjectID" }]
       responses:
         "200": { description: Domains, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
     post:
       tags: [projects]
-      summary: Add a root-domain profile and idempotently materialize its domain asset.
+      summary: Add a managed domain profile and idempotently materialize its domain or subdomain asset.
       parameters: [{ $ref: "#/components/parameters/ProjectID" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectDomainRequest" } } } }
       responses:
         "201": { description: Domain profile, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
-        "422": { description: Invalid registrable domain, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: Invalid public FQDN or self-asserted ownership state, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /projects/{project_id}/domains/{id}:
     patch:
       tags: [projects]
-      summary: Update root-domain profile metadata.
+      summary: Update managed-domain profile metadata.
       parameters: [{ $ref: "#/components/parameters/ProjectID" }, { $ref: "#/components/parameters/ID" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectDomainUpdateRequest" } } } }
       responses:
@@ -400,7 +510,7 @@ paths:
         "200": { description: ICP filings, content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
     post:
       tags: [projects]
-      summary: Create an ICP filing and associate root-domain profiles.
+      summary: Create an ICP filing and associate managed-domain profiles.
       parameters: [{ $ref: "#/components/parameters/ProjectID" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ICPRequest" } } } }
       responses:
@@ -481,6 +591,66 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /projects/{project_id}/discovery/blueprints:
+    get:
+      tags: [discovery]
+      summary: List built-in ASM discovery scenario blueprints.
+      description: Returns a versioned, read-only catalog. No templates or runs are created.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/PageNumber"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200": { description: Paged discovery blueprints., content: { application/json: { schema: { $ref: "#/components/schemas/DiscoveryBlueprintPageEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /projects/{project_id}/discovery/blueprints/{blueprint_key}/preview:
+    post:
+      tags: [discovery]
+      summary: Preview one discovery scenario against a project scope.
+      description: |
+        Performs local prerequisite checks only: project state, authorization
+        window, include target types, engine route configuration, and the active
+        discovery release switch. It does not call an engine, create templates,
+        or dispatch a scan. When scope_id is omitted, the service selects a
+        compatible project default Scope, or the only compatible active Scope.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/BlueprintKey"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/BlueprintPreviewRequest" } } }
+      responses:
+        "200": { description: Read-only scenario preview., content: { application/json: { schema: { $ref: "#/components/schemas/BlueprintPreviewEnvelope" } } } }
+        "400": { description: Malformed preview request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Multiple compatible scopes require an explicit selection., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { description: No active compatible scope is available., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+  /projects/{project_id}/discovery/blueprints/{blueprint_key}/templates:
+    post:
+      tags: [discovery]
+      summary: Materialize a ready discovery scenario as manual task templates.
+      description: |
+        Re-evaluates the preview and creates one enabled, unscheduled task
+        template per scenario step in a single transaction. Repeated requests
+        reuse templates carrying the same blueprint version, step and Scope.
+        This operation never creates a TaskRun, calls an engine, or starts a scan.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/BlueprintKey"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/BlueprintPreviewRequest" } } }
+      responses:
+        "200": { description: Created or reused scenario task templates., content: { application/json: { schema: { $ref: "#/components/schemas/BlueprintTemplateMaterializationEnvelope" } } } }
+        "400": { description: Malformed request., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Preview is not ready or a generated name conflicts., content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { $ref: "#/components/responses/Unprocessable" }
   /projects/{project_id}/discovery/templates:
     get:
       tags: [discovery]
@@ -566,10 +736,13 @@ paths:
     post:
       tags: [discovery]
       summary: Create one pending manual TaskRun.
-      description: The project must be active. Dispatch is asynchronous.
+      description: The project and template must be active. Dispatch is asynchronous. Active task types can also be disabled by the deployment release policy.
       parameters:
         - $ref: "#/components/parameters/ProjectID"
         - $ref: "#/components/parameters/TemplateID"
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: "#/components/schemas/TaskRunCreateRequest" } } }
       responses:
         "201": { description: Pending TaskRun., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -605,10 +778,24 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{project_id}/discovery/runs/{run_id}/activity:
+    get:
+      tags: [discovery]
+      summary: Read incremental discovery stages and recently materialized assets.
+      description: Requires discovery read and asset read permissions. Available while running. Source counts overlap; asset counts are deduplicated. Clients may poll every four seconds until terminal status.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200": { description: Stage snapshots, batch counters, distinct asset counts and up to 20 recent assets., content: { application/json: { schema: { $ref: "#/components/schemas/GenericEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{project_id}/discovery/runs/{run_id}/cancel:
     post:
       tags: [discovery]
-      summary: Cancel one dispatched TaskRun.
+      summary: Cancel one cancellable TaskRun.
+      description: Pending runs are cancelled locally. Cancellation of a running active-engine task is currently rejected with 409 because the active engine has no cancel endpoint.
       parameters:
         - $ref: "#/components/parameters/ProjectID"
         - $ref: "#/components/parameters/RunID"
@@ -681,6 +868,19 @@ paths:
         - $ref: "#/components/parameters/ProjectID"
         - $ref: "#/components/parameters/PageNumber"
         - $ref: "#/components/parameters/PageSize"
+        - name: asset_type
+          in: query
+          schema: { type: string, enum: [domain, subdomain, ip, port, service, web, certificate, cloud_resource, third_party] }
+        - name: category
+          in: query
+          description: Business-facing asset view. Combined with asset_type when both are present.
+          schema: { type: string, enum: [domains, ips, web, external] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, inactive, ignored] }
+        - name: keyword
+          in: query
+          schema: { type: string, maxLength: 128 }
       responses:
         "200":
           description: Paged assets.
@@ -688,6 +888,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AssetPageEnvelope"
+  /projects/{project_id}/assets/summary:
+    get:
+      tags: [assets]
+      summary: Get project-wide asset inventory statistics.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: Asset inventory, type, freshness, and governance counts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetSummaryEnvelope"
   /projects/{project_id}/assets/import:
     post:
       tags: [assets]
@@ -775,6 +988,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GenericEnvelope"
+  /projects/{project_id}/assets/{id}/graph:
+    get:
+      tags: [assets]
+      summary: Get the bounded one-hop topology around an asset.
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Readable graph nodes and directed relation edges.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetGraphEnvelope"
   /projects/{project_id}/exposures:
     get:
       tags: [exposures]
@@ -812,6 +1039,23 @@ paths:
         - $ref: "#/components/parameters/ProjectID"
         - $ref: "#/components/parameters/PageNumber"
         - $ref: "#/components/parameters/PageSize"
+        - name: severity
+          in: query
+          schema: { type: string, enum: [critical, high, medium, low, info] }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: owner
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: keyword
+          in: query
+          description: Matches title and business unit.
+          schema: { type: string }
+        - name: asset_id
+          in: query
+          description: Only risks raised on this asset.
+          schema: { type: integer, format: uint64, minimum: 1 }
       responses:
         "200":
           description: Paged risks.
@@ -1123,6 +1367,89 @@ paths:
           content:
             text/csv: { schema: { type: string, format: binary } }
             application/json: { schema: { type: string, format: binary } }
+  /projects/{project_id}/discovery/runs/{run_id}/derived-targets:
+    get:
+      tags: [discovery]
+      summary: Classify discovered targets under the run's current parent authorization.
+      description: Requires discovery:read, asset:read and scope:read. Returns up to 100 materialized asset observations per cursor page. This read does not grant authorization or dispatch work.
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/RunID'
+        - name: after_id
+          in: query
+          schema: { type: integer, format: uint64, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Current parent authorization and classified targets. Counts are per page, not project totals.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GenericEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/DerivedTargetPage' }
+        '403': { description: A required project permission is missing. }
+        '404': { description: The source run or its parent scope is unavailable in this project. }
+  /projects/{project_id}/discovery/runs/{run_id}/continuations:
+    post:
+      tags: [discovery]
+      summary: Create or reuse an immutable continuation template from authorized evidence.
+      description: |
+        Requires discovery:run, asset:read, scope:read and an active project. All selected
+        observations must belong to the source run and be covered by its current scope.
+        Targets are derived on the server; arbitrary submitted target values are not accepted.
+        Repeated identical selections reuse the template. Does not create a run or call an engine.
+        Source evidence and scope are checked again when creating a run and before dispatch.
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/RunID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/DerivedSelection'
+                - type: object
+                  required: [task_type]
+                  properties:
+                    task_type: { type: string, enum: [dns, passive_intel, port_probe, web_probe, fingerprint] }
+      responses:
+        '200': { description: Created or reused TaskTemplate, with config.inheritance provenance., content: { application/json: { schema: { $ref: '#/components/schemas/GenericEnvelope' } } } }
+        '403': { description: A required project permission is missing. }
+        '409': { description: Parent scope changed, source/evidence unavailable, or selected targets are not authorized. }
+        '422': { description: Invalid selection, incompatible target type, or execution policy rejects this task. }
+  /projects/{project_id}/discovery/runs/{run_id}/derived-targets/authorize:
+    post:
+      tags: [discovery]
+      summary: Explicitly authorize a reviewed batch of previously uncovered targets.
+      description: |
+        Requires scope:write, scope:read, discovery:read, asset:read and an active project.
+        Append exact-match includes to the source run's parent scope. Does not alter its expiry,
+        status or exclusions. Excluded/dangerous targets cannot be admitted. The entire batch is
+        transactional; a scope fingerprint conflict requires refresh. Audit includes the operator,
+        reason, source run, observation IDs and before/after scope. Does not dispatch work.
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/RunID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/DerivedSelection'
+                - type: object
+                  required: [reason]
+                  properties:
+                    reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200': { description: Updated parent Scope with targets., content: { application/json: { schema: { $ref: '#/components/schemas/GenericEnvelope' } } } }
+        '403': { description: Explicit scope management permission is required. }
+        '409': { description: DISCOVERY_PARENT_SCOPE_CHANGED or DISCOVERY_INHERITANCE_NOT_READY. }
+        '422': { description: Invalid or oversized batch. No partial authorization is persisted. }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1150,6 +1477,13 @@ components:
       in: path
       required: true
       schema: { type: integer, format: uint64, minimum: 1 }
+    BlueprintKey:
+      name: blueprint_key
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9_]{2,63}$"
     TemplateID:
       name: template_id
       in: path
@@ -1239,14 +1573,184 @@ components:
             code: { type: string }
             message: { type: string }
             details: {}
+    EngineCredentialSummary:
+      type: object
+      additionalProperties: false
+      required: [key, label, configured, masked_value]
+      description: A credential-presence indicator. The original credential is never exposed.
+      properties:
+        key: { type: string, maxLength: 64 }
+        label: { type: string, maxLength: 128 }
+        configured: { type: boolean }
+        masked_value:
+          type: string
+          maxLength: 128
+          description: Masked display value, or an empty string when the credential is not configured. This field never contains the original Token, AK, SK, email, or provider key.
+    EngineProviderSummary:
+      type: object
+      additionalProperties: false
+      required: [key, name, configured, credentials]
+      properties:
+        key: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 128 }
+        configured: { type: boolean }
+        credentials:
+          type: array
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/EngineCredentialSummary"
+    EngineNodeSummary:
+      type: object
+      additionalProperties: false
+      required: [node_id, capabilities]
+      properties:
+        node_id: { type: string, maxLength: 128 }
+        capabilities:
+          type: array
+          maxItems: 64
+          items: { type: string, maxLength: 64 }
+    ManagedEngineSummary:
+      type: object
+      additionalProperties: false
+      required: [route, key, name, configured, ready, health, base_url, capabilities, credentials]
+      properties:
+        configuration_version: { type: integer, minimum: 0 }
+        route: { type: string, enum: [passive, active] }
+        key: { type: string }
+        name: { type: string }
+        instance_id:
+          type: string
+          maxLength: 128
+          description: Optional engine-reported instance identifier.
+        configured: { type: boolean }
+        ready: { type: boolean }
+        health: { type: string, enum: [healthy, degraded, unreachable, unconfigured, unknown] }
+        base_url:
+          type: string
+          description: Sanitized configured endpoint URL. User information, query strings, and fragments are rejected by the service.
+        capabilities:
+          type: array
+          maxItems: 64
+          items: { type: string, maxLength: 64 }
+        credentials:
+          type: array
+          description: Masked local engine credentials only; original values are never returned.
+          items:
+            $ref: "#/components/schemas/EngineCredentialSummary"
+        providers:
+          type: array
+          maxItems: 32
+          description: Optional passive-intelligence providers, including masked FOFA credential status.
+          items:
+            $ref: "#/components/schemas/EngineProviderSummary"
+        nodes:
+          type: array
+          description: Optional online active-engine execution nodes.
+          items:
+            $ref: "#/components/schemas/EngineNodeSummary"
+        last_checked_at: { type: string, format: date-time }
+        latency_ms: { type: integer, format: int64, minimum: 0 }
+        error_summary:
+          type: string
+          description: Sanitized operator-facing failure summary without response bodies or credentials.
+        project_mapping_count:
+          type: integer
+          minimum: 1
+          description: Number of configured ASM-project to active-engine-project mappings. Omitted when zero.
+    ActiveDispatchPolicy:
+      type: object
+      additionalProperties: false
+      required: [enabled, require_approval, require_ownership]
+      properties:
+        enabled: { type: boolean }
+        require_approval: { type: boolean }
+        require_ownership: { type: boolean }
+    EngineWorkerSummary:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [online, stale, unknown] }
+        last_seen_at: { type: string, format: date-time }
+        config_matches:
+          type: boolean
+          description: When present, compares only engine routes, project mappings, active policy, and whether credentials are configured. It does not compare or expose credential contents.
+    EngineManagementOverview:
+      type: object
+      additionalProperties: false
+      required: [items, active_policy, worker]
+      properties:
+        configuration_version: { type: integer, minimum: 0 }
+        editable: { type: boolean }
+        items:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/ManagedEngineSummary"
+        active_policy:
+          $ref: "#/components/schemas/ActiveDispatchPolicy"
+        worker:
+          $ref: "#/components/schemas/EngineWorkerSummary"
+    EngineConfigurationEnvelope:
+      type: object
+      properties:
+        request_id: { type: string }
+        data:
+          type: object
+          required: [version, values, secrets, providers_managed]
+          properties:
+            version: { type: integer, minimum: 1 }
+            values: { type: object, additionalProperties: { type: string } }
+            secrets: { type: object, additionalProperties: { $ref: "#/components/schemas/EngineCredentialSummary" } }
+            providers_managed: { type: boolean }
+            provider_error: { type: string }
+    EngineManagementOverviewEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/EngineManagementOverview"
+    ManagedEngineSummaryEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ManagedEngineSummary"
     ScopeTargetRequest:
       type: object
       additionalProperties: false
       required: [target_type, match_mode, value]
       properties:
-        target_type: { type: string, enum: [domain, ip, cidr, url] }
+        url_rule:
+          $ref: '#/components/schemas/URLAuthorizationRule'
+        target_type: { type: string, enum: [domain, ip, cidr, url, company] }
         match_mode: { type: string, enum: [include, exclude] }
-        value: { type: string, minLength: 1, maxLength: 512 }
+        coverage_mode:
+          type: string
+          enum: [exact, subdomains]
+          default: exact
+          description: subdomains is valid only for domain targets and includes the root domain itself.
+        value:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: URL rules support a leading *. hostname shortcut. Structured URL rules authorize the whole site; path/query restrictions are unsupported. Legacy URL targets without url_rule retain their original origin comparison.
+    URLAuthorizationRule:
+      type: object
+      description: Whole-site authorization. For a matching hostname family, explicit URL grants take precedence over broad domain/IP grants. Exclusions always win. Multiple URL grants form a union.
+      required: [protocol, include_root, include_subdomains, ports]
+      properties:
+        protocol: { type: string, enum: [http, https, both] }
+        include_root: { type: boolean, description: Include the anchor hostname itself. }
+        include_subdomains: { type: boolean, description: Include all descendant hostnames, never sibling or suffix-lookalike domains. }
+        ports:
+          type: array
+          maxItems: 20
+          description: Empty means HTTP port 80 and HTTPS port 443. Explicit ports apply to every selected protocol.
+          items: { type: integer, minimum: 1, maximum: 65535 }
     ScopeCreateRequest:
       type: object
       additionalProperties: false
@@ -1254,14 +1758,210 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 128 }
         status: { type: string, enum: [active, inactive], default: inactive }
+        is_default:
+          type: boolean
+          default: false
+          description: Only an active Scope can be the project default; assigning it clears the previous default atomically.
         authorized_by: { type: string, minLength: 1, maxLength: 64 }
         valid_from: { type: string, format: date-time }
-        valid_until: { type: string, format: date-time }
+        valid_until:
+          type: string
+          format: date-time
+          description: Must be later than valid_from and no more than 365 days after it.
         targets:
           type: array
           minItems: 1
           maxItems: 1000
           items: { $ref: "#/components/schemas/ScopeTargetRequest" }
+    BlueprintPreviewRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        scope_id:
+          type: integer
+          format: uint64
+          minimum: 1
+          description: Optional explicit Scope. Omit to use the project default or only compatible active Scope.
+    BlueprintStepDefaults:
+      type: object
+      required: [timeout_seconds, rate_limit, concurrency, retry_limit]
+      properties:
+        timeout_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        rate_limit: { type: integer, minimum: 1, maximum: 10000 }
+        concurrency: { type: integer, minimum: 1, maximum: 500 }
+        retry_limit: { type: integer, minimum: 0, maximum: 100 }
+    DiscoveryBlueprintStep:
+      type: object
+      required: [key, name, description, task_type, engine_route, required_target_types, depends_on, defaults]
+      properties:
+        key: { type: string }
+        name: { type: string }
+        description: { type: string }
+        task_type:
+          type: string
+          enum: [passive_intel, dns, org_intel, port_probe, web_probe, fingerprint]
+        engine_route: { type: string, enum: [passive, active] }
+        required_target_types:
+          type: array
+          items: { type: string, enum: [domain, ip, cidr, url, company] }
+        depends_on:
+          type: array
+          items: { type: string }
+        defaults: { $ref: "#/components/schemas/BlueprintStepDefaults" }
+    DiscoveryBlueprint:
+      type: object
+      required: [key, version, name, description, category, risk_level, required_target_types, steps]
+      properties:
+        key: { type: string }
+        version: { type: string }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        risk_level: { type: string, enum: [passive, active, mixed] }
+        required_target_types:
+          type: array
+          items: { type: string, enum: [domain, ip, cidr, url, company] }
+        steps:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/DiscoveryBlueprintStep" }
+    BlueprintPreviewIssue:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - PROJECT_NOT_ACTIVE
+            - SCOPE_INACTIVE
+            - SCOPE_NOT_STARTED
+            - SCOPE_EXPIRED
+            - TARGET_TYPE_MISSING
+            - ENGINE_NOT_CONFIGURED
+            - ACTIVE_DISCOVERY_NOT_ENABLED
+            - DEPENDENCY_NOT_READY
+        message: { type: string }
+        step_key: { type: string }
+    BlueprintScopeSummary:
+      type: object
+      required: [id, name, status, valid_from, valid_until, target_types]
+      properties:
+        id: { type: integer, format: uint64, minimum: 1 }
+        name: { type: string }
+        status: { type: string, enum: [active, inactive] }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        target_types:
+          type: array
+          items: { type: string, enum: [domain, ip, cidr, url, company] }
+    BlueprintStepPreview:
+      type: object
+      required: [step, ready, issues]
+      properties:
+        target_count: { type: integer, description: Concrete URL count after applying authorization to existing project assets. }
+        batch_count: { type: integer, minimum: 1, description: Number of automatic batches after applying both the 1000-target engine limit and the 64 KiB template JSON limit. }
+        target_examples:
+          type: array
+          maxItems: 3
+          items: { type: string }
+        targets_truncated: { type: boolean, deprecated: true, description: Legacy truncation indicator. Current previews enumerate all matching assets with keyset pagination and split them into complete batches. }
+        step: { $ref: "#/components/schemas/DiscoveryBlueprintStep" }
+        ready: { type: boolean }
+        issues:
+          type: array
+          items: { $ref: "#/components/schemas/BlueprintPreviewIssue" }
+    BlueprintPreview:
+      type: object
+      required: [execution_mode, blueprint, project_status, scope_selection, scope, ready, issues, steps, notice]
+      properties:
+        execution_mode: { type: string, enum: [preview_only] }
+        blueprint: { $ref: "#/components/schemas/DiscoveryBlueprint" }
+        project_status: { type: string, enum: [draft, active, suspended, archived] }
+        scope_selection:
+          type: string
+          enum: [explicit, project_default, only_compatible]
+          description: Explains how the preview Scope was resolved.
+        scope: { $ref: "#/components/schemas/BlueprintScopeSummary" }
+        ready:
+          type: boolean
+          description: Local prerequisites are satisfied; no workflow or scan has been created.
+        issues:
+          type: array
+          items: { $ref: "#/components/schemas/BlueprintPreviewIssue" }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/BlueprintStepPreview" }
+        notice: { type: string }
+    DiscoveryBlueprintPageEnvelope:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id: { type: string }
+        data:
+          type: object
+          required: [items, total, page_size, page_number]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/DiscoveryBlueprint" }
+            total: { type: integer, format: int64, minimum: 0 }
+            page_size: { type: integer, minimum: 1, maximum: 100 }
+            page_number: { type: integer, minimum: 1 }
+    BlueprintPreviewEnvelope:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id: { type: string }
+        data: { $ref: "#/components/schemas/BlueprintPreview" }
+    BlueprintMaterializedTemplate:
+      type: object
+      required: [id, project_id, scope_id, name, task_type, config, schedule, enabled, timeout_seconds, rate_limit, concurrency, retry_limit]
+      properties:
+        id: { type: integer, format: uint64, minimum: 1 }
+        project_id: { type: integer, format: uint64, minimum: 1 }
+        scope_id: { type: integer, format: uint64, minimum: 1 }
+        name: { type: string }
+        task_type: { type: string }
+        config: { type: object, additionalProperties: true }
+        schedule: { type: string }
+        enabled: { type: boolean }
+        timeout_seconds: { type: integer }
+        rate_limit: { type: integer }
+        concurrency: { type: integer }
+        retry_limit: { type: integer }
+        created_at: { type: string }
+        updated_at: { type: string }
+    BlueprintTemplateResult:
+      type: object
+      required: [step_key, batch_index, batch_count, target_count, created, template]
+      properties:
+        step_key: { type: string }
+        batch_index: { type: integer, minimum: 1 }
+        batch_count: { type: integer, minimum: 1 }
+        target_count: { type: integer, minimum: 1 }
+        created: { type: boolean }
+        template: { $ref: "#/components/schemas/BlueprintMaterializedTemplate" }
+    BlueprintTemplateMaterialization:
+      type: object
+      required: [execution_mode, blueprint_key, version, scope_id, created_count, existing_count, target_count, templates, notice]
+      properties:
+        execution_mode: { type: string, enum: [templates_only] }
+        blueprint_key: { type: string }
+        version: { type: string }
+        scope_id: { type: integer, format: uint64, minimum: 1 }
+        created_count: { type: integer, minimum: 0 }
+        existing_count: { type: integer, minimum: 0 }
+        target_count: { type: integer, minimum: 0, description: Sum of target counts across all returned templates. }
+        templates:
+          type: array
+          items: { $ref: "#/components/schemas/BlueprintTemplateResult" }
+        notice: { type: string }
+    BlueprintTemplateMaterializationEnvelope:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id: { type: string }
+        data: { $ref: "#/components/schemas/BlueprintTemplateMaterialization" }
     ScopeUpdateRequest:
       type: object
       additionalProperties: false
@@ -1269,6 +1969,9 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 128 }
         status: { type: string, enum: [active, inactive] }
+        is_default:
+          type: boolean
+          description: Only an active Scope can be the project default; assigning it clears the previous default atomically.
         authorized_by: { type: string, minLength: 1, maxLength: 64 }
         valid_from: { type: string, format: date-time }
         valid_until: { type: string, format: date-time }
@@ -1284,8 +1987,15 @@ components:
       properties:
         scope_id: { type: integer, format: uint64, minimum: 1 }
         name: { type: string, minLength: 1, maxLength: 128 }
-        task_type: { type: string, enum: [dns, ct_log, port_probe, web_probe, fingerprint, cloud_sync, passive_intel, import] }
-        config: { type: object, additionalProperties: true, maxProperties: 64 }
+        task_type:
+          type: string
+          enum: [dns, ct_log, port_probe, web_probe, fingerprint, dirscan, org_intel, cloud_sync, passive_intel, import]
+          description: Dispatchable types depend on configured engines and release policy; dirscan is currently rejected.
+        config:
+          type: object
+          additionalProperties: true
+          maxProperties: 64
+          description: port_probe requires IP targets and options.ports; web_probe/fingerprint require URL targets. Active tasks may set options.node_id.
         schedule: { type: string, maxLength: 255 }
         enabled: { type: boolean, default: false }
         timeout_seconds: { type: integer, minimum: 1, maximum: 86400 }
@@ -1293,8 +2003,12 @@ components:
           type: integer
           minimum: 1
           maximum: 10000
-          description: Per-job maximum outbound provider and DNS operations started per second.
-        concurrency: { type: integer, minimum: 1, maximum: 500 }
+          description: Platform template cap. The active engine API does not currently receive this field; active node configuration governs actual execution rate.
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 500
+          description: Platform template cap. The active engine API does not currently receive this field; active node configuration governs actual execution concurrency.
         retry_limit: { type: integer, minimum: 0, maximum: 100 }
     TaskTemplateUpdateRequest:
       type: object
@@ -1302,16 +2016,27 @@ components:
       minProperties: 1
       properties:
         name: { type: string, minLength: 1, maxLength: 128 }
-        task_type: { type: string, enum: [dns, ct_log, port_probe, web_probe, fingerprint, cloud_sync, passive_intel, import] }
-        config: { type: object, additionalProperties: true, maxProperties: 64 }
+        task_type:
+          type: string
+          enum: [dns, ct_log, port_probe, web_probe, fingerprint, dirscan, org_intel, cloud_sync, passive_intel, import]
+          description: Dispatchable types depend on configured engines and release policy; dirscan is currently rejected.
+        config:
+          type: object
+          additionalProperties: true
+          maxProperties: 64
+          description: port_probe requires IP targets and options.ports; web_probe/fingerprint require URL targets. Active tasks may set options.node_id.
         schedule: { type: string, maxLength: 255 }
         timeout_seconds: { type: integer, minimum: 1, maximum: 86400 }
         rate_limit:
           type: integer
           minimum: 1
           maximum: 10000
-          description: Per-job maximum outbound provider and DNS operations started per second.
-        concurrency: { type: integer, minimum: 1, maximum: 500 }
+          description: Platform template cap. The active engine API does not currently receive this field; active node configuration governs actual execution rate.
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 500
+          description: Platform template cap. The active engine API does not currently receive this field; active node configuration governs actual execution concurrency.
         retry_limit: { type: integer, minimum: 0, maximum: 100 }
     TaskTemplateEnabledRequest:
       type: object
@@ -1319,6 +2044,12 @@ components:
       required: [enabled]
       properties:
         enabled: { type: boolean }
+    TaskRunCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        approved_by: { type: string, maxLength: 64 }
+        approval_reason: { type: string, maxLength: 512 }
     LoginRequest:
       type: object
       required: [username, password]
@@ -1517,11 +2248,27 @@ components:
               type: object
               properties:
                 duplicate: { type: boolean }
+    StageProgress:
+      type: object
+      additionalProperties: false
+      required: [stage, provider, target, status, discovered, completed, total, failed, no_records]
+      properties:
+        stage: { type: string, enum: [collect, dns] }
+        provider: { type: string, minLength: 1, maxLength: 64 }
+        target: { type: string, maxLength: 253 }
+        status: { type: string, enum: [queued, running, success, partial, failed, skipped] }
+        discovered: { type: integer, minimum: 0, maximum: 1000000 }
+        completed: { type: integer, minimum: 0, maximum: 1000000 }
+        total: { type: integer, minimum: 0, maximum: 1000000 }
+        failed: { type: integer, minimum: 0, maximum: 1000000 }
+        no_records: { type: integer, minimum: 0, maximum: 1000000 }
+        message: { type: string, maxLength: 512 }
     DiscoveryCallbackBatchV1:
       type: object
       additionalProperties: false
       required: [schema_version, run_id, seq, phase, status, result_count, observed_at, assets, relations, exposures, provider_errors, error_summary]
       properties:
+        stage_progress: { $ref: "#/components/schemas/StageProgress" }
         schema_version: { type: string, enum: ["1.0"] }
         run_id: { type: integer, format: uint64, minimum: 1 }
         seq: { type: integer, format: uint64, minimum: 1 }
@@ -1700,13 +2447,16 @@ components:
           properties:
             data:
               type: object
-              required: [role, permissions, can_activate, onboarding_missing]
+              required: [role, permissions, project_status, can_activate, onboarding_missing]
               properties:
                 role: { type: string }
                 permissions:
                   type: array
                   uniqueItems: true
                   items: { type: string }
+                project_status:
+                  type: string
+                  enum: [draft, active, suspended, archived]
                 can_activate: { type: boolean }
                 onboarding_missing:
                   type: array
@@ -1729,6 +2479,16 @@ components:
         business_unit: { type: string, maxLength: 128 }
         criticality: { type: string, enum: [low, medium, high, critical] }
         description: { type: string, maxLength: 65535 }
+    ProjectDeleteRequest:
+      type: object
+      required: [confirmation, reason]
+      properties:
+        confirmation:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Exact project name required as destructive-action confirmation.
+        reason: { type: string, minLength: 1, maxLength: 512 }
     ProjectSubjectRequest:
       type: object
       required: [subject_name]
@@ -1747,10 +2507,16 @@ components:
       type: object
       required: [domain]
       properties:
-        domain: { type: string, maxLength: 253 }
+        domain:
+          type: string
+          maxLength: 253
+          description: Public registrable root or delegated subdomain FQDN. This profile does not grant scan authorization.
         subject_id: { type: integer, format: uint64 }
         is_primary: { type: boolean }
-        ownership_status: { type: string, enum: [unverified, verified, mismatch] }
+        ownership_status:
+          type: string
+          enum: [unverified, mismatch]
+          description: verified is reserved for the DNS TXT ownership-verification endpoint.
         source: { type: string, maxLength: 64 }
         evidence_summary: { type: string, maxLength: 1024 }
     ProjectDomainUpdateRequest:
@@ -1758,7 +2524,10 @@ components:
       properties:
         subject_id: { type: integer, format: uint64 }
         is_primary: { type: boolean }
-        ownership_status: { type: string, enum: [unverified, verified, mismatch] }
+        ownership_status:
+          type: string
+          enum: [unverified, mismatch]
+          description: verified is reserved for the DNS TXT ownership-verification endpoint.
         source: { type: string, maxLength: 64 }
         evidence_summary: { type: string, maxLength: 1024 }
     ICPRequest:
@@ -1821,6 +2590,95 @@ components:
                 total: { type: integer }
                 page_size: { type: integer }
                 page_number: { type: integer }
+    AssetSummary:
+      type: object
+      required: [inventory, by_type, freshness, governance]
+      properties:
+        inventory:
+          type: object
+          required: [total, managed_total, active, inactive, ignored]
+          properties:
+            total: { type: integer }
+            managed_total: { type: integer, description: Non-ignored assets. }
+            active: { type: integer }
+            inactive: { type: integer }
+            ignored: { type: integer }
+        by_type:
+          type: object
+          properties:
+            domain: { type: integer }
+            subdomain: { type: integer }
+            ip: { type: integer }
+            port: { type: integer }
+            service: { type: integer }
+            web: { type: integer }
+            certificate: { type: integer }
+            cloud_resource: { type: integer }
+            third_party: { type: integer }
+        freshness:
+          type: object
+          properties:
+            new_24h: { type: integer, description: Counted by first_seen. }
+            observed_24h: { type: integer, description: Counted by last_seen. }
+            stale_30d: { type: integer, description: last_seen older than 30 days. }
+        governance:
+          type: object
+          properties:
+            unowned: { type: integer }
+            unassigned_business_unit: { type: integer }
+            low_confidence: { type: integer }
+            low_confidence_below: { type: integer, minimum: 0, maximum: 100 }
+    AssetSummaryEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/AssetSummary"
+    AssetGraphNode:
+      type: object
+      properties:
+        id: { type: integer, format: uint64 }
+        asset_type: { type: string }
+        display_name: { type: string }
+        value: { type: string }
+        status: { type: string }
+        source: { type: string }
+        owner: { type: string }
+        business_unit: { type: string }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        last_seen: { type: string, format: date-time }
+        focus: { type: boolean }
+    AssetGraphEdge:
+      type: object
+      properties:
+        id: { type: integer, format: uint64 }
+        from_asset_id: { type: integer, format: uint64 }
+        to_asset_id: { type: integer, format: uint64 }
+        relation_type: { type: string, enum: [contains, resolves_to, redirects_to, cert_binding, references] }
+        source: { type: string }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        last_seen: { type: string, format: date-time }
+    AssetGraph:
+      type: object
+      required: [nodes, edges, truncated]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetGraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetGraphEdge"
+        truncated: { type: boolean }
+    AssetGraphEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/GenericEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/AssetGraph"
     AssetImportRequest:
       type: object
       required: [rows]
@@ -1847,3 +2705,64 @@ components:
         owner: { type: string }
         business_unit: { type: string }
         status: { type: string }
+
+    DerivedSelection:
+      type: object
+      required: [observation_ids, scope_fingerprint]
+      properties:
+        observation_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items: { type: integer, format: uint64, minimum: 1 }
+        scope_fingerprint:
+          type: string
+          minLength: 64
+          maxLength: 64
+          description: Opaque SHA-256 fingerprint returned by the current derived-targets preview.
+    DerivedTarget:
+      type: object
+      required: [observation_id, target_type, value, status, reason, provider, observed_at, evidence_hash]
+      properties:
+        observation_id: { type: integer, format: uint64 }
+        target_type: { type: string, enum: [domain, ip, url] }
+        value: { type: string }
+        status: { type: string, enum: [inherited, pending, excluded, blocked] }
+        reason: { type: string }
+        provider: { type: string }
+        observed_at: { type: string, format: date-time }
+        evidence_hash: { type: string, minLength: 64, maxLength: 64 }
+    DerivedTargetPage:
+      type: object
+      required: [source_run_id, parent_scope_id, parent_scope_name, scope_fingerprint, valid_until, parent_active, source_complete, items, next_cursor]
+      properties:
+        source_run_id: { type: integer, format: uint64 }
+        parent_scope_id: { type: integer, format: uint64 }
+        parent_scope_name: { type: string }
+        scope_fingerprint: { type: string }
+        valid_until: { type: string, format: date-time }
+        parent_active: { type: boolean }
+        source_complete: { type: boolean }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DerivedTarget' }
+        next_cursor: { type: integer, format: uint64, description: Zero means the last page. }
+    TargetInheritance:
+      type: object
+      description: Server-generated immutable target provenance stored at config.inheritance. Never forwarded to an external engine. Template JSON is bounded to 65536 bytes.
+      required: [source_run_id, parent_scope_id, parent_fingerprint, evidence]
+      properties:
+        source_run_id: { type: integer, format: uint64 }
+        parent_scope_id: { type: integer, format: uint64 }
+        parent_fingerprint: { type: string }
+        evidence:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [observation_id, hash, observed_at]
+            properties:
+              observation_id: { type: integer, format: uint64 }
+              hash: { type: string }
+              observed_at: { type: string, format: date-time }

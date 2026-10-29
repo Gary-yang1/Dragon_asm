@@ -24,7 +24,22 @@ const risk = {
   created_at: '2026-07-08T00:00:00Z'
 };
 
-function renderRisks() {
+// Shaped like the Go response DTO in internal/risk/handler.go: evidence is a
+// summary string, and score_factors is an object keyed by factor name.
+const riskDetailFields = {
+  risk_type: 'exposure',
+  source: 'discovery',
+  rule_id: 'RULE-ADMIN-PANEL',
+  evidence_summary: 'https://admin.example.com',
+  evidence_ref: 'run-7/seq-3',
+  score_level: 'critical',
+  score_model_version: 'v1',
+  score_factors: { internet_exposed: 25 },
+  first_seen: '2026-07-08T00:00:00Z',
+  last_seen: '2026-07-08T01:00:00Z'
+};
+
+function renderRisks(path = '/risks') {
   localStorage.setItem(
     'asm.auth',
     JSON.stringify({
@@ -43,7 +58,7 @@ function renderRisks() {
     })
   );
   return render(
-    <MemoryRouter initialEntries={['/risks']}>
+    <MemoryRouter initialEntries={[path]}>
       <AuthProvider>
         <App />
       </AuthProvider>
@@ -63,13 +78,7 @@ describe('RisksPage', () => {
       http.get('/api/v1/projects/1/risks/101', () =>
         HttpResponse.json({
           request_id: 'req-risk',
-          data: {
-            ...risk,
-            evidence: [{ label: 'Endpoint', value: 'https://admin.example.com' }],
-            score_factors: [{ name: 'internet_exposed', value: 25, reason: 'Public endpoint' }],
-            timeline: [{ id: 1, action: 'created', actor: 'system', at: '2026-07-08T00:00:00Z' }],
-            tickets: [{ id: 501, title: 'Fix admin panel', status: 'open' }]
-          }
+          data: { ...risk, ...riskDetailFields }
         })
       ),
       http.post('/api/v1/projects/1/risks/101/status-transitions', async ({ request }) => {
@@ -78,39 +87,52 @@ describe('RisksPage', () => {
           request_id: 'req-transition',
           data: {
             ...risk,
+            ...riskDetailFields,
             status: body.action === 'confirm' ? 'confirmed' : 'false_positive',
-            available_actions: ['assign'],
-            evidence: [{ label: 'Endpoint', value: 'https://admin.example.com' }],
-            score_factors: [{ name: 'internet_exposed', value: 25, reason: 'Public endpoint' }],
-            timeline: [
-              { id: 1, action: 'created', actor: 'system', at: '2026-07-08T00:00:00Z' },
-              { id: 2, action: body.action, actor: 'alice', at: '2026-07-08T01:00:00Z' }
-            ],
-            tickets: []
+            available_actions: ['assign']
           }
         });
       }),
-      http.post('/api/v1/projects/1/risks/manual', async ({ request }) => {
-        const body = (await request.json()) as { title: string; severity: string; owner: string };
-        return HttpResponse.json({
-          request_id: 'req-manual',
-          data: { ...risk, id: 102, title: body.title, severity: body.severity, owner: body.owner }
-        });
-      }),
-      http.post('/api/v1/projects/1/risks/batch-assign', () =>
-        HttpResponse.json({ request_id: 'req-assign', data: { updated: 1 } })
-      ),
       http.get('/api/v1/projects/1/risk-suppressions', () =>
         HttpResponse.json({
           request_id: 'req-suppressions',
-          data: { items: [{ id: 1, name: 'Accepted lab', pattern: 'lab-*', expires_at: '2026-08-01T00:00:00Z', enabled: true }], total: 1, page_size: 50, page_number: 1 }
+          data: {
+            items: [{
+              id: 1, project_id: 1, name: 'Accepted lab', risk_type: 'high_risk_port',
+              rule_id: 'RULE-0001', reason: 'lab environment', expires_at: '2026-08-01T00:00:00Z', enabled: true
+            }],
+            total: 1, page_size: 50, page_number: 1
+          }
         })
       ),
       http.post('/api/v1/projects/1/risk-suppressions', async ({ request }) => {
-        const body = (await request.json()) as { name: string; pattern: string; expires_at: string };
-        return HttpResponse.json({ request_id: 'req-suppression-create', data: { id: 2, enabled: true, ...body } });
+        const body = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({
+          request_id: 'req-suppression-create',
+          data: { id: 2, project_id: 1, enabled: true, risk_type: '', rule_id: '', reason: '', expires_at: '', ...body }
+        });
       })
     );
+  });
+
+  it('opens a risk linked from an asset and filters by that asset', async () => {
+    const assetIds: string[] = [];
+    server.use(http.get('/api/v1/projects/1/risks', ({ request }) => {
+      assetIds.push(new URL(request.url).searchParams.get('asset_id') ?? '');
+      return HttpResponse.json({ data: { items: [risk], total: 1, page_size: 20, page_number: 1 } });
+    }));
+    renderRisks('/projects/1/risks?asset_id=9&risk_id=101');
+    const drawer = await screen.findByRole('dialog');
+    expect(await within(drawer).findByText('https://admin.example.com')).toBeInTheDocument();
+    await waitFor(() => expect(assetIds.at(-1)).toBe('9'));
+    await userEvent.click(screen.getByRole('button', { name: '关闭' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    const filter = screen.getByLabelText('已应用的风险筛选');
+    expect(filter).toHaveTextContent('仅看资产 #9 的风险');
+    const close = filter.querySelector('.ant-tag-close-icon');
+    if (!close) throw new Error('asset filter tag is not closable');
+    await userEvent.click(close);
+    await waitFor(() => expect(assetIds.at(-1)).toBe(''));
   });
 
   it('opens risk detail and renders backend transition actions', async () => {
@@ -118,36 +140,45 @@ describe('RisksPage', () => {
     await userEvent.click(await screen.findByText('Public admin panel'));
 
     expect(await screen.findByText('https://admin.example.com')).toBeInTheDocument();
-    expect(screen.getByText('internet_exposed=25')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'confirm' }));
+    expect(screen.getByText('internet_exposed')).toBeInTheDocument();
+    expect(screen.getByText('25')).toBeInTheDocument();
+    // A transition now opens a form so the operator supplies the reason that lands
+    // in the status history, instead of the page sending a hardcoded literal.
+    await userEvent.click(screen.getByRole('button', { name: /确\s*认/ }));
+    const dialog = await findTransitionDialog();
+    await userEvent.type(requiredField(dialog, 'reason'), 'triaged by analyst');
+    await userEvent.click(within(dialog).getByRole('button', { name: /提\s*交/ }));
 
-    expect(await screen.findByText('confirmed')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'assign' })).toBeInTheDocument();
+    expect(await screen.findByText('已确认')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^分\s*派$/ })).toBeInTheDocument();
   });
 
-  it('supports batch assign', async () => {
+  it('sends the operator-supplied reason rather than a hardcoded one', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    server.use(
+      http.post('/api/v1/projects/1/risks/101/status-transitions', async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return HttpResponse.json({
+          request_id: 'req-transition',
+          data: { ...risk, ...riskDetailFields, status: 'confirmed', available_actions: ['assign'] }
+        });
+      })
+    );
+
     renderRisks();
-    expect(await screen.findByText('Public admin panel')).toBeInTheDocument();
-    await userEvent.click(screen.getAllByRole('checkbox')[1]);
-    await userEvent.click(screen.getByRole('button', { name: '批量分派' }));
-    const assignDialog = await screen.findByRole('dialog', { name: '批量分派' });
-    await userEvent.type(requiredField(assignDialog, 'owner'), 'bob');
-    await userEvent.click(within(assignDialog).getByRole('button', { name: /保\s*存/ }));
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '批量分派' })).not.toBeInTheDocument());
+    await userEvent.click(await screen.findByText('Public admin panel'));
+    await userEvent.click(await screen.findByRole('button', { name: /确\s*认/ }));
+    const dialog = await findTransitionDialog();
+    await userEvent.type(requiredField(dialog, 'reason'), 'triaged by analyst');
+    await userEvent.click(within(dialog).getByRole('button', { name: /提\s*交/ }));
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({ action: 'confirm', reason: 'triaged by analyst' });
+    expect(bodies[0].reason).not.toBe('operator action');
   });
 
-  it('supports manual risk creation', async () => {
-    renderRisks();
-    expect(await screen.findByText('Public admin panel')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: '人工录入' }));
-    const manualDialog = await screen.findByRole('dialog', { name: '人工录入风险' });
-    await userEvent.type(requiredField(manualDialog, 'title'), 'Manual exposed admin');
-    await userEvent.type(requiredField(manualDialog, 'owner'), 'carol');
-    await userEvent.type(requiredField(manualDialog, 'evidence'), 'operator report');
-    await userEvent.click(within(manualDialog).getByRole('button', { name: /保\s*存/ }));
 
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '人工录入风险' })).not.toBeInTheDocument());
-  });
 
   it('loads and creates suppression rules', async () => {
     renderRisks();
@@ -156,13 +187,25 @@ describe('RisksPage', () => {
     expect(await screen.findByText(/Accepted lab/)).toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText('名称'), 'Temporary vendor');
-    await userEvent.type(screen.getByLabelText('匹配模式'), 'vendor-*');
-    await userEvent.type(screen.getByLabelText('过期时间'), '2026-08-08T00:00:00Z');
+    // Suppression matches on rule_id / risk_type and requires an audited reason —
+    // there is no free-form "pattern" field.
+    await userEvent.type(screen.getByLabelText('规则编号'), 'RULE-0002');
+    await userEvent.type(screen.getByLabelText('抑制原因'), '第三方待整改');
     await userEvent.click(screen.getByRole('button', { name: '新增规则' }));
 
     await waitFor(() => expect(screen.getByText(/Temporary vendor/)).toBeInTheDocument());
   });
 });
+
+// The drawer and the modal are both role="dialog" and the test setup stubs id
+// generation, so both share aria-labelledby="test-id" and an accessible-name query
+// cannot tell them apart. Anchor on the modal's title text instead.
+async function findTransitionDialog() {
+  const title = await screen.findByText(/风险状态流转/);
+  const dialog = title.closest('.ant-modal');
+  if (!dialog) throw new Error('transition modal not found');
+  return dialog as HTMLElement;
+}
 
 function requiredField(container: HTMLElement, id: string) {
   const field = container.querySelector(`#${id}`);

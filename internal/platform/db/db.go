@@ -46,9 +46,16 @@ func LoadConfigFromEnv() Config {
 // Open returns a pinged *sql.DB backed by the MySQL driver. parseTime maps
 // DATETIME columns to time.Time and loc=UTC keeps timestamps zone-stable; the
 // soft-delete sentinel '1970-01-01 00:00:00.000' therefore round-trips cleanly.
+//
+// time_zone pins the *session* to UTC. loc=UTC alone only tells the driver how to
+// parse what it reads back; every DEFAULT CURRENT_TIMESTAMP(3) column and every
+// in-SQL comparison against CURRENT_TIMESTAMP(3) — SLA overdue math, scope
+// validity windows — is evaluated by the server in its own zone. On a server not
+// running UTC those values are silently offset from the UTC the application
+// writes, so a risk reads as overdue hours early or late.
 func Open(cfg Config) (*sql.DB, error) {
 	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=UTC&charset=utf8mb4",
+		"%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=UTC&charset=utf8mb4&time_zone=%%27%%2B00%%3A00%%27",
 		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.DBName,
 	)
 	db, err := sql.Open("mysql", dsn)

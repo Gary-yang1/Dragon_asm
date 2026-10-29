@@ -1,4 +1,4 @@
-import { Button, Empty, Progress, Space, Table, Tag } from 'antd';
+import { Button, Empty, Progress, Space, Table } from 'antd';
 import { ArrowRight, ClipboardList, FolderKanban, Plus, Server, ShieldAlert, TimerReset } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -6,11 +6,11 @@ import { useNavigate } from 'react-router-dom';
 import { getWorkspaceSummary, type WorkspaceSummary } from '../../api/workspace';
 import { Permission } from '../../auth/permissions';
 import { usePermission } from '../../auth/usePermission';
+import { EnumChip } from '../../components/StatusChip';
+import { projectStatusMeta } from '../../utils/taxonomy';
 import { PageHeader } from '../../components/PageHeader';
 import { StateView } from '../../components/StateView';
 import { StatCard } from '../../components/StatCard';
-
-const statusColor = { draft: 'gold', active: 'green', suspended: 'orange', archived: 'default' } as const;
 
 export function WorkspacePage() {
   const navigate = useNavigate();
@@ -89,7 +89,7 @@ export function WorkspacePage() {
               columns={[
                 { title: '项目', dataIndex: 'name', render: (name, row) => <Space direction="vertical" size={0}><strong>{name}</strong><span className="secondary-text">{row.project_code}</span></Space> },
                 { title: '业务单元', dataIndex: 'business_unit' },
-                { title: '状态', dataIndex: 'status', render: (status) => <Tag color={statusColor[status as keyof typeof statusColor]}>{status}</Tag> },
+                { title: '状态', dataIndex: 'status', render: (status) => <EnumChip map={projectStatusMeta} value={status as string} /> },
                 { title: '更新时间', dataIndex: 'updated_at', render: (value) => new Date(value).toLocaleString() },
                 { title: '', width: 64, render: (_, row) => <Button type="text" aria-label={`进入${row.name}`} icon={<ArrowRight size={16} />} onClick={() => navigate(`/projects/${row.id}/overview`)} /> }
               ]}

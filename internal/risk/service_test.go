@@ -3,6 +3,8 @@ package risk
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +180,57 @@ func (f *fakeRepo) GetRiskByKey(_ context.Context, projectID uint64, riskKey str
 	return &cp, nil
 }
 
+// matchesRiskFilter mirrors the SQL: an empty argument means "no filter".
+func matchesRiskFilter(r *Risk, in ListFilter) bool {
+	if r.ProjectID != in.ProjectID {
+		return false
+	}
+	if in.Severity != "" && r.Severity != in.Severity {
+		return false
+	}
+	if in.Status != "" && r.Status != in.Status {
+		return false
+	}
+	if in.Owner != "" && r.Owner != in.Owner {
+		return false
+	}
+	if in.AssetID != 0 && r.AssetID != in.AssetID {
+		return false
+	}
+	if in.Keyword != "" && !strings.Contains(r.Title+" "+r.BusinessUnit, in.Keyword) {
+		return false
+	}
+	return true
+}
+
+func (f *fakeRepo) ListRisksFiltered(_ context.Context, in ListFilter) ([]*Risk, error) {
+	out := []*Risk{}
+	for _, r := range f.risks {
+		if matchesRiskFilter(r, in) {
+			cp := *r
+			out = append(out, &cp)
+		}
+	}
+	if in.Offset >= int32(len(out)) {
+		return nil, nil
+	}
+	end := in.Offset + in.Limit
+	if end > int32(len(out)) {
+		end = int32(len(out))
+	}
+	return out[in.Offset:end], nil
+}
+
+func (f *fakeRepo) CountRisksFiltered(_ context.Context, in ListFilter) (int64, error) {
+	var n int64
+	for _, r := range f.risks {
+		if matchesRiskFilter(r, in) {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (f *fakeRepo) ListRisks(_ context.Context, projectID uint64, limit, offset int32) ([]*Risk, error) {
 	out := []*Risk{}
 	for _, r := range f.risks {
@@ -313,6 +366,36 @@ func (f *fakeRepo) GetSuppressionRuleByID(_ context.Context, projectID, id uint6
 	}
 	cp := *rule
 	return &cp, nil
+}
+
+// The management listing returns disabled and expired rules too.
+func (f *fakeRepo) ListSuppressionRules(_ context.Context, projectID uint64, limit, offset int32) ([]*SuppressionRule, error) {
+	out := []*SuppressionRule{}
+	for _, rule := range f.suppressions {
+		if rule.ProjectID == projectID {
+			cp := *rule
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if offset >= int32(len(out)) {
+		return nil, nil
+	}
+	end := offset + limit
+	if end > int32(len(out)) {
+		end = int32(len(out))
+	}
+	return out[offset:end], nil
+}
+
+func (f *fakeRepo) CountSuppressionRules(_ context.Context, projectID uint64) (int64, error) {
+	var n int64
+	for _, rule := range f.suppressions {
+		if rule.ProjectID == projectID {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (f *fakeRepo) ListActiveSuppressionRules(_ context.Context, projectID uint64, now time.Time) ([]*SuppressionRule, error) {
@@ -1016,4 +1099,41 @@ func applyRiskRefresh(r *Risk, in UpsertRiskParams) {
 
 func key(projectID uint64, value string) string {
 	return fmt.Sprintf("%d:%s", projectID, value)
+}
+
+func TestAvailableStatusActionsMatchesTransitionTable(t *testing.T) {
+	cases := map[string][]string{
+		StatusNew:           {StatusActionConfirm, StatusActionFalsePositive},
+		StatusConfirmed:     {StatusActionAssign, StatusActionAccept, StatusActionFalsePositive},
+		StatusAssigned:      {StatusActionStartFix, StatusActionMarkFixed, StatusActionAccept, StatusActionFalsePositive},
+		StatusFixing:        {StatusActionMarkFixed, StatusActionAccept, StatusActionFalsePositive},
+		StatusFixed:         {StatusActionReopen},
+		StatusRiskAccepted:  {StatusActionReopen},
+		StatusFalsePositive: {StatusActionReopen},
+		StatusReopened:      {StatusActionConfirm, StatusActionAssign},
+	}
+
+	for status, want := range cases {
+		t.Run(status, func(t *testing.T) {
+			got := AvailableStatusActions(status)
+			if len(got) != len(want) {
+				t.Fatalf("status %q: got %v, want %v", status, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("status %q: got %v, want %v", status, got, want)
+				}
+			}
+			// Every advertised action must actually be accepted by the resolver.
+			for _, action := range got {
+				if _, err := nextRiskStatus(action, status); err != nil {
+					t.Fatalf("advertised action %q is rejected from %q: %v", action, status, err)
+				}
+			}
+		})
+	}
+
+	if actions := AvailableStatusActions("not-a-status"); len(actions) != 0 {
+		t.Fatalf("unknown status must offer no actions, got %v", actions)
+	}
 }

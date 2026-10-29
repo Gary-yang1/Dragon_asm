@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gary-yang1/Dragon_asm/internal/platform/audit"
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/safehttp"
 )
 
 var (
@@ -221,12 +222,40 @@ func validateCreateRule(in CreateRuleInput) error {
 	if len(in.Recipients) == 0 {
 		return ErrInvalidRecipient
 	}
+	channel := strings.TrimSpace(in.Channel)
 	for _, recipient := range in.Recipients {
-		if strings.TrimSpace(recipient) == "" || len(recipient) > 255 {
+		recipient = strings.TrimSpace(recipient)
+		if recipient == "" || len(recipient) > 255 {
 			return ErrInvalidRecipient
+		}
+		if err := validateRecipient(channel, recipient); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// validateRecipient rejects a webhook target the platform must never call, at
+// configuration time. A recipient used to be length-checked only, so a rule could
+// point the worker at http://169.254.169.254/ and the platform would fetch it.
+// The dial-time guard in platform/safehttp remains the authoritative control;
+// this just refuses the obvious cases while the operator is still looking.
+func validateRecipient(channel, recipient string) error {
+	switch channel {
+	case ChannelWebhook:
+		if err := safehttp.ValidateURL(recipient); err != nil {
+			return errors.Join(ErrInvalidRecipient, err)
+		}
+		return nil
+	case ChannelEmail:
+		at := strings.IndexByte(recipient, '@')
+		if at <= 0 || at == len(recipient)-1 || strings.ContainsAny(recipient, " \t\r\n") {
+			return ErrInvalidRecipient
+		}
+		return nil
+	default:
+		return ErrInvalidChannel
+	}
 }
 
 func validTrigger(v string) bool {

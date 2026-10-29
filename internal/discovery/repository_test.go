@@ -15,8 +15,8 @@ import (
 )
 
 var (
-	scopeCols        = []string{"id", "tenant_id", "org_id", "project_id", "name", "status", "authorized_by", "valid_from", "valid_until", "created_at", "updated_at", "created_by", "updated_by", "deleted_at"}
-	scopeTargetCols  = []string{"id", "tenant_id", "org_id", "project_id", "scope_id", "target_type", "match_mode", "target_value", "created_at", "updated_at", "created_by", "updated_by", "deleted_at"}
+	scopeCols        = []string{"id", "tenant_id", "org_id", "project_id", "name", "status", "authorized_by", "valid_from", "valid_until", "created_at", "updated_at", "created_by", "updated_by", "deleted_at", "is_default", "default_marker"}
+	scopeTargetCols  = []string{"id", "tenant_id", "org_id", "project_id", "scope_id", "target_type", "match_mode", "target_value", "created_at", "updated_at", "created_by", "updated_by", "deleted_at", "coverage_mode", "url_rule"}
 	taskTemplateCols = []string{
 		"id", "tenant_id", "org_id", "project_id", "scope_id", "name", "task_type", "config", "schedule", "enabled",
 		"timeout_seconds", "rate_limit", "concurrency", "retry_limit", "created_at", "updated_at", "created_by", "updated_by", "deleted_at",
@@ -25,6 +25,7 @@ var (
 		"id", "tenant_id", "org_id", "project_id", "template_id", "scope_id", "task_type", "status", "progress", "timeout_seconds", "rate_limit", "concurrency", "retry_limit",
 		"attempt", "engine_job_id", "dispatched_at", "last_callback_at", "result_count", "callback_secret_ref",
 		"started_at", "finished_at", "error_summary", "created_at", "updated_at", "created_by", "updated_by", "deleted_at",
+		"approved_by", "approval_reason",
 	}
 )
 
@@ -36,6 +37,7 @@ func scopeRows(now time.Time, id, projectID uint64, name string) *sqlmock.Rows {
 		id, "t1", "o1", projectID, name, StatusActive, "owner-ok",
 		now.Add(-time.Hour), now.Add(time.Hour),
 		now, now, "u1", "u1", time.Time{},
+		false, nil,
 	)
 }
 
@@ -44,6 +46,7 @@ func scopeTargetRows(now time.Time, scopeID, projectID uint64, targetType, match
 		uint64(10), "t1", "o1", projectID, scopeID,
 		targetType, matchMode, targetValue,
 		now, now, "u1", "u1", time.Time{},
+		CoverageModeExact, nil,
 	)
 }
 
@@ -62,7 +65,7 @@ func taskRunRows(now time.Time, runID, projectID, templateID, scopeID uint64, ta
 		taskType, status,
 		int32(0), int32(30), int32(20), int32(10), int32(3),
 		int32(0), "", time.Time{}, time.Time{}, uint64(0), "",
-		time.Time{}, time.Time{}, "", now, now, "u1", "u1", time.Time{},
+		time.Time{}, time.Time{}, "", now, now, "u1", "u1", time.Time{}, "", "",
 	)
 }
 
@@ -99,6 +102,7 @@ func TestRepoListScopesByProjectScoped(t *testing.T) {
 				uint64(4), "t1", "o1", uint64(3), "scope-b", StatusActive, "owner-ok",
 				now, now.Add(time.Hour),
 				now, now, "u1", "u1", time.Time{},
+				false, nil,
 			),
 		)
 
@@ -137,6 +141,7 @@ func TestRepoCreateScopeWritesCoreFields(t *testing.T) {
 			"prod", StatusActive, "owner",
 			time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+			false,
 			"u1", "u1",
 		).
 		WillReturnResult(sqlmock.NewResult(99, 1))
@@ -165,7 +170,7 @@ func TestRepoUpdateScopeIsProjectScoped(t *testing.T) {
 	defer sqlDB.Close()
 
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE scope")).
-		WithArgs("prod2", StatusInactive, "owner", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "u2", uint64(7), uint64(1)).
+		WithArgs("prod2", StatusInactive, "owner", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), false, "u2", uint64(7), uint64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	repo := NewRepository(dbgen.New(sqlDB))
@@ -193,7 +198,7 @@ func TestRepoDeactivateScopeScoped(t *testing.T) {
 
 	now := time.Now().UTC()
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE scope")).
-		WithArgs(StatusInactive, "u9", now, uint64(9), uint64(4)).
+		WithArgs("u9", now, uint64(9), uint64(4)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	repo := NewRepository(dbgen.New(sqlDB))
@@ -209,19 +214,20 @@ func TestRepoInsertScopeTargetWritesProjectScopedTarget(t *testing.T) {
 	defer sqlDB.Close()
 
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scope_target")).
-		WithArgs("t1", "o1", uint64(1), uint64(7), TargetTypeDomain, MatchModeInclude, "example.com", "u1", "u1").
+		WithArgs("t1", "o1", uint64(1), uint64(7), TargetTypeDomain, MatchModeInclude, CoverageModeExact, "example.com", "u1", "u1", []byte(nil)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	repo := NewRepository(dbgen.New(sqlDB))
 	err = repo.InsertScopeTarget(context.Background(), InsertScopeTargetParams{
-		TenantID:   "t1",
-		OrgID:      "o1",
-		ProjectID:  1,
-		ScopeID:    7,
-		TargetType: TargetTypeDomain,
-		MatchMode:  MatchModeInclude,
-		Value:      "example.com",
-		ActorID:    "u1",
+		TenantID:     "t1",
+		OrgID:        "o1",
+		ProjectID:    1,
+		ScopeID:      7,
+		TargetType:   TargetTypeDomain,
+		MatchMode:    MatchModeInclude,
+		CoverageMode: CoverageModeExact,
+		Value:        "example.com",
+		ActorID:      "u1",
 	})
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -368,6 +374,8 @@ func TestRepoCreateTaskRunWritesProjectScoped(t *testing.T) {
 			int32(30), int32(20), int32(10), int32(3),
 			int32(0), "", databaseUnsetTime, databaseUnsetTime, uint64(0),
 			"", databaseUnsetTime, databaseUnsetTime, "", "u1", "u1",
+			// The approver has to reach the row, not just the audit log.
+			"bob", "authorised in ticket OPS-42",
 		).
 		WillReturnResult(sqlmock.NewResult(88, 1))
 
@@ -394,6 +402,8 @@ func TestRepoCreateTaskRunWritesProjectScoped(t *testing.T) {
 		StartedAt:         now,
 		FinishedAt:        now,
 		ErrorSummary:      "",
+		ApprovedBy:        "bob",
+		ApprovalReason:    "authorised in ticket OPS-42",
 		ActorID:           "u1",
 	})
 	require.NoError(t, err)
@@ -545,13 +555,13 @@ func TestRepoListRunningRunsForReconcile(t *testing.T) {
 	defer sqlDB.Close()
 
 	now := time.Now().UTC()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at FROM task_run")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, tenant_id, org_id, project_id, template_id, scope_id, task_type, status, progress, timeout_seconds, rate_limit, concurrency, retry_limit, attempt, engine_job_id, dispatched_at, last_callback_at, result_count, callback_secret_ref, started_at, finished_at, error_summary, created_at, updated_at, created_by, updated_by, deleted_at, approved_by, approval_reason FROM task_run")).
 		WithArgs(int32(20)).
 		WillReturnRows(sqlmock.NewRows(taskRunCols).AddRow(
 			uint64(77), "t1", "o1", uint64(6), uint64(5), uint64(4), TaskTypeDNS,
 			TaskRunStatusRunning, int32(0), int32(60), int32(10), int32(2), int32(1),
 			int32(1), "engine-1", now.Add(-time.Minute), time.Time{}, uint64(0), "",
-			now.Add(-time.Minute), time.Time{}, "", now, now, "u1", "u1", time.Time{},
+			now.Add(-time.Minute), time.Time{}, "", now, now, "u1", "u1", time.Time{}, "", "",
 		))
 
 	repo := NewRepository(dbgen.New(sqlDB))

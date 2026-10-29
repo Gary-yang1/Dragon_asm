@@ -1,4 +1,4 @@
-import { Alert, Button, Form, Input, Result, Select, Space, Steps, Switch, Typography, message } from 'antd';
+import { Alert, Button, Form, Input, Result, Select, Space, Steps, Typography, message } from 'antd';
 import { ArrowLeft, CheckCircle2, FolderKanban, Radar, Save } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -13,6 +13,7 @@ import {
   type ProjectSubject
 } from '../../api/projects';
 import { errorMessage } from '../../api/errorMessage';
+import { ApiError } from '../../api/http';
 import { useAuth } from '../../auth/AuthProvider';
 import { PageHeader } from '../../components/PageHeader';
 
@@ -28,7 +29,6 @@ type WizardValues = {
   country_code: string;
   region?: string;
   domain: string;
-  ownership_verified?: boolean;
   filing_no?: string;
   website_name?: string;
 };
@@ -39,6 +39,13 @@ type CreatedResources = {
   domain?: ProjectDomain;
   filingCreated?: boolean;
 };
+
+function projectSaveErrorMessage(error: unknown) {
+  if (error instanceof ApiError && error.code === 'INVALID_ROOT_DOMAIN') {
+    return '请输入合法的公共根域名或委派子域，例如 example.com 或 cn.example.com。不要包含协议、端口或路径。';
+  }
+  return errorMessage(error);
+}
 
 export function ProjectCreatePage() {
   const navigate = useNavigate();
@@ -101,10 +108,10 @@ export function ProjectCreatePage() {
       }
       if (!resources.domain) {
         resources.domain = await createProjectDomain(resources.project.id, {
-          domain: values.domain,
+          domain: values.domain.trim().toLowerCase(),
           subject_id: resources.subject.id,
           is_primary: true,
-          ownership_status: values.ownership_verified ? 'verified' : 'unverified',
+          ownership_status: 'unverified',
           source: 'manual',
           evidence_summary: ''
         });
@@ -130,7 +137,7 @@ export function ProjectCreatePage() {
       setStep(3);
     } catch (err) {
       setCreated({ ...resources });
-      setSaveError(errorMessage(err));
+      setSaveError(projectSaveErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -142,7 +149,7 @@ export function ProjectCreatePage() {
     <section className="page-surface project-create-page">
       <PageHeader
         title="创建项目"
-        subtitle="建立项目边界、业务主体和首个主域名"
+        subtitle="建立项目边界、业务主体和首个受管域名"
         actions={<Button icon={<ArrowLeft size={16} />} onClick={() => navigate('/projects')}>返回项目列表</Button>}
       />
       <div className="project-create-shell">
@@ -151,7 +158,7 @@ export function ProjectCreatePage() {
         {saveError ? <Alert type="error" showIcon message="保存未完成" description={saveError} action={projectId ? <Button onClick={() => navigate(`/projects/${projectId}/profile`)}>进入草稿</Button> : undefined} /> : null}
         {step < 3 ? (
           <Form form={form} layout="vertical" className="project-create-form" initialValues={{ criticality: 'medium', subject_type: 'company', country_code: 'CN' }}>
-            <div hidden={step !== 0} className="project-create-fields">
+            <div hidden={step !== 0} style={step === 0 ? undefined : { display: 'none' }} className="project-create-fields">
               <Form.Item name="project_code" label="项目编码" rules={[{ required: true }, { pattern: /^[a-z0-9][a-z0-9_-]{0,63}$/, message: '仅支持小写字母、数字、下划线和短横线' }]}><Input disabled={Boolean(created.project)} /></Form.Item>
               <Form.Item name="name" label="项目名称" rules={[{ required: true, max: 255 }]}><Input disabled={Boolean(created.project)} /></Form.Item>
               <Form.Item label="项目负责人"><Input value={user?.displayName || user?.username} disabled /></Form.Item>
@@ -159,7 +166,7 @@ export function ProjectCreatePage() {
               <Form.Item name="criticality" label="重要性"><Select disabled={Boolean(created.project)} options={[['low', '低'], ['medium', '中'], ['high', '高'], ['critical', '关键']].map(([value, label]) => ({ value, label }))} /></Form.Item>
               <Form.Item name="description" label="说明"><Input.TextArea disabled={Boolean(created.project)} rows={3} maxLength={2000} /></Form.Item>
             </div>
-            <div hidden={step !== 1} className="project-create-fields">
+            <div hidden={step !== 1} style={step === 1 ? undefined : { display: 'none' }} className="project-create-fields">
               <Alert type="info" showIcon message="主体是单位或企业等业务实体，不是平台项目负责人。" />
               <Form.Item name="subject_name" label="单位名称" rules={[{ required: true, max: 255 }]}><Input disabled={Boolean(created.subject)} /></Form.Item>
               <Form.Item name="subject_type" label="主体类型"><Select disabled={Boolean(created.subject)} options={[['company', '企业'], ['government', '政府'], ['institution', '事业单位'], ['individual', '个人'], ['other', '其他']].map(([value, label]) => ({ value, label }))} /></Form.Item>
@@ -167,20 +174,23 @@ export function ProjectCreatePage() {
               <Form.Item name="country_code" label="国家/地区代码" rules={[{ required: true, len: 2 }]}><Input disabled={Boolean(created.subject)} maxLength={2} /></Form.Item>
               <Form.Item name="region" label="所在地区"><Input disabled={Boolean(created.subject)} maxLength={128} /></Form.Item>
             </div>
-            <div hidden={step !== 2} className="project-create-fields">
-              <Alert type="warning" showIcon message="主域名和 ICP 用于项目画像，不代表扫描授权。" />
+            <div hidden={step !== 2} style={step === 2 ? undefined : { display: 'none' }} className="project-create-fields">
+              <Alert type="warning" showIcon message="受管域名和 ICP 用于项目画像，不代表扫描授权。" />
               <Form.Item
                 name="domain"
-                label="主域名"
+                label="主域名 / 受管域名"
+                extra="可填写公共根域名或组织实际管理的委派子域；扫描范围仍需单独授权。"
                 rules={[
                   { required: true, max: 253 },
                   {
                     pattern: /^(?=.{1,253}$)(?!.*\.\.)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:[a-zA-Z]{2,63}|xn--[a-zA-Z0-9-]{2,59})$/,
-                    message: '请输入合法的根域名，例如 example.com'
+                    message: '请输入合法域名，例如 example.com 或 cn.example.com'
                   }
                 ]}
-              ><Input disabled={Boolean(created.domain)} placeholder="example.com" /></Form.Item>
-              <Form.Item name="ownership_verified" label="归属已核验" valuePropName="checked"><Switch disabled={Boolean(created.domain)} /></Form.Item>
+              ><Input disabled={Boolean(created.domain)} placeholder="example.com 或 cn.example.com" /></Form.Item>
+              <Form.Item label="所有权状态">
+                <Typography.Text type="secondary">待 DNS TXT 核验；不能在创建项目时自行声明已核验。</Typography.Text>
+              </Form.Item>
               <Form.Item name="filing_no" label="ICP 备案号（可选）"><Input disabled={created.filingCreated} maxLength={128} /></Form.Item>
               <Form.Item name="website_name" label="备案网站名称"><Input disabled={created.filingCreated} maxLength={255} /></Form.Item>
             </div>

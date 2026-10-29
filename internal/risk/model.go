@@ -359,3 +359,17 @@ type ScoreResult struct {
 	ScoreFactors      json.RawMessage
 	ScoredAt          time.Time
 }
+
+// ListFilter narrows a risk listing. An empty string means "no filter", matching
+// how the SQL is written so one query serves every combination.
+type ListFilter struct {
+	ProjectID uint64
+	Severity  string
+	Status    string
+	Owner     string
+	Keyword   string
+	// AssetID narrows to risks raised on one asset; 0 means any asset.
+	AssetID uint64
+	Limit   int32
+	Offset  int32
+}
