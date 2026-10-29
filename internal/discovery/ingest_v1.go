@@ -13,6 +13,7 @@ import (
 
 	"github.com/Gary-yang1/Dragon_asm/internal/asset"
 	"github.com/Gary-yang1/Dragon_asm/internal/exposure"
+	"github.com/Gary-yang1/Dragon_asm/internal/platform/db"
 	dbgen "github.com/Gary-yang1/Dragon_asm/internal/platform/db/generated"
 	"github.com/Gary-yang1/Dragon_asm/internal/risk"
 )
@@ -38,15 +39,21 @@ func (s *Service) IngestCallbackFacts(ctx context.Context, callback DiscoveryCal
 		payload.RunID != callback.RunID || payload.Seq != callback.Seq {
 		return ErrInvalidCallbackPayload
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if err := s.ingestCallbackFactsWith(ctx, dbgen.New(tx), callback, payload); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	// Callbacks of one run share many facts (CDN addresses resolved by hundreds
+	// of names), so concurrent ingests contend on the same asset and relation
+	// index records and InnoDB occasionally picks one as a deadlock victim. The
+	// whole transaction is idempotent, so it is simply run again.
+	return db.RetryOnLockConflict(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if err := s.ingestCallbackFactsWith(ctx, dbgen.New(tx), callback, payload); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 func (s *Service) ingestCallbackFactsWith(ctx context.Context, q *dbgen.Queries, callback DiscoveryCallback, payload callbackPayload) error {

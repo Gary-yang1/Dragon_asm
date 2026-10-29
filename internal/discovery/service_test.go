@@ -345,6 +345,11 @@ func (r *fakeRepo) CreateTaskRun(ctx context.Context, in CreateTaskRunParams) (u
 	return id, nil
 }
 
+// GetTaskRunForUpdate has no locking to model in memory; it reads like GetTaskRun.
+func (r *fakeRepo) GetTaskRunForUpdate(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
+	return r.GetTaskRun(ctx, projectID, runID)
+}
+
 func (r *fakeRepo) GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
 	_ = ctx
 	pp, ok := r.runs[projectID]

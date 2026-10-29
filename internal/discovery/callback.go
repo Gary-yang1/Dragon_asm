@@ -217,7 +217,9 @@ func (s *Service) HandleCallback(ctx context.Context, in HandleCallbackInput) (H
 	duplicate := false
 	var stored *DiscoveryCallback
 	err = s.runInTx(ctx, func(ctx context.Context, repo Repository, _ auditRecorder) error {
-		run, err := repo.GetTaskRun(ctx, in.ProjectID, in.RunID)
+		// Lock the run before inserting the callback row (see the callback lock
+		// order on CompleteDiscoveryCallbackIngest).
+		run, err := repo.GetTaskRunForUpdate(ctx, in.ProjectID, in.RunID)
 		if err != nil {
 			return err
 		}

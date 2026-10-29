@@ -37,9 +37,21 @@ func (s *Service) FailDiscoveryCallbackIngest(ctx context.Context, projectID, ru
 // CompleteDiscoveryCallbackIngest atomically marks the inbox row processed,
 // increments the run count once, and closes a legal final sequence only after
 // every sequence through the final callback has been processed.
+// Callback lock order: a transaction that touches both a run and its callback
+// rows locks task_run first, then discovery_callback. Callback receipt and
+// ingest completion both follow it; any new transaction touching both must too.
 func (s *Service) CompleteDiscoveryCallbackIngest(ctx context.Context, projectID, runID, seq uint64) (CompleteCallbackIngestResult, error) {
 	result := CompleteCallbackIngestResult{}
 	err := s.runInTx(ctx, func(ctx context.Context, repo Repository, txAudit auditRecorder) error {
+		// Callback lock order: the run row is locked before any callback row. This
+		// transaction used to lock its own callback row, then the run, then every
+		// callback of the run; two completions of one run each held the row the
+		// other needed, so a burst of callbacks deadlocked and stalled in
+		// "processing" until the five-minute recovery sweep. Taking the run lock
+		// first queues completions of one run behind each other instead.
+		if _, err := repo.GetTaskRunForUpdate(ctx, projectID, runID); err != nil {
+			return err
+		}
 		current, err := repo.GetDiscoveryCallback(ctx, projectID, runID, seq)
 		if err != nil {
 			return err

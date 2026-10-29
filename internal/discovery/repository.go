@@ -55,6 +55,9 @@ type Repository interface {
 
 	CreateTaskRun(ctx context.Context, in CreateTaskRunParams) (uint64, error)
 	GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error)
+	// GetTaskRunForUpdate reads and row-locks a run. Transactions that touch both
+	// a run and its callback rows take this lock first (callback lock order).
+	GetTaskRunForUpdate(ctx context.Context, projectID, runID uint64) (*TaskRun, error)
 	ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error)
 	ListRunningRunsForReconcile(ctx context.Context, limit int32) ([]*TaskRun, error)
 	MarkRunRunning(ctx context.Context, projectID, runID uint64, actorID, fromStatus string, startedAt time.Time) error
@@ -480,6 +483,17 @@ func (r *sqlcRepository) CreateTaskRun(ctx context.Context, in CreateTaskRunPara
 
 func (r *sqlcRepository) GetTaskRun(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
 	row, err := r.q.GetTaskRunByID(ctx, dbgen.GetTaskRunByIDParams{
+		ID:        runID,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return toDomainTaskRun(row), nil
+}
+
+func (r *sqlcRepository) GetTaskRunForUpdate(ctx context.Context, projectID, runID uint64) (*TaskRun, error) {
+	row, err := r.q.GetTaskRunForUpdate(ctx, dbgen.GetTaskRunForUpdateParams{
 		ID:        runID,
 		ProjectID: projectID,
 	})
