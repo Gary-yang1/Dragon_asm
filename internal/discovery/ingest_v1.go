@@ -60,7 +60,11 @@ func (s *Service) IngestCallbackFacts(ctx context.Context, callback DiscoveryCal
 // attribution) are written through it so they commit or roll back together.
 func (s *Service) ingestCallbackFactsWith(ctx context.Context, tx dbgen.DBTX, q *dbgen.Queries, callback DiscoveryCallback, payload callbackPayload) error {
 	discoveryRepo := NewRepository(q)
-	run, err := discoveryRepo.GetTaskRun(ctx, callback.ProjectID, callback.RunID)
+	// Locking the run serializes ingestion of one run's callbacks. They share
+	// facts — hundreds of names resolve to the same CDN addresses — so ingesting
+	// them concurrently deadlocked on those asset and relation rows. The run lock
+	// is also the first lock receipt and completion take (callback lock order).
+	run, err := discoveryRepo.GetTaskRunForUpdate(ctx, callback.ProjectID, callback.RunID)
 	if err != nil {
 		return err
 	}

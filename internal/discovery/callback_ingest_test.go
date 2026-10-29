@@ -243,3 +243,38 @@ func TestIngestingOutOfContractExtraAfterFinalisationIsIdempotent(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, TaskRunStatusSuccess, after.Status)
 }
+
+// Run 21 on the test environment: the timeout reconciler failed the run while
+// its callbacks were still queued, and the last completion then errored with
+// ErrCallbackFinalTransition, rolling back "processed" on every retry until
+// its attempt budget ran out. It now stays processed and the run is untouched.
+func TestCallbackCompletingAfterRunClosedStaysProcessedAndLeavesRunAlone(t *testing.T) {
+	svc, run, now := runningCallbackFixture(t)
+	acceptCallbackForIngest(t, svc, now, run.ID, 1, CallbackPhaseProgress, TaskRunStatusRunning, 1)
+	acceptCallbackForIngest(t, svc, now, run.ID, 2, CallbackPhaseCompleted, TaskRunStatusSuccess, 0)
+	for _, seq := range []uint64{1, 2} {
+		claimed, err := svc.ClaimDiscoveryCallbackIngest(context.Background(), 1, run.ID, seq)
+		require.NoError(t, err)
+		require.True(t, claimed)
+	}
+	// Seq 2 completes first: not ready, seq 1 is still processing.
+	result, err := svc.CompleteDiscoveryCallbackIngest(context.Background(), 1, run.ID, 2)
+	require.NoError(t, err)
+	require.False(t, result.Finalized)
+
+	// The reconciler closes the run before seq 1 completes.
+	repo := svc.repo.(*fakeRepo)
+	repo.runs[1][run.ID].Status = TaskRunStatusFailed
+
+	result, err = svc.CompleteDiscoveryCallbackIngest(context.Background(), 1, run.ID, 1)
+	require.NoError(t, err, "a late completion must not error and be retried until its budget runs out")
+	assert.True(t, result.Processed)
+	assert.True(t, result.RunAlreadyClosed)
+	assert.False(t, result.Finalized)
+	stored, err := svc.GetDiscoveryCallback(context.Background(), 1, run.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, CallbackIngestProcessed, stored.IngestStatus)
+	after, err := svc.GetTaskRun(context.Background(), 1, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, TaskRunStatusFailed, after.Status, "a closed run keeps the outcome it reported")
+}

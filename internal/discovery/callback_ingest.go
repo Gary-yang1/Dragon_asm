@@ -18,6 +18,9 @@ var (
 type CompleteCallbackIngestResult struct {
 	Processed bool
 	Finalized bool
+	// RunAlreadyClosed reports a callback completed after its run had closed
+	// in a different state; its facts are kept and the run is left as it was.
+	RunAlreadyClosed bool
 }
 
 func (s *Service) GetDiscoveryCallback(ctx context.Context, projectID, runID, seq uint64) (*DiscoveryCallback, error) {
@@ -97,14 +100,15 @@ func (s *Service) CompleteDiscoveryCallbackIngest(ctx context.Context, projectID
 			return err
 		}
 		if before.Status != TaskRunStatusRunning {
-			// A callback arriving after the run already closed. If the run is already
-			// in the state this callback implies there is nothing to do, and erroring
-			// would roll back the "processed" mark and make the worker retry the same
-			// callback until it exhausts its attempt budget.
-			if before.Status == finalStatus {
-				return nil
-			}
-			return ErrCallbackFinalTransition
+			// A callback completed after the run already closed — typically a run
+			// the timeout reconciler failed while its callbacks were still being
+			// ingested. The facts are already stored, so the callback is processed.
+			// The run keeps its recorded outcome: rewriting a closed run's status
+			// after the fact would contradict what was reported when it closed.
+			// Returning an error here rolled back the "processed" mark and retried
+			// the callback until its attempt budget ran out.
+			result.RunAlreadyClosed = before.Status != finalStatus
+			return nil
 		}
 		if finalStatus == TaskRunStatusSuccess || finalStatus == TaskRunStatusPartial {
 			if err := repo.ApplyDiscoveryObservationLifecycle(ctx, projectID, runID, capabilityForTaskType(before.TaskType),

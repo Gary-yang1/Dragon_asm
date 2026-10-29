@@ -78,6 +78,8 @@ type Repository interface {
 	// ListPendingDiscoveryCallbackRefs returns identifiers only, for the recovery
 	// scan that just needs to re-enqueue work.
 	ListPendingDiscoveryCallbackRefs(ctx context.Context, limit int32) ([]CallbackRef, error)
+	// ReleaseStaleDiscoveryCallbackIngest returns abandoned processing claims to pending.
+	ReleaseStaleDiscoveryCallbackIngest(ctx context.Context) (int64, error)
 	MarkDiscoveryCallbackEnqueued(ctx context.Context, projectID, runID, seq uint64, enqueuedAt time.Time) error
 	MarkDiscoveryCallbackProcessing(ctx context.Context, projectID, runID, seq uint64) (bool, error)
 	MarkDiscoveryCallbackProcessed(ctx context.Context, projectID, runID, seq uint64, processedAt time.Time) (bool, error)
@@ -519,6 +521,10 @@ func (r *sqlcRepository) ListIPNetworkAttribution(ctx context.Context, projectID
 		out = append(out, IPNetworkAttribution{Value: row.Value, Role: row.Role, Provider: row.Provider, ResolvedBy: row.ResolvedBy})
 	}
 	return out, nil
+}
+
+func (r *sqlcRepository) ReleaseStaleDiscoveryCallbackIngest(ctx context.Context) (int64, error) {
+	return r.q.ReleaseStaleDiscoveryCallbackIngest(ctx)
 }
 
 func (r *sqlcRepository) ListTaskRuns(ctx context.Context, projectID uint64) ([]*TaskRun, error) {

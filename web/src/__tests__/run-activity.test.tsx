@@ -16,6 +16,18 @@ describe('streaming run activity',()=>{
   expect(screen.getByText('执行中')).toBeInTheDocument();expect(polls).toHaveLength(1);
   await act(async()=>{polls.shift()?.()});await screen.findByText('已完成');expect(screen.getByText('本次执行记录')).toBeInTheDocument();expect(polls).toHaveLength(0);
  });
+ it('tells retrying batches apart from batches that exhausted their retries',async()=>{
+  server.use(http.get('/api/v1/projects/5/discovery/runs/8/activity',()=>HttpResponse.json({data:{...first,status:'success',retrying_batches:2,failed_batches:1}})));
+  render(<MemoryRouter><RunActivity projectId={5} runId={8}/></MemoryRouter>);
+  expect(await screen.findByText('2 个批次入库暂时失败，正在自动重试，无需操作。')).toBeInTheDocument();
+  expect(screen.getByText('1 个批次多次重试仍未入库，已成功入库的结果仍可查看。')).toBeInTheDocument();
+ });
+ it('shows no failure for a batch that is only retrying',async()=>{
+  server.use(http.get('/api/v1/projects/5/discovery/runs/8/activity',()=>HttpResponse.json({data:{...first,status:'success',retrying_batches:1,failed_batches:0}})));
+  render(<MemoryRouter><RunActivity projectId={5} runId={8}/></MemoryRouter>);
+  expect(await screen.findByText(/正在自动重试/)).toBeInTheDocument();
+  expect(screen.queryByText(/仍未入库/)).not.toBeInTheDocument();
+ });
  it('does not retain discoveries after access is denied',async()=>{
   server.use(http.get('/api/v1/projects/5/discovery/runs/8/activity',()=>HttpResponse.json({error:{message:'无权限'}},{status:403})));
   render(<MemoryRouter><RunActivity projectId={5} runId={8}/></MemoryRouter>);

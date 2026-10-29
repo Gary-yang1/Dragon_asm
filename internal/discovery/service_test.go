@@ -620,6 +620,13 @@ func (r *fakeRepo) ListPendingDiscoveryCallbacks(ctx context.Context, limit int3
 	return items, nil
 }
 
+// ReleaseStaleDiscoveryCallbackIngest: the in-memory inbox keeps no update
+// time to age a claim by; the release itself is covered against MySQL in
+// callback_recovery_integration_test.go.
+func (r *fakeRepo) ReleaseStaleDiscoveryCallbackIngest(_ context.Context) (int64, error) {
+	return 0, nil
+}
+
 // Mirrors the real repository: identifiers only, no stored payload.
 func (r *fakeRepo) ListPendingDiscoveryCallbackRefs(ctx context.Context, limit int32) ([]CallbackRef, error) {
 	items, err := r.ListPendingDiscoveryCallbacks(ctx, limit)

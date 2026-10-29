@@ -455,3 +455,15 @@ WHERE a.project_id = sqlc.arg(project_id)
   AND a.asset_type = 'ip'
   AND a.deleted_at = '1970-01-01 00:00:00.000'
   AND a.value IN (sqlc.slice(ip_values));
+
+-- name: ReleaseStaleDiscoveryCallbackIngest :execrows
+-- A worker that claimed a callback and never completed it (crash, a failed
+-- completion) leaves it in processing. Releasing the stale claim back to
+-- pending lets the next worker take it at once; re-enqueueing alone touched
+-- updated_at, so the stale row stayed unclaimable for another five minutes.
+UPDATE discovery_callback
+SET ingest_status = 'pending'
+WHERE ingest_status = 'processing'
+  AND ingest_attempt < 10
+  AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE)
+  AND deleted_at = '1970-01-01 00:00:00.000';

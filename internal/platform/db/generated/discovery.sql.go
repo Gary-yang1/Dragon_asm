@@ -2010,6 +2010,27 @@ func (q *Queries) MarkTaskRunSucceeded(ctx context.Context, arg MarkTaskRunSucce
 	)
 }
 
+const releaseStaleDiscoveryCallbackIngest = `-- name: ReleaseStaleDiscoveryCallbackIngest :execrows
+UPDATE discovery_callback
+SET ingest_status = 'pending'
+WHERE ingest_status = 'processing'
+  AND ingest_attempt < 10
+  AND updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 5 MINUTE)
+  AND deleted_at = '1970-01-01 00:00:00.000'
+`
+
+// A worker that claimed a callback and never completed it (crash, a failed
+// completion) leaves it in processing. Releasing the stale claim back to
+// pending lets the next worker take it at once; re-enqueueing alone touched
+// updated_at, so the stale row stayed unclaimable for another five minutes.
+func (q *Queries) ReleaseStaleDiscoveryCallbackIngest(ctx context.Context) (int64, error) {
+	result, err := q.db.ExecContext(ctx, releaseStaleDiscoveryCallbackIngest)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setTaskTemplateEnabled = `-- name: SetTaskTemplateEnabled :exec
 UPDATE task_template
 SET enabled = ?,

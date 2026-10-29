@@ -6,7 +6,7 @@ import { errorMessage } from '../../api/errorMessage';
 
 type Stage = { stage: string; provider: string; target: string; status: string; discovered: number; completed: number; total: number; failed: number; no_records: number; message?: string };
 type Discovery = { type: string; value: string; provider: string; observed_at: string; dns_status?: string; dns_error?: string };
-type Activity = { status: string; stages: Stage[]; recent: Discovery[]; asset_count: number; subdomain_count: number; ip_count: number; received_batches: number; processed_batches: number; failed_batches: number; truncated: boolean };
+type Activity = { status: string; stages: Stage[]; recent: Discovery[]; asset_count: number; subdomain_count: number; ip_count: number; received_batches: number; processed_batches: number; failed_batches: number; retrying_batches?: number; truncated: boolean };
 const states: Record<string, string> = { queued:'等待执行', running:'执行中', success:'已完成', partial:'部分完成', failed:'失败', skipped:'未配置 / 跳过' };
 const providers: Record<string,string> = {fofa:'FOFA',quake:'Quake',hunter:'Hunter',subfinder:'Subfinder',dns:'DNS 解析',certificate_transparency:'证书透明度'};
 
@@ -49,7 +49,8 @@ export function RunActivity({ projectId, runId }: { projectId: number; runId: nu
     {!data && !error && <Typography.Text type="secondary">正在读取来源状态和已返回结果…</Typography.Text>}
     {data && <>
       <div className="discovery-summary-line"><span>已入库子域名 <strong>{data.subdomain_count}</strong></span><span>IP <strong>{data.ip_count}</strong></span><span>已处理批次 <strong>{data.processed_batches} / {data.received_batches}</strong></span></div>
-      {data.failed_batches > 0 && <Alert type="warning" message={`${data.failed_batches} 个批次入库失败，已成功入库的结果仍可查看。`} />}
+      {(data.retrying_batches ?? 0) > 0 && <Alert type="info" showIcon message={`${data.retrying_batches} 个批次入库暂时失败，正在自动重试，无需操作。`} />}
+      {data.failed_batches > 0 && <Alert type="warning" message={`${data.failed_batches} 个批次多次重试仍未入库，已成功入库的结果仍可查看。`} />}
       <Table<Stage> size="small" rowKey={s => `${s.stage}:${s.provider}:${s.target}`} pagination={false} dataSource={data.stages} locale={{emptyText:'尚未收到阶段状态，等待引擎回传。'}} columns={[
         {title:'来源 / 阶段',key:'source',render:(_,s)=><div>{providers[s.provider] || s.provider}{s.target && <div className="secondary-text">{s.target}</div>}</div>},
         {title:'状态',dataIndex:'status',render:(value:string)=><Tag color={value==='running'?'processing':value==='failed'||value==='partial'?'warning':value==='success'?'success':undefined}>{states[value]||value}</Tag>},

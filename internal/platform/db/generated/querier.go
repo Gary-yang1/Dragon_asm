@@ -254,6 +254,11 @@ type Querier interface {
 	MarkTaskRunRunning(ctx context.Context, arg MarkTaskRunRunningParams) (sql.Result, error)
 	MarkTaskRunSucceeded(ctx context.Context, arg MarkTaskRunSucceededParams) (sql.Result, error)
 	RefreshRisk(ctx context.Context, arg RefreshRiskParams) (sql.Result, error)
+	// A worker that claimed a callback and never completed it (crash, a failed
+	// completion) leaves it in processing. Releasing the stale claim back to
+	// pending lets the next worker take it at once; re-enqueueing alone touched
+	// updated_at, so the stale row stayed unclaimable for another five minutes.
+	ReleaseStaleDiscoveryCallbackIngest(ctx context.Context) (int64, error)
 	ReopenRisk(ctx context.Context, arg ReopenRiskParams) (sql.Result, error)
 	ReportExposureDashboard(ctx context.Context, arg ReportExposureDashboardParams) (ReportExposureDashboardRow, error)
 	ReportFixedRiskTrend(ctx context.Context, arg ReportFixedRiskTrendParams) ([]ReportFixedRiskTrendRow, error)

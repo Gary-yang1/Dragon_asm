@@ -164,6 +164,11 @@ func (s *Service) RecoverPendingCallbacks(ctx context.Context, limit int32) (int
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
+	// Abandoned claims go back to pending first, so the re-enqueued task can
+	// claim them immediately instead of waiting out another stale window.
+	if _, err := s.repo.ReleaseStaleDiscoveryCallbackIngest(ctx); err != nil {
+		return 0, err
+	}
 	// Identifiers only: the queue payload is {project_id, run_id, seq}, so reading
 	// the stored payloads here loaded up to 100 rows of 4 MiB (~400 MB) into the
 	// worker on every 30s tick for nothing.

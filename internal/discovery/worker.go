@@ -120,7 +120,8 @@ func (h *IngestHandler) Handle(ctx context.Context, task *asynq.Task) error {
 	if h.logger != nil {
 		h.logger.Info("discovery callback ingested",
 			"project_id", ref.ProjectID, "run_id", ref.RunID, "seq", ref.Seq,
-			"phase", stored.Phase, "processed", result.Processed, "finalized", result.Finalized)
+			"phase", stored.Phase, "processed", result.Processed, "finalized", result.Finalized,
+			"run_already_closed", result.RunAlreadyClosed)
 	}
 	return nil
 }

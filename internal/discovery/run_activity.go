@@ -50,8 +50,11 @@ type RunActivity struct {
 	IPCount          int                `json:"ip_count"`
 	ReceivedBatches  int                `json:"received_batches"`
 	ProcessedBatches int                `json:"processed_batches"`
-	FailedBatches    int                `json:"failed_batches"`
-	Truncated        bool               `json:"truncated"`
+	// FailedBatches have used every ingest attempt and will not be retried;
+	// RetryingBatches failed but the recovery sweep will try them again.
+	FailedBatches   int  `json:"failed_batches"`
+	RetryingBatches int  `json:"retrying_batches"`
+	Truncated       bool `json:"truncated"`
 }
 type RunDiscoveryItem struct {
 	Type       string    `json:"type"`
@@ -61,6 +64,10 @@ type RunDiscoveryItem struct {
 	DNSStatus  string    `json:"dns_status,omitempty"`
 	DNSError   string    `json:"dns_error,omitempty"`
 }
+
+// callbackMaxIngestAttempts matches the attempt bound in the inbox queries
+// (discovery.sql): a callback is retried until it has been tried this often.
+const callbackMaxIngestAttempts = 10
 
 func (s *Service) RunActivity(ctx context.Context, projectID, runID uint64) (RunActivity, error) {
 	result := RunActivity{Stages: []StageProgress{}, Recent: []RunDiscoveryItem{}}
@@ -72,7 +79,10 @@ func (s *Service) RunActivity(ctx context.Context, projectID, runID uint64) (Run
 	if s.db == nil {
 		return result, nil
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(ingest_status='processed'),0),COALESCE(SUM(ingest_status='failed'),0) FROM discovery_callback WHERE project_id=? AND run_id=? AND deleted_at='1970-01-01 00:00:00'`, projectID, runID).Scan(&result.ReceivedBatches, &result.ProcessedBatches, &result.FailedBatches)
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(ingest_status='processed'),0),
+ COALESCE(SUM(ingest_status='failed' AND ingest_attempt>=?),0),COALESCE(SUM(ingest_status='failed' AND ingest_attempt<?),0)
+ FROM discovery_callback WHERE project_id=? AND run_id=? AND deleted_at='1970-01-01 00:00:00'`,
+		callbackMaxIngestAttempts, callbackMaxIngestAttempts, projectID, runID).Scan(&result.ReceivedBatches, &result.ProcessedBatches, &result.FailedBatches, &result.RetryingBatches)
 	if err != nil {
 		return result, err
 	}

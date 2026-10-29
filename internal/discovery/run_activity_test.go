@@ -42,7 +42,7 @@ func TestActivityReadsLatestStageAndDeduplicatesRecentAssets(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	svc.db = db
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\)").WithArgs(uint64(1), run.ID).WillReturnRows(sqlmock.NewRows([]string{"received", "processed", "failed"}).AddRow(4, 3, 0))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\)").WithArgs(callbackMaxIngestAttempts, callbackMaxIngestAttempts, uint64(1), run.ID).WillReturnRows(sqlmock.NewRows([]string{"received", "processed", "failed", "retrying"}).AddRow(4, 1, 1, 2))
 	mock.ExpectQuery("SELECT COALESCE\\(CAST").WithArgs(uint64(1), run.ID).WillReturnRows(sqlmock.NewRows([]string{"progress", "errors"}).AddRow(`{"stage":"collect","provider":"fofa","status":"success","discovered":2}`, `[]`).AddRow(`{"stage":"collect","provider":"fofa","status":"running","discovered":1}`, `[]`))
 	mock.ExpectQuery("SELECT COUNT\\(DISTINCT").WithArgs(uint64(1), run.ID).WillReturnRows(sqlmock.NewRows([]string{"assets", "subdomains", "ips"}).AddRow(1, 1, 0))
 	mock.ExpectQuery("SELECT provider,normalized_json,observed_at").WithArgs(uint64(1), run.ID).WillReturnRows(sqlmock.NewRows([]string{"provider", "json", "at"}).AddRow("dns", `{"asset_type":"subdomain","value":"a.example.com","attributes":{"dns_status":"no_records"}}`, time.Now()).AddRow("fofa", `{"asset_type":"subdomain","value":"a.example.com"}`, time.Now()))
@@ -53,6 +53,9 @@ func TestActivityReadsLatestStageAndDeduplicatesRecentAssets(t *testing.T) {
 	require.Len(t, value.Recent, 1)
 	require.Equal(t, "no_records", value.Recent[0].DNSStatus)
 	require.Equal(t, TaskRunStatusRunning, value.Status)
+	// A failed callback with attempts left is retrying, not failed.
+	require.Equal(t, 1, value.FailedBatches)
+	require.Equal(t, 2, value.RetryingBatches)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
