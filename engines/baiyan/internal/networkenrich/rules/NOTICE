@@ -1,0 +1,8 @@
+oneforall_cdn_ip_cidr.json and oneforall_cdn_cname_keywords.json are copied
+unchanged from OneForAll (https://github.com/shmilylty/OneForAll, data/),
+which is licensed under the GNU General Public License v3.0. They are the same
+files the Baiyan CLI reads from lib/OneForAll/data/.
+
+Distribution in the Baiyan engine image was approved by the project owner for
+non-commercial use. Keep this notice with the files, and keep the upstream
+source reference above if the files are updated.

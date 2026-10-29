@@ -218,7 +218,9 @@ begin the registrable label, and generic words (`cdn`, `cache`), DNS-hosting
 names (`awsdns`, `dnsv1`), bare short labels and cloud-hosting suffixes
 (`amazonaws.com`, `aliyuncs.com`) are not CDN evidence. Cloudflare's published
 IPv4/IPv6 ranges are added with a provider name. Upstream OneForAll is GPL-3.0;
-confirm the data may be distributed in the engine image before release.
+the project owner approved distributing these data files in the engine image
+(non-commercial use). Their source and licence are recorded in
+`internal/networkenrich/rules/NOTICE`.
 
 The passive DNS stage records evidence, not decisions. A host keeps aliases that
 leave every scope root in `attributes.dns_cname` (in-scope aliases still become
