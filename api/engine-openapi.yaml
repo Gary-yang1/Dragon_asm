@@ -551,7 +551,7 @@ components:
           maxLength: 512
         asset_type:
           type: string
-          enum: [domain, subdomain, ip, certificate]
+          enum: [domain, subdomain, ip, web, certificate]
         value:
           type: string
           minLength: 1
@@ -688,6 +688,10 @@ components:
         exposure_type:
           type: string
           enum: [port, service, web, certificate]
+        name:
+          type: string
+          maxLength: 255
+          description: Human label such as a crawled page title; ASM falls back to value.
         value:
           type: string
           minLength: 1

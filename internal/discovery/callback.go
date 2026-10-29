@@ -528,9 +528,12 @@ func validFactReference(ref callbackFactReference) bool {
 		len(ref.ClientRef) <= 128 && len(ref.NaturalKey) <= callbackMaxRefLen
 }
 
+// validAssetType lists what an engine callback may create. "web" carries
+// search-engine site snapshots; active probing creates web assets without
+// passing through this validator.
 func validAssetType(value string) bool {
 	switch value {
-	case "domain", "subdomain", "ip", "certificate":
+	case "domain", "subdomain", "ip", "web", "certificate":
 		return true
 	default:
 		return false

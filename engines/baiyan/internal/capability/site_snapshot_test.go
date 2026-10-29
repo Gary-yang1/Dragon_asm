@@ -1,9 +1,13 @@
 package capability
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
+	"time"
 
 	"baiyan/internal/contract"
 )
@@ -109,5 +113,50 @@ func TestCleanSnapshotTextKeepsUTF8Boundaries(t *testing.T) {
 	}
 	if got := cleanSnapshotText("ok\xff", 255); got != "ok" {
 		t.Fatalf("invalid UTF-8 kept: %q", got)
+	}
+}
+
+// siteSnapshotGolden is shared with ASM, whose callback validator must accept
+// it (internal/discovery/callback_baiyan_contract_test.go). Regenerate with
+// UPDATE_GOLDEN=1 after an intentional change to the site snapshot facts.
+const siteSnapshotGolden = "../../../../internal/discovery/testdata/baiyan_site_snapshot_callback.json"
+
+func TestSiteSnapshotCallbackMatchesASMContractFixture(t *testing.T) {
+	provider := &crawlingProvider{
+		hosts: []string{"www.example.com"},
+		sites: []SiteSnapshot{{Host: "www.example.com", Scheme: "https", Port: 443, Title: "Example Home", Server: "nginx"}},
+	}
+	sender := &fakeSender{}
+	executor := NewPassiveExecutor([]PassiveProvider{provider}, &fakeResolver{}, sender)
+	fixed := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	executor.now = func() time.Time { return fixed }
+	if _, err := executor.Execute(context.Background(), passiveRequest()); err != nil {
+		t.Fatal(err)
+	}
+	var batch *contract.CallbackBatch
+	for i := range sender.batches {
+		if len(sender.batches[i].Exposures) > 0 {
+			batch = &sender.batches[i]
+		}
+	}
+	if batch == nil {
+		t.Fatal("no site snapshot batch sent")
+	}
+	got, err := json.MarshalIndent(batch, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = append(got, '\n')
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(siteSnapshotGolden, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(siteSnapshotGolden)
+	if err != nil {
+		t.Fatalf("read golden (run with UPDATE_GOLDEN=1 to create): %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("site snapshot callback changed; regenerate %s with UPDATE_GOLDEN=1 and keep ASM's validator in step:\n%s", siteSnapshotGolden, got)
 	}
 }

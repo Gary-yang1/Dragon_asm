@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "run_id": 7,
+  "seq": 5,
+  "phase": "progress",
+  "status": "running",
+  "result_count": 3,
+  "observed_at": "2026-10-29T00:00:00Z",
+  "assets": [
+    {
+      "client_ref": "site-a77693d834d2a9e6",
+      "natural_key": "web:https://www.example.com:443",
+      "source": "baiyan",
+      "provider": "fofa",
+      "observed_at": "2026-10-29T00:00:00Z",
+      "confidence": 90,
+      "active_probe": false,
+      "evidence_hash": "5de5cfc296e142700f634419e8c692e646f7c8d7e2941fba18b5b51bdd211f60",
+      "evidence_ref": "fofa:https://www.example.com:443",
+      "asset_type": "web",
+      "value": "https://www.example.com:443"
+    }
+  ],
+  "relations": [
+    {
+      "client_ref": "site-contains-3c9f85b7438d9ea4",
+      "natural_key": "relation:contains:fofa-618316ed93c1d3e6:site-a77693d834d2a9e6",
+      "source": "baiyan",
+      "provider": "fofa",
+      "observed_at": "2026-10-29T00:00:00Z",
+      "confidence": 90,
+      "active_probe": false,
+      "evidence_hash": "2c42f9006b0fd51170085c20747a07c49cccb3c913ff06debaa994e3b19c19e0",
+      "relation_type": "contains",
+      "from": {
+        "client_ref": "fofa-618316ed93c1d3e6",
+        "natural_key": "subdomain:www.example.com"
+      },
+      "to": {
+        "client_ref": "site-a77693d834d2a9e6",
+        "natural_key": "web:https://www.example.com:443"
+      }
+    }
+  ],
+  "exposures": [
+    {
+      "client_ref": "site-web-418d4be8e0bf350f",
+      "natural_key": "web:fofa:https://www.example.com:443",
+      "source": "baiyan",
+      "provider": "fofa",
+      "observed_at": "2026-10-29T00:00:00Z",
+      "confidence": 70,
+      "active_probe": false,
+      "evidence_hash": "fa4ac3e8828d7c21566332b6e0ffe6bb7ccd4c7cbb0a716baca36cb983b630e6",
+      "evidence_ref": "fofa:https://www.example.com:443",
+      "parent": {
+        "client_ref": "site-a77693d834d2a9e6",
+        "natural_key": "web:https://www.example.com:443"
+      },
+      "exposure_type": "web",
+      "name": "Example Home",
+      "value": "unknown",
+      "protocol": "https",
+      "port": 443,
+      "url": "https://www.example.com:443",
+      "fingerprint": "nginx"
+    }
+  ],
+  "provider_errors": [],
+  "error_summary": ""
+}
