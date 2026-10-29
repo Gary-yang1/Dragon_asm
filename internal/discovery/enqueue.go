@@ -79,10 +79,26 @@ type CallbackTaskPayload struct {
 	Seq       uint64 `json:"seq"`
 }
 
+// asynqTaskRunner moves an existing task to the pending queue now
+// (asynq.Inspector satisfies it).
+type asynqTaskRunner interface {
+	RunTask(queue, id string) error
+}
+
 // AsynqCallbackEnqueuer pushes callback batches to the worker queue.
 type AsynqCallbackEnqueuer struct {
 	client asynqEnqueueClient
 	queue  string
+	runner asynqTaskRunner
+}
+
+// WithTaskRunner lets a re-enqueue of a callback whose task already exists run
+// that task now. Without it, a task sitting in retry backoff or the archive
+// kept the TaskID, so recovery's enqueue was a silent no-op and the callback
+// waited out the backoff — hours, after a burst of busy retries.
+func (e *AsynqCallbackEnqueuer) WithTaskRunner(runner asynqTaskRunner) *AsynqCallbackEnqueuer {
+	e.runner = runner
+	return e
 }
 
 func NewAsynqCallbackEnqueuer(client asynqEnqueueClient, queue string) *AsynqCallbackEnqueuer {
@@ -108,7 +124,21 @@ func (e *AsynqCallbackEnqueuer) EnqueueDiscoveryCallback(ctx context.Context, cb
 	taskID := fmt.Sprintf("ingest:%d:%d:%d", cb.ProjectID, cb.RunID, cb.Seq)
 	_, err = e.client.EnqueueContext(ctx, task, asynq.Queue(e.queue), asynq.TaskID(taskID))
 	if errors.Is(err, asynq.ErrTaskIDConflict) {
-		return nil
+		if e.runner == nil {
+			return nil
+		}
+		runErr := e.runner.RunTask(e.queue, taskID)
+		if errors.Is(runErr, asynq.ErrTaskNotFound) {
+			// The old task finished or was removed between the two calls.
+			_, err = e.client.EnqueueContext(ctx, task, asynq.Queue(e.queue), asynq.TaskID(taskID))
+			if errors.Is(err, asynq.ErrTaskIDConflict) {
+				return nil
+			}
+		} else {
+			// Any other outcome means the task is already pending or active,
+			// which is what the enqueue wanted.
+			return nil
+		}
 	}
 	if err != nil {
 		return errors.Join(ErrCallbackEnqueue, err)

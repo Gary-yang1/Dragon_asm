@@ -48,6 +48,12 @@ func main() {
 			logger.Warn("redis queue client close failed", "error", err)
 		}
 	}()
+	queueInspector := asynq.NewInspector(redisOpt)
+	defer func() {
+		if err := queueInspector.Close(); err != nil {
+			logger.Warn("redis queue inspector close failed", "error", err)
+		}
+	}()
 
 	// Worker concurrency — each queue gets its own worker budget.
 	// Queues added here as tasks are implemented in later milestones.
@@ -122,7 +128,9 @@ func main() {
 		discovery.WithOwnershipChecker(project.NewService(
 			project.NewRepository(queries), nil, project.WithDB(sqlDB),
 		)),
-		discovery.WithCallbackEnqueuer(discovery.NewAsynqCallbackEnqueuer(queueClient, "default")),
+		// The worker runs the callback recovery sweep; its enqueuer can push a
+		// callback task stuck in retry backoff or the archive back to pending.
+		discovery.WithCallbackEnqueuer(discovery.NewAsynqCallbackEnqueuer(queueClient, "default").WithTaskRunner(queueInspector)),
 		discovery.WithAssetMissThreshold(envIntOr("ASSET_MISS_THRESHOLD", asset.DefaultMissThreshold)),
 	}
 	activePolicy := configuredActiveDispatchPolicy()
