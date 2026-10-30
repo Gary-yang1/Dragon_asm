@@ -65,6 +65,9 @@ services:
       BAIYAN_JOB_STORE_DIR: /var/lib/baiyan/jobs
       BAIYAN_TOOL_DIR: /app/tools
       BAIYAN_WORKERS: "1"
+      # Upstream DNS queried directly with failover. The host resolver behind
+      # Docker's embedded DNS answered some zones in seconds or with SERVFAIL.
+      BAIYAN_DNS_RESOLVERS: "119.29.29.29,223.5.5.5,8.8.8.8"
       BAIYAN_QUEUE_SIZE: "50"
       GOMEMLIMIT: 256MiB
     volumes: ["/opt/asm/shared/baiyan-jobs:/var/lib/baiyan/jobs"]

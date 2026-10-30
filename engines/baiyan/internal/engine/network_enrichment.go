@@ -56,3 +56,9 @@ func (h *Handler) enrichNetwork(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, result)
 }
+
+// WithNetworkResolver makes /enrich/network resolve through resolver, so the
+// configured DNS upstreams serve enrichment as well as passive jobs.
+func (h *Handler) WithNetworkResolver(resolver networkenrich.Resolver) {
+	h.networkEnricher = networkenrich.New(resolver)
+}

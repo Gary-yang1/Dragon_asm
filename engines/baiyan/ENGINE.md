@@ -125,12 +125,20 @@ BAIYAN_PASSIVE_PROVIDER_NAME=certificate_transparency
 BAIYAN_PASSIVE_PROVIDER_URL=http://mock-provider:9191/subdomains
 BAIYAN_PASSIVE_PROVIDER_TOKEN=
 BAIYAN_PASSIVE_MAX_RESULTS=500
+BAIYAN_DNS_RESOLVERS=119.29.29.29,223.5.5.5,8.8.8.8
 BAIYAN_DNS_PROVIDER_URL=http://mock-provider:9191/dns
 BAIYAN_DNS_PROVIDER_TOKEN=
 BAIYAN_DNS_MAX_RESULTS=500
 FOFA_EMAIL=
 FOFA_KEY=
 ```
+
+`BAIYAN_DNS_RESOLVERS` lists upstream DNS servers (`ip` or `ip:port`, at most
+8) that passive DNS jobs, wildcard probes and `/enrich/network` query directly.
+Each lookup tries up to three servers, rotating the first, with two seconds per
+attempt; NXDOMAIN and empty answers are answers and are not retried. Unset, the
+system resolver is used and a failed lookup is retried once. Address and alias
+lookups of one host each have their own eight-second budget.
 
 The provider endpoint returns strict JSON: `{"subdomains":["api.example.com"]}`. It is bounded to 1 MiB and the configured result cap. DNS enrichment uses Go's resolver with per-host timeout and bounded concurrency.
 

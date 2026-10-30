@@ -22,6 +22,7 @@ import (
 	"baiyan/internal/capability"
 	"baiyan/internal/contract"
 	"baiyan/internal/job"
+	"baiyan/internal/networkenrich"
 	"baiyan/internal/toolrunner"
 )
 
@@ -51,6 +52,7 @@ func (ProviderConfiguration) String() string { return "[protected provider confi
 // ConfigurationManager persists immutable encrypted versions. Job records store only the version ID.
 type ConfigurationManager struct {
 	tools    *toolrunner.Registry
+	dns      networkenrich.Resolver
 	dir      string
 	aead     cipher.AEAD
 	legacy   ProviderConfiguration
@@ -60,6 +62,10 @@ type ConfigurationManager struct {
 }
 
 func (m *ConfigurationManager) WithTools(tools *toolrunner.Registry) { m.tools = tools }
+
+// WithDNSResolver sets the resolver runtime executors use for DNS work, so the
+// configured upstreams apply to jobs built from ASM-managed configuration too.
+func (m *ConfigurationManager) WithDNSResolver(resolver networkenrich.Resolver) { m.dns = resolver }
 
 func NewConfigurationManager(dir string, legacy ProviderConfiguration, fallback job.Executor, sender capability.BatchSender) (*ConfigurationManager, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -275,7 +281,7 @@ func (m *ConfigurationManager) buildExecutor(c ProviderConfiguration, legacy boo
 		}
 		providers = append(providers, provider)
 	}
-	var resolver capability.Resolver = capability.NewNetResolver(nil, 5*time.Second)
+	var resolver capability.Resolver = capability.NewNetResolver(m.dns, capability.DNSLookupTimeout)
 	if c.DNSURL != "" {
 		if !legacy && !validProviderURL(c.DNSURL) {
 			return nil, errRuntimeConfiguration

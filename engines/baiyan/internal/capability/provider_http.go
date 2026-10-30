@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"baiyan/internal/networkenrich"
 )
 
 type HTTPPassiveProvider struct {
@@ -89,9 +91,13 @@ func (p *HTTPPassiveProvider) Discover(ctx context.Context, rootDomain string) (
 }
 
 type NetResolver struct {
-	resolver *net.Resolver
+	resolver networkenrich.Resolver
 	timeout  time.Duration
 }
+
+// DNSLookupTimeout bounds each address or alias lookup of one host. It leaves
+// room for networkenrich.FailoverResolver to try several upstreams.
+const DNSLookupTimeout = 8 * time.Second
 
 type HTTPResolver struct {
 	baseURL *url.URL
@@ -194,7 +200,7 @@ func (r *HTTPResolver) Resolve(ctx context.Context, hosts []string, _ int, gate 
 	return results, nil
 }
 
-func NewNetResolver(resolver *net.Resolver, timeout time.Duration) *NetResolver {
+func NewNetResolver(resolver networkenrich.Resolver, timeout time.Duration) *NetResolver {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
@@ -238,10 +244,14 @@ func (r *NetResolver) Resolve(ctx context.Context, hosts []string, concurrency i
 				return
 			}
 			defer func() { <-sem }()
-			lookupCtx, cancel := context.WithTimeout(ctx, r.timeout)
-			defer cancel()
-			addresses, ipErr := r.resolver.LookupIPAddr(lookupCtx, host)
-			cname, cnameErr := r.resolver.LookupCNAME(lookupCtx, host)
+			// Each lookup has its own budget: a slow address lookup used to leave
+			// the alias lookup almost no time.
+			ipCtx, cancelIP := context.WithTimeout(ctx, r.timeout)
+			addresses, ipErr := r.resolver.LookupIPAddr(ipCtx, host)
+			cancelIP()
+			cnameCtx, cancelCNAME := context.WithTimeout(ctx, r.timeout)
+			cname, cnameErr := r.resolver.LookupCNAME(cnameCtx, host)
+			cancelCNAME()
 			item := DNSResult{Host: host, IPs: []string{}, CNAMEs: []string{}}
 			for _, address := range addresses {
 				item.IPs = append(item.IPs, address.IP.String())

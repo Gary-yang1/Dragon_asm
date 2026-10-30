@@ -16,6 +16,7 @@ import (
 	"baiyan/internal/capability"
 	"baiyan/internal/engine"
 	"baiyan/internal/job"
+	"baiyan/internal/networkenrich"
 	"baiyan/internal/toolrunner"
 )
 
@@ -66,7 +67,15 @@ func main() {
 		}
 		providers = append(providers, provider)
 	}
-	var resolver capability.Resolver = capability.NewNetResolver(nil, 5*time.Second)
+	// BAIYAN_DNS_RESOLVERS lists upstream DNS servers ("ip" or "ip:port",
+	// comma separated) queried directly with failover. Unset, lookups use the
+	// system resolver and retry a failed lookup once.
+	dnsResolver, err := networkenrich.NewFailoverResolver(strings.Split(os.Getenv("BAIYAN_DNS_RESOLVERS"), ","))
+	if err != nil {
+		logger.Error("invalid DNS resolver configuration", "error", err)
+		os.Exit(1)
+	}
+	var resolver capability.Resolver = capability.NewNetResolver(dnsResolver, capability.DNSLookupTimeout)
 	if resolverURL := os.Getenv("BAIYAN_DNS_PROVIDER_URL"); resolverURL != "" {
 		resolver, err = capability.NewHTTPResolver(
 			resolverURL, os.Getenv("BAIYAN_DNS_PROVIDER_TOKEN"), &http.Client{Timeout: 10 * time.Second},
@@ -110,6 +119,7 @@ func main() {
 		os.Exit(1)
 	}
 	configurationManager.WithTools(toolRegistry)
+	configurationManager.WithDNSResolver(dnsResolver)
 	jobs := job.NewService(store, configurationManager, envIntOr("BAIYAN_QUEUE_SIZE", 100))
 	if err := jobs.Start(envIntOr("BAIYAN_WORKERS", 2)); err != nil {
 		logger.Error("job service failed to start", "error", err)
@@ -137,6 +147,7 @@ func main() {
 		os.Exit(1)
 	}
 	handler.WithConfigurations(configurationManager)
+	handler.WithNetworkResolver(dnsResolver)
 	server := &http.Server{
 		Addr: envOr("BAIYAN_LISTEN_ADDR", ":9090"), Handler: handler.Routes(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
@@ -151,7 +162,7 @@ func main() {
 		_ = server.Shutdown(ctx)
 	}()
 	logger.Info("baiyan engine starting", "listen", server.Addr,
-		"providers", len(providers), "job_types", router.SupportedJobTypes(),
+		"providers", len(providers), "job_types", router.SupportedJobTypes(), "dns_upstreams", dnsResolver.Upstreams(),
 		"tools", toolRegistry.Names())
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("engine server failed", "error", err)
